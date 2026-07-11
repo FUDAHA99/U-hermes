@@ -3,249 +3,467 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>U-Hermes — U盘里的 AI 智能体</title>
+<title>U-Hermes — 插上U盘，AI 就绪</title>
 <meta name="description" content="U-Hermes：插上U盘，双击启动，浏览器里直接和 AI 对话。免安装、免注册，数据全在自己手里。">
 <style>
+    :root {
+        --bg: #070b14;
+        --ink: #eaf2fb;
+        --muted: #8fa3bb;
+        --dim: #5b6c82;
+        --cyan: #38bdf8;
+        --cyan-soft: #7dd3fc;
+        --violet: #8b5cf6;
+        --amber: #fbbf24;
+        --card: rgba(15, 23, 42, 0.72);
+        --line: rgba(125, 211, 252, 0.14);
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
         font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-        background: linear-gradient(160deg, #0f172a 0%, #1e293b 60%, #0f172a 100%);
-        color: #e2e8f0;
-        line-height: 1.7;
-        min-height: 100vh;
+        background: var(--bg);
+        color: var(--ink);
+        line-height: 1.75;
+        overflow-x: hidden;
     }
-    .container { max-width: 900px; margin: 0 auto; padding: 0 20px; }
 
-    /* Hero */
-    .hero { text-align: center; padding: 72px 0 48px; }
-    .hero .logo { font-size: 3.2em; }
+    /* ---------- 氛围背景 ---------- */
+    .sky {
+        position: fixed; inset: 0; z-index: -2; pointer-events: none;
+        background:
+            radial-gradient(900px 480px at 18% -8%, rgba(56, 189, 248, 0.16), transparent 60%),
+            radial-gradient(800px 520px at 85% 8%, rgba(139, 92, 246, 0.14), transparent 62%),
+            radial-gradient(700px 600px at 50% 115%, rgba(56, 189, 248, 0.10), transparent 65%),
+            var(--bg);
+    }
+    .grid-lines {
+        position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: 0.5;
+        background-image:
+            linear-gradient(rgba(125, 211, 252, 0.045) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(125, 211, 252, 0.045) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: radial-gradient(ellipse 90% 55% at 50% 0%, #000 30%, transparent 78%);
+        -webkit-mask-image: radial-gradient(ellipse 90% 55% at 50% 0%, #000 30%, transparent 78%);
+    }
+
+    .container { max-width: 1020px; margin: 0 auto; padding: 0 24px; }
+
+    /* ---------- 入场动画 ---------- */
+    @keyframes rise { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: none; } }
+    .rise { animation: rise 0.8s cubic-bezier(0.2, 0.7, 0.3, 1) both; }
+    .d1 { animation-delay: 0.08s; } .d2 { animation-delay: 0.18s; } .d3 { animation-delay: 0.3s; }
+    .d4 { animation-delay: 0.42s; } .d5 { animation-delay: 0.56s; }
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation-duration: 0.01ms !important; animation-delay: 0s !important; transition: none !important; }
+    }
+
+    /* ---------- Hero ---------- */
+    .hero { text-align: center; padding: 92px 0 30px; position: relative; }
+    .pill {
+        display: inline-flex; align-items: center; gap: 8px;
+        padding: 7px 18px; border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(56, 189, 248, 0.07);
+        color: var(--cyan-soft); font-size: 0.86em; letter-spacing: 0.04em;
+    }
+    .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 10px #34d399; }
     .hero h1 {
-        font-size: 2.6em;
-        margin: 8px 0 4px;
-        background: linear-gradient(135deg, #7dd3fc, #38bdf8, #818cf8);
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
+        font-size: clamp(2.6em, 7vw, 4.4em);
+        font-weight: 800; letter-spacing: 0.01em;
+        line-height: 1.18; margin: 26px 0 6px;
     }
-    .hero .tagline { font-size: 1.25em; color: #94a3b8; margin-bottom: 8px; }
-    .hero .sub { color: #64748b; font-size: 0.95em; }
+    .hero h1 .grad {
+        background: linear-gradient(100deg, #7dd3fc 5%, #38bdf8 40%, #a78bfa 80%);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .hero .tagline { font-size: clamp(1.05em, 2.6vw, 1.3em); color: var(--muted); margin-bottom: 6px; }
+    .hero .traits { color: var(--dim); font-size: 0.95em; letter-spacing: 0.06em; }
+    .hero .traits b { color: var(--cyan-soft); font-weight: 600; }
 
-    /* Download buttons */
-    .downloads { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin: 32px 0 10px; }
+    /* ---------- 下载按钮 ---------- */
+    .downloads { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin: 38px 0 12px; }
     .btn {
-        display: inline-block;
-        padding: 14px 30px;
-        border-radius: 10px;
-        text-decoration: none;
-        font-weight: 600;
-        font-size: 1.05em;
-        transition: transform 0.1s, opacity 0.2s;
-    }
-    .btn:hover { opacity: 0.88; }
-    .btn:active { transform: scale(0.97); }
-    .btn-win { background: linear-gradient(135deg, #7dd3fc, #38bdf8); color: #0f172a; }
-    .btn-mac { background: transparent; color: #7dd3fc; border: 1.5px solid #38bdf8; }
-    .mirror-note { text-align: center; color: #64748b; font-size: 0.9em; }
-    .mirror-note a { color: #7dd3fc; text-decoration: none; }
-    .mirror-links { text-align: center; margin-top: 6px; font-size: 0.95em; }
-    .mirror-links a { color: #7dd3fc; text-decoration: none; margin: 0 10px; }
-    .mirror-links a:hover { text-decoration: underline; }
-
-    /* Sections */
-    section { padding: 40px 0; }
-    section h2 { font-size: 1.7em; color: #f1f5f9; text-align: center; margin-bottom: 28px; }
-
-    /* Steps */
-    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
-    .step {
-        background: rgba(30, 41, 59, 0.7);
-        border: 1px solid rgba(125, 211, 252, 0.15);
-        border-radius: 14px;
-        padding: 26px 22px;
-        text-align: center;
-    }
-    .step .num {
-        display: inline-block;
-        width: 40px; height: 40px; line-height: 40px;
-        border-radius: 50%;
-        background: linear-gradient(135deg, #7dd3fc, #38bdf8);
-        color: #0f172a;
-        font-weight: 700;
-        font-size: 1.2em;
-        margin-bottom: 12px;
-    }
-    .step h3 { color: #f1f5f9; margin-bottom: 6px; font-size: 1.1em; }
-    .step p { color: #94a3b8; font-size: 0.92em; }
-
-    /* Features */
-    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-    .feature {
-        background: rgba(30, 41, 59, 0.5);
-        border: 1px solid rgba(125, 211, 252, 0.1);
-        border-radius: 12px;
-        padding: 20px;
-    }
-    .feature .icon { font-size: 1.6em; }
-    .feature h3 { color: #e2e8f0; font-size: 1.02em; margin: 6px 0 4px; }
-    .feature p { color: #8ea0b5; font-size: 0.9em; }
-
-    /* FAQ */
-    .faq-item {
-        background: rgba(30, 41, 59, 0.5);
-        border: 1px solid rgba(125, 211, 252, 0.1);
-        border-radius: 12px;
-        margin-bottom: 12px;
+        position: relative; display: inline-flex; align-items: center; gap: 10px;
+        padding: 15px 34px; border-radius: 14px;
+        text-decoration: none; font-weight: 700; font-size: 1.06em;
+        transition: transform 0.15s, box-shadow 0.2s, opacity 0.2s;
         overflow: hidden;
     }
+    .btn svg { width: 20px; height: 20px; flex: none; }
+    .btn-win {
+        background: linear-gradient(120deg, #67e8f9, #38bdf8 55%, #60a5fa);
+        color: #051220;
+        box-shadow: 0 8px 32px rgba(56, 189, 248, 0.35), inset 0 1px 0 rgba(255,255,255,0.45);
+    }
+    .btn-win::after {
+        content: ""; position: absolute; top: 0; left: -80%;
+        width: 50%; height: 100%;
+        background: linear-gradient(105deg, transparent, rgba(255,255,255,0.55), transparent);
+        transform: skewX(-20deg);
+        animation: sheen 3.6s ease-in-out 1.2s infinite;
+    }
+    @keyframes sheen { 0% { left: -80%; } 45%, 100% { left: 130%; } }
+    .btn-win:hover { transform: translateY(-2px); box-shadow: 0 14px 44px rgba(56, 189, 248, 0.5), inset 0 1px 0 rgba(255,255,255,0.45); }
+    .btn-mac {
+        background: rgba(15, 23, 42, 0.6); color: var(--cyan-soft);
+        border: 1px solid rgba(125, 211, 252, 0.35);
+        backdrop-filter: blur(6px);
+    }
+    .btn-mac:hover { transform: translateY(-2px); border-color: var(--cyan-soft); box-shadow: 0 10px 30px rgba(56, 189, 248, 0.18); }
+    .btn:active { transform: scale(0.97); }
+    .under-btn { color: var(--dim); font-size: 0.88em; }
+    .under-btn a { color: var(--cyan-soft); text-decoration: none; }
+    .under-btn a:hover { text-decoration: underline; }
+    .under-btn code {
+        background: rgba(56,189,248,0.1); border: 1px solid var(--line);
+        border-radius: 6px; padding: 1px 7px; font-size: 0.92em; color: var(--cyan-soft);
+    }
+    .mirror-line { margin-top: 4px; }
+
+    /* ---------- 模型条 ---------- */
+    .models { margin: 34px auto 0; color: var(--dim); font-size: 0.88em; letter-spacing: 0.05em; }
+    .models .names { color: var(--muted); font-weight: 600; }
+    .models .names span { padding: 0 10px; white-space: nowrap; }
+    .models .names span + span { border-left: 1px solid rgba(125,211,252,0.18); }
+
+    /* ---------- 聊天演示窗 ---------- */
+    .demo-wrap { padding: 58px 0 10px; display: flex; justify-content: center; }
+    .demo {
+        width: min(660px, 100%);
+        border-radius: 20px; overflow: hidden;
+        border: 1px solid rgba(125, 211, 252, 0.22);
+        background: linear-gradient(180deg, rgba(17, 27, 46, 0.92), rgba(10, 16, 30, 0.95));
+        box-shadow:
+            0 30px 80px rgba(2, 8, 20, 0.7),
+            0 0 0 1px rgba(2, 8, 20, 0.4),
+            0 0 90px rgba(56, 189, 248, 0.12);
+        position: relative;
+    }
+    .demo::before {
+        content: ""; position: absolute; inset: -1px; border-radius: 20px; pointer-events: none;
+        background: linear-gradient(120deg, rgba(56,189,248,0.25), transparent 30%, transparent 70%, rgba(139,92,246,0.25));
+        -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+        -webkit-mask-composite: xor; mask-composite: exclude;
+        padding: 1px;
+    }
+    .demo-bar {
+        display: flex; align-items: center; gap: 8px;
+        padding: 13px 18px; border-bottom: 1px solid rgba(125, 211, 252, 0.1);
+        background: rgba(9, 14, 26, 0.6);
+    }
+    .demo-bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+    .demo-bar i:nth-child(1) { background: #f87171; } .demo-bar i:nth-child(2) { background: #fbbf24; } .demo-bar i:nth-child(3) { background: #34d399; }
+    .demo-bar .addr {
+        margin-left: 12px; flex: 1; text-align: center;
+        font-size: 0.8em; color: var(--dim);
+        background: rgba(125, 211, 252, 0.06); border: 1px solid rgba(125, 211, 252, 0.1);
+        border-radius: 8px; padding: 3px 12px;
+        max-width: 320px;
+    }
+    .demo-body { padding: 26px 24px 30px; display: flex; flex-direction: column; gap: 16px; min-height: 250px; }
+    .msg { max-width: 78%; padding: 12px 18px; border-radius: 16px; font-size: 0.95em; opacity: 0; }
+    .msg.user {
+        align-self: flex-end;
+        background: linear-gradient(120deg, #2563eb, #38bdf8);
+        color: #f0f9ff; border-bottom-right-radius: 5px;
+        animation: rise 0.55s ease-out 0.9s both;
+    }
+    .msg.ai {
+        align-self: flex-start;
+        background: rgba(30, 41, 59, 0.85);
+        border: 1px solid rgba(125, 211, 252, 0.14);
+        color: #dbeafe; border-bottom-left-radius: 5px;
+    }
+    .msg.ai .who { display: block; font-size: 0.78em; color: var(--cyan-soft); margin-bottom: 3px; letter-spacing: 0.05em; }
+    .msg.ai.a1 { animation: rise 0.55s ease-out 1.7s both; }
+    .msg.ai.a2 { animation: rise 0.55s ease-out 2.6s both; }
+    .caret {
+        display: inline-block; width: 2px; height: 1em; background: var(--cyan-soft);
+        vertical-align: -0.15em; margin-left: 2px;
+        animation: blink 1s step-end 3.2s infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    .demo-cap { text-align: center; color: var(--dim); font-size: 0.88em; margin-top: 18px; }
+
+    /* ---------- 通用区块 ---------- */
+    section { padding: 74px 0 10px; }
+    .sec-head { text-align: center; margin-bottom: 44px; }
+    .sec-head .kicker {
+        color: var(--cyan); font-size: 0.85em; font-weight: 700;
+        letter-spacing: 0.35em; text-transform: uppercase;
+    }
+    .sec-head h2 { font-size: clamp(1.6em, 4vw, 2.2em); font-weight: 800; margin-top: 8px; }
+
+    /* ---------- 三步 ---------- */
+    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .step {
+        position: relative;
+        background: var(--card); border: 1px solid var(--line);
+        border-radius: 18px; padding: 30px 24px 26px;
+        transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+    .step:hover { transform: translateY(-4px); border-color: rgba(125, 211, 252, 0.4); box-shadow: 0 18px 44px rgba(2, 8, 20, 0.55); }
+    .step .icon { font-size: 1.9em; }
+    .step .n {
+        position: absolute; top: 18px; right: 22px;
+        font-size: 2.6em; font-weight: 800; line-height: 1;
+        color: transparent;
+        -webkit-text-stroke: 1.5px rgba(125, 211, 252, 0.28);
+    }
+    .step h3 { margin: 12px 0 4px; font-size: 1.12em; }
+    .step p { color: var(--muted); font-size: 0.92em; }
+    .step p b { color: var(--cyan-soft); font-weight: 600; }
+
+    /* ---------- 特性 ---------- */
+    .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .feature {
+        background: var(--card); border: 1px solid var(--line);
+        border-radius: 18px; padding: 26px 24px;
+        transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+    .feature:hover { transform: translateY(-4px); border-color: rgba(125, 211, 252, 0.4); box-shadow: 0 18px 44px rgba(2, 8, 20, 0.55); }
+    .feature .icon {
+        width: 46px; height: 46px; border-radius: 13px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.35em;
+        background: linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(139, 92, 246, 0.18));
+        border: 1px solid rgba(125, 211, 252, 0.22);
+        box-shadow: 0 0 24px rgba(56, 189, 248, 0.12);
+    }
+    .feature h3 { margin: 14px 0 4px; font-size: 1.05em; }
+    .feature p { color: var(--muted); font-size: 0.9em; }
+
+    /* ---------- FAQ ---------- */
+    .faq { max-width: 760px; margin: 0 auto; }
+    .faq-item {
+        background: var(--card); border: 1px solid var(--line);
+        border-radius: 14px; margin-bottom: 12px; overflow: hidden;
+        transition: border-color 0.2s;
+    }
+    .faq-item[open] { border-color: rgba(125, 211, 252, 0.4); }
     .faq-item summary {
-        padding: 16px 20px;
-        cursor: pointer;
-        font-weight: 600;
-        color: #e2e8f0;
-        list-style: none;
+        padding: 17px 22px; cursor: pointer; font-weight: 600;
+        list-style: none; display: flex; align-items: center; gap: 12px;
+        color: var(--ink);
     }
-    .faq-item summary::before { content: "▸ "; color: #7dd3fc; }
-    .faq-item[open] summary::before { content: "▾ "; }
-    .faq-item .answer { padding: 0 20px 16px 38px; color: #94a3b8; font-size: 0.94em; }
+    .faq-item summary::-webkit-details-marker { display: none; }
+    .faq-item summary::before {
+        content: "+"; color: var(--cyan); font-weight: 700; font-size: 1.2em;
+        width: 20px; flex: none; transition: transform 0.2s;
+    }
+    .faq-item[open] summary::before { transform: rotate(45deg); }
+    .faq-item .answer { padding: 0 22px 18px 54px; color: var(--muted); font-size: 0.93em; }
+    .faq-item .answer a { color: var(--cyan-soft); }
 
-    /* Footer */
-    footer {
+    /* ---------- 底部 CTA ---------- */
+    .cta {
         text-align: center;
-        padding: 36px 0 44px;
-        color: #64748b;
-        font-size: 0.9em;
-        border-top: 1px solid rgba(125, 211, 252, 0.08);
-        margin-top: 20px;
+        margin: 84px 0 0;
+        padding: 64px 24px;
+        border-radius: 26px;
+        border: 1px solid rgba(125, 211, 252, 0.2);
+        background:
+            radial-gradient(600px 260px at 50% -30%, rgba(56, 189, 248, 0.22), transparent 70%),
+            linear-gradient(180deg, rgba(17, 27, 46, 0.85), rgba(10, 16, 30, 0.9));
     }
-    footer a { color: #7dd3fc; text-decoration: none; }
+    .cta h2 { font-size: clamp(1.5em, 3.6vw, 2em); font-weight: 800; }
+    .cta p { color: var(--muted); margin: 8px 0 26px; }
 
-    @media (max-width: 600px) {
-        .hero { padding: 48px 0 32px; }
-        .hero h1 { font-size: 2em; }
+    footer {
+        text-align: center; padding: 44px 0 52px;
+        color: var(--dim); font-size: 0.9em;
+    }
+    footer a { color: var(--cyan-soft); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+    footer .links { display: flex; gap: 22px; justify-content: center; margin-bottom: 10px; }
+
+    @media (max-width: 760px) {
+        .hero { padding: 64px 0 20px; }
+        .steps, .features { grid-template-columns: 1fr; }
+        .demo-body { min-height: 0; }
+        .msg { max-width: 92%; }
     }
 </style>
 </head>
 <body>
 
+<div class="sky"></div>
+<div class="grid-lines"></div>
+
 <div class="container">
 
-    <div class="hero">
-        <div class="logo">🔌🤖</div>
-        <h1>U-Hermes</h1>
-        <p class="tagline">U 盘里的 AI 智能体 — 插上就能用</p>
-        <p class="sub">免安装 · 免注册 · 数据全在自己手里 · 拔了U盘就带走</p>
+    <!-- ============ Hero ============ -->
+    <header class="hero">
+        <div class="pill rise"><span class="dot"></span>开源 · MIT 协议 · v<span id="ver">0.3.5</span> 已发布</div>
+        <h1 class="rise d1">插上U盘<br><span class="grad">AI 就绪</span></h1>
+        <p class="tagline rise d2">你的私人 AI 智能体，装在口袋里随身带走</p>
+        <p class="traits rise d2"><b>免安装</b> · <b>免注册</b> · <b>数据不出U盘</b> · 拔下即走</p>
 
-        <div class="downloads">
-            <a class="btn btn-win" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-win">⬇ Windows 版下载</a>
-            <a class="btn btn-mac" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-mac">⬇ Mac 版下载 (Apple 芯片)</a>
+        <div class="downloads rise d3">
+            <a class="btn btn-win" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-win">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5l7.5-1v7H3v-6zm0 13v-6h7.5v7L3 18.5zM11.5 4.3L21 3v8.5h-9.5V4.3zm0 15.4v-7.2H21V21l-9.5-1.3z"/></svg>
+                Windows 版下载
+            </a>
+            <a class="btn btn-mac" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-mac">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.05 12.54c-.03-2.6 2.13-3.85 2.22-3.91-1.21-1.77-3.09-2.01-3.76-2.04-1.6-.16-3.12.94-3.93.94-.81 0-2.06-.92-3.39-.89-1.74.03-3.35 1.01-4.25 2.57-1.81 3.14-.46 7.79 1.3 10.34.86 1.25 1.89 2.65 3.24 2.6 1.3-.05 1.79-.84 3.36-.84 1.57 0 2.01.84 3.39.81 1.4-.02 2.29-1.27 3.15-2.53.99-1.45 1.4-2.85 1.42-2.92-.03-.01-2.72-1.04-2.75-4.13zM14.46 4.9c.72-.87 1.2-2.08 1.07-3.29-1.03.04-2.28.69-3.02 1.56-.66.77-1.24 2-1.09 3.18 1.15.09 2.32-.58 3.04-1.45z"/></svg>
+                Mac 版下载
+            </a>
         </div>
-        <div class="mirror-links" id="mirror-links" style="display:none">
-            国内加速：<a href="#" id="mirror-win">Windows 加速下载</a>｜<a href="#" id="mirror-mac">Mac 加速下载</a>
-        </div>
-        <p class="mirror-note" style="margin-top:10px">
-            所有版本见 <a href="https://github.com/FUDAHA99/U-hermes/releases">GitHub Releases</a>
-            ｜下载慢？在下载链接前加上 <code>https://ghfast.top/</code> 即可加速
+        <p class="under-btn rise d4">所有版本见 <a href="https://github.com/FUDAHA99/U-hermes/releases">GitHub Releases</a></p>
+        <p class="under-btn mirror-line rise d4" id="mirror-links" style="display:none">
+            国内加速：<a href="#" id="mirror-win">Windows 加速下载</a> ｜ <a href="#" id="mirror-mac">Mac 加速下载</a>
         </p>
-    </div>
+        <p class="under-btn mirror-line rise d4">下载慢？任意链接前加 <code>https://ghfast.top/</code> 即可加速</p>
 
+        <div class="models rise d5">
+            国内模型开箱即用，无需科学上网
+            <div class="names">
+                <span>DeepSeek</span><span>Kimi</span><span>通义千问</span><span>智谱 GLM</span><span>MiniMax</span><span>豆包</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ============ 产品演示 ============ -->
+    <div class="demo-wrap">
+        <div class="demo rise d5">
+            <div class="demo-bar"><i></i><i></i><i></i><span class="addr">127.0.0.1:8648 — U-Hermes</span></div>
+            <div class="demo-body">
+                <div class="msg user">帮我把这个文件夹里的发票整理成 Excel 报销表</div>
+                <div class="msg ai a1"><span class="who">U-HERMES</span>好的，我扫描了 23 张发票，正在识别金额和日期…</div>
+                <div class="msg ai a2"><span class="who">U-HERMES</span>已生成 报销明细.xlsx：共 23 笔，合计 ¥4,867.50。我还发现有 2 张发票重复，已标黄提醒 ✅<span class="caret"></span></div>
+            </div>
+        </div>
+    </div>
+    <p class="demo-cap">双击启动后，浏览器自动打开 — 这就是你和它工作的样子</p>
+
+    <!-- ============ 三步 ============ -->
     <section>
-        <h2>三步开始使用</h2>
+        <div class="sec-head">
+            <div class="kicker">Quick Start</div>
+            <h2>三步，拥有自己的 AI</h2>
+        </div>
         <div class="steps">
             <div class="step">
-                <div class="num">1</div>
+                <span class="n">01</span>
+                <div class="icon">📦</div>
                 <h3>下载解压</h3>
-                <p>把压缩包解压到 U 盘或电脑任意文件夹，无需安装任何东西</p>
+                <p>解压到 U 盘或任意文件夹<br>不装软件、不改系统、<b>零依赖</b></p>
             </div>
             <div class="step">
-                <div class="num">2</div>
+                <span class="n">02</span>
+                <div class="icon">⚡</div>
                 <h3>双击启动</h3>
-                <p>运行 Windows-Start.bat，首次会自动打开配置页，选模型、填密钥、点"测试连接"确认可用</p>
+                <p>运行 Windows-Start.bat<br>选模型、填密钥、<b>一键测试连接</b></p>
             </div>
             <div class="step">
-                <div class="num">3</div>
+                <span class="n">03</span>
+                <div class="icon">💬</div>
                 <h3>开始对话</h3>
-                <p>浏览器自动打开聊天界面，直接和你的 AI 智能体对话</p>
+                <p>浏览器自动打开聊天界面<br>写文案、整理文件、<b>自动化任务</b></p>
             </div>
         </div>
     </section>
 
+    <!-- ============ 特性 ============ -->
     <section>
-        <h2>为什么选 U-Hermes</h2>
+        <div class="sec-head">
+            <div class="kicker">Why U-Hermes</div>
+            <h2>为什么选它</h2>
+        </div>
         <div class="features">
             <div class="feature">
                 <div class="icon">🔒</div>
-                <h3>数据在自己手里</h3>
-                <p>对话记录、记忆、技能全部存在你的 U 盘里，不上传任何服务器</p>
+                <h3>数据不出U盘</h3>
+                <p>对话、记忆、技能全部存在你的U盘里，不上传任何服务器</p>
             </div>
             <div class="feature">
                 <div class="icon">🧠</div>
                 <h3>越用越懂你</h3>
-                <p>基于 Hermes Agent 引擎，自动从使用经验中总结技能、积累记忆</p>
-            </div>
-            <div class="feature">
-                <div class="icon">🇨🇳</div>
-                <h3>国内模型友好</h3>
-                <p>DeepSeek、Kimi、通义、智谱等国内模型开箱即用，无需科学上网</p>
+                <p>基于 Hermes Agent 引擎，自动从经验中总结技能、积累记忆</p>
             </div>
             <div class="feature">
                 <div class="icon">🔁</div>
                 <h3>故障自动切换</h3>
-                <p>主模型超时或额度不足时自动切换备用模型，对话不中断</p>
+                <p>主模型超时或欠费时自动切换备用模型，对话不中断</p>
             </div>
             <div class="feature">
                 <div class="icon">🩺</div>
                 <h3>一键诊断</h3>
-                <p>遇到问题不用猜：菜单里一键诊断，用人话告诉你哪里出了问题、怎么解决</p>
+                <p>出问题不用猜，诊断工具用人话告诉你原因和解决办法</p>
+            </div>
+            <div class="feature">
+                <div class="icon">🇨🇳</div>
+                <h3>为国内优化</h3>
+                <p>国产模型开箱即用，下载走国内镜像，内置中文创作技能</p>
             </div>
             <div class="feature">
                 <div class="icon">💬</div>
                 <h3>接入聊天平台</h3>
-                <p>可接入 QQ、微信、钉钉、飞书、Telegram、Discord 等消息平台</p>
+                <p>可接入 QQ、微信、钉钉、飞书、Telegram、Discord</p>
             </div>
         </div>
     </section>
 
+    <!-- ============ FAQ ============ -->
     <section>
-        <h2>常见问题</h2>
-        <details class="faq-item">
-            <summary>需要付费吗？</summary>
-            <div class="answer">U-Hermes 本身完全免费开源（MIT 协议）。你只需要一个 AI 模型的 API 密钥——国内模型（如 DeepSeek）按量计费，日常使用一个月通常只要几块钱。</div>
-        </details>
-        <details class="faq-item">
-            <summary>API 密钥去哪里申请？</summary>
-            <div class="answer">配置页里每个模型都有申请入口提示。以 DeepSeek 为例：打开 platform.deepseek.com → 注册 → 充值几块钱 → 创建 API Key → 复制到 U-Hermes 配置页，点"测试连接"验证后保存即可。</div>
-        </details>
-        <details class="faq-item">
-            <summary>发消息 AI 不回复怎么办？</summary>
-            <div class="answer">运行 Windows-Menu.bat 选择"一键诊断"，它会自动检查配置、网络和 API 状态，并用人话告诉你问题和解决办法。最常见的原因是 API 密钥过期或余额不足。</div>
-        </details>
-        <details class="faq-item">
-            <summary>换一台电脑还能用吗？</summary>
-            <div class="answer">可以。把 U 盘插到新电脑上直接运行启动脚本即可，程序会自动修复路径。你的配置、记忆和对话记录都在 U 盘里跟着走。</div>
-        </details>
-        <details class="faq-item">
-            <summary>Windows 提示"已保护你的电脑"？</summary>
-            <div class="answer">这是 Windows 对未签名脚本的默认提示。点"更多信息"→"仍要运行"即可。项目完全开源，代码可在 GitHub 查验。</div>
-        </details>
-        <details class="faq-item">
-            <summary>如何更新到新版本？</summary>
-            <div class="answer">小更新：运行 Windows-Menu.bat 选择"更新"。大版本：下载新的压缩包解压，把旧目录里的 data 文件夹复制过去，配置和记忆就都保留了。</div>
-        </details>
+        <div class="sec-head">
+            <div class="kicker">FAQ</div>
+            <h2>常见问题</h2>
+        </div>
+        <div class="faq">
+            <details class="faq-item">
+                <summary>需要付费吗？</summary>
+                <div class="answer">U-Hermes 完全免费开源（MIT 协议）。你只需要一个 AI 模型的 API 密钥——国内模型（如 DeepSeek）按量计费，日常使用一个月通常只要几块钱。</div>
+            </details>
+            <details class="faq-item">
+                <summary>API 密钥去哪里申请？</summary>
+                <div class="answer">配置页里每个模型都有申请入口提示。以 DeepSeek 为例：打开 platform.deepseek.com → 注册 → 充值几块钱 → 创建 API Key → 粘贴到配置页，点"测试连接"验证后保存即可。</div>
+            </details>
+            <details class="faq-item">
+                <summary>发消息 AI 不回复怎么办？</summary>
+                <div class="answer">运行 Windows-Menu.bat 选"一键诊断"，它会自动检查配置、网络和 API 状态，用人话告诉你问题和解决办法。最常见原因是 API 密钥过期或余额不足。</div>
+            </details>
+            <details class="faq-item">
+                <summary>换一台电脑还能用吗？</summary>
+                <div class="answer">可以。U 盘插到新电脑直接运行启动脚本，程序会自动修复路径。配置、记忆、对话记录都在 U 盘里跟着走。</div>
+            </details>
+            <details class="faq-item">
+                <summary>Windows 提示"已保护你的电脑"？</summary>
+                <div class="answer">这是 Windows 对未签名脚本的默认提示。点"更多信息"→"仍要运行"即可。项目完全开源，代码可在 <a href="https://github.com/FUDAHA99/U-hermes">GitHub</a> 查验。</div>
+            </details>
+            <details class="faq-item">
+                <summary>如何更新到新版本？</summary>
+                <div class="answer">小更新：运行 Windows-Menu.bat 选"更新"。大版本：下载新压缩包解压，把旧目录的 data 文件夹复制过去，配置和记忆全保留。</div>
+            </details>
+        </div>
     </section>
 
+    <!-- ============ CTA ============ -->
+    <div class="cta">
+        <h2>把 AI 装进口袋，现在开始</h2>
+        <p>一个 U 盘的空间，一个越用越懂你的智能体</p>
+        <div class="downloads" style="margin: 0;">
+            <a class="btn btn-win" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-win2">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5l7.5-1v7H3v-6zm0 13v-6h7.5v7L3 18.5zM11.5 4.3L21 3v8.5h-9.5V4.3zm0 15.4v-7.2H21V21l-9.5-1.3z"/></svg>
+                免费下载
+            </a>
+        </div>
+    </div>
+
     <footer>
-        <p>
-            <a href="https://github.com/FUDAHA99/U-hermes">GitHub</a> ·
-            <a href="https://github.com/FUDAHA99/U-hermes/releases">下载</a> ·
+        <div class="links">
+            <a href="https://github.com/FUDAHA99/U-hermes">GitHub</a>
+            <a href="https://github.com/FUDAHA99/U-hermes/releases">下载</a>
             <a href="https://github.com/FUDAHA99/U-hermes/issues">反馈问题</a>
-        </p>
-        <p style="margin-top:8px">基于 <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> (Nous Research) 驱动 · MIT 开源协议</p>
+        </div>
+        <p>基于 <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> (Nous Research) 驱动 · MIT 开源协议</p>
     </footer>
 
 </div>
 
 <script>
-// 尝试获取最新版本的直链和加速链接；失败则保持指向 releases/latest
+// 获取最新版本直链和加速链接；失败则保持指向 releases/latest
 (async function () {
     try {
         const resp = await fetch('https://api.github.com/repos/FUDAHA99/U-hermes/releases/latest');
@@ -253,14 +471,14 @@
         const rel = await resp.json();
         const win = (rel.assets || []).find(a => a.name.includes('windows'));
         const mac = (rel.assets || []).find(a => a.name.includes('mac'));
+        if (rel.tag_name) document.getElementById('ver').textContent = rel.tag_name.replace(/^v/, '');
         if (win) {
             document.getElementById('dl-win').href = win.browser_download_url;
-            document.getElementById('dl-win').textContent = '⬇ Windows 版下载 (' + rel.tag_name + ')';
+            document.getElementById('dl-win2').href = win.browser_download_url;
             document.getElementById('mirror-win').href = 'https://ghfast.top/' + win.browser_download_url;
         }
         if (mac) {
             document.getElementById('dl-mac').href = mac.browser_download_url;
-            document.getElementById('dl-mac').textContent = '⬇ Mac 版下载 (' + rel.tag_name + ')';
             document.getElementById('mirror-mac').href = 'https://ghfast.top/' + mac.browser_download_url;
         }
         if (win || mac) document.getElementById('mirror-links').style.display = 'block';
