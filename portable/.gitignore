@@ -1,0 +1,12 @@
+# Runtime dependencies (downloaded by setup)
+runtime/
+hermes/
+.uv-cache/
+
+# User data (stays on USB, not in git)
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

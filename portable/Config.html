@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>U-Hermes - 配置中心</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 2.2em;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+        .header p {
+            color: #a0a0a0;
+            font-size: 0.95em;
+        }
+        .card {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+        .card h2 {
+            font-size: 1.1em;
+            color: #7dd3fc;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .provider-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .provider-btn {
+            padding: 12px 16px;
+            border: 2px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.03);
+            color: #e0e0e0;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.2s;
+            font-size: 0.9em;
+        }
+        .provider-btn:hover {
+            border-color: #7dd3fc;
+            background: rgba(125,211,252,0.1);
+        }
+        .provider-btn.selected {
+            border-color: #7dd3fc;
+            background: rgba(125,211,252,0.15);
+            color: #fff;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            color: #a0c4ff;
+            font-size: 0.85em;
+            font-weight: 500;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-size: 0.95em;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus, .form-group select:focus {
+            border-color: #7dd3fc;
+        }
+        .form-group input::placeholder {
+            color: #666;
+        }
+        .form-group .hint {
+            margin-top: 4px;
+            font-size: 0.8em;
+            color: #777;
+        }
+        .btn-primary {
+            display: block;
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #7dd3fc, #38bdf8);
+            color: #0f172a;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.1s, opacity 0.2s;
+        }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-primary:active { transform: scale(0.98); }
+        .btn-secondary {
+            display: block;
+            width: 100%;
+            padding: 14px;
+            margin-bottom: 10px;
+            border: 1px solid #38bdf8;
+            border-radius: 8px;
+            background: transparent;
+            color: #7dd3fc;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .btn-secondary:hover { opacity: 0.8; }
+        .btn-secondary:disabled { opacity: 0.5; cursor: wait; }
+        .status.info {
+            display: block;
+            background: rgba(125,211,252,0.12);
+            color: #7dd3fc;
+            border: 1px solid rgba(125,211,252,0.3);
+        }
+        .status {
+            text-align: center;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 16px;
+            display: none;
+        }
+        .status.success {
+            display: block;
+            background: rgba(34,197,94,0.15);
+            color: #4ade80;
+            border: 1px solid rgba(34,197,94,0.3);
+        }
+        .status.error {
+            display: block;
+            background: rgba(239,68,68,0.15);
+            color: #f87171;
+            border: 1px solid rgba(239,68,68,0.3);
+        }
+        .model-info {
+            display: none;
+            margin-top: 12px;
+            padding: 12px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            font-size: 0.85em;
+            color: #a0a0a0;
+        }
+        .platform-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .platform-item {
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            padding: 12px 16px;
+            background: rgba(0,0,0,0.15);
+        }
+        .platform-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .platform-toggle input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: #7dd3fc;
+            cursor: pointer;
+        }
+        .platform-toggle label {
+            font-size: 0.95em;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .platform-config {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+        }
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #555;
+            font-size: 0.8em;
+        }
+        .footer a { color: #7dd3fc; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>U-Hermes</h1>
+            <p>U盘AI智能体 - 基于 Hermes Agent 驱动</p>
+        </div>
+
+        <!-- Step 1: Choose Provider -->
+        <div class="card">
+            <h2>1. 选择 AI 模型</h2>
+            <div class="provider-grid">
+                <div class="provider-btn" data-provider="deepseek" data-url="https://api.deepseek.com/v1" data-model="deepseek-chat">
+                    DeepSeek
+                </div>
+                <div class="provider-btn" data-provider="kimi" data-url="https://api.moonshot.cn/v1" data-model="moonshot-v1-auto">
+                    Kimi
+                </div>
+                <div class="provider-btn" data-provider="qwen" data-url="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-plus">
+                    Qwen
+                </div>
+                <div class="provider-btn" data-provider="glm" data-url="https://open.bigmodel.cn/api/paas/v4" data-model="glm-4-flash">
+                    GLM (Zhipu)
+                </div>
+                <div class="provider-btn" data-provider="minimax" data-url="https://api.minimax.chat/v1" data-model="MiniMax-Text-01">
+                    MiniMax
+                </div>
+                <div class="provider-btn" data-provider="doubao" data-url="https://ark.cn-beijing.volces.com/api/v3" data-model="doubao-1.5-pro-32k">
+                    豆包
+                </div>
+                <div class="provider-btn" data-provider="openrouter" data-url="https://openrouter.ai/api/v1" data-model="anthropic/claude-sonnet-4">
+                    OpenRouter
+                </div>
+                <div class="provider-btn" data-provider="custom" data-url="" data-model="">
+                    自定义
+                </div>
+            </div>
+            <div class="model-info" id="modelInfo"></div>
+        </div>
+
+        <!-- Step 2: API Configuration -->
+        <div class="card">
+            <h2>2. 填写 API 配置</h2>
+            <div class="form-group">
+                <label>API 密钥</label>
+                <input type="password" id="apiKey" placeholder="sk-..." autocomplete="off">
+                <div class="hint">从模型提供商的控制台获取</div>
+            </div>
+            <div class="form-group">
+                <label>API 地址</label>
+                <input type="text" id="baseUrl" placeholder="https://api.deepseek.com/v1">
+            </div>
+            <div class="form-group">
+                <label>模型名称</label>
+                <input type="text" id="modelName" placeholder="deepseek-chat">
+            </div>
+        </div>
+
+        <!-- Step 3: Messaging Platforms -->
+        <div class="card">
+            <h2>3. 消息平台（可选）</h2>
+            <p style="font-size:0.85em; color:#a0a0a0; margin-bottom:16px;">
+                配置后 AI 可通过这些平台接收和回复消息。不需要可跳过。
+            </p>
+            <div class="platform-grid">
+                <div class="platform-item" data-platform="telegram">
+                    <div class="platform-toggle">
+                        <input type="checkbox" id="chk-telegram">
+                        <label for="chk-telegram">Telegram Bot</label>
+                    </div>
+                    <div class="platform-config" id="cfg-telegram" style="display:none">
+                        <div class="form-group">
+                            <label>Bot Token</label>
+                            <input type="password" id="telegram-token" placeholder="123456:ABC-DEF...">
+                            <div class="hint">从 @BotFather 获取</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="platform-item" data-platform="discord">
+                    <div class="platform-toggle">
+                        <input type="checkbox" id="chk-discord">
+                        <label for="chk-discord">Discord Bot</label>
+                    </div>
+                    <div class="platform-config" id="cfg-discord" style="display:none">
+                        <div class="form-group">
+                            <label>Bot Token</label>
+                            <input type="password" id="discord-token" placeholder="MTk...">
+                            <div class="hint">从 Discord Developer Portal 获取</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="platform-item" data-platform="wechat-bot">
+                    <div class="platform-toggle">
+                        <input type="checkbox" id="chk-wechat-bot">
+                        <label for="chk-wechat-bot">微信机器人</label>
+                    </div>
+                    <div class="platform-config" id="cfg-wechat-bot" style="display:none">
+                        <div class="form-group">
+                            <label>协议类型</label>
+                            <select id="wechat-bot-protocol">
+                                <option value="wechaty">Wechaty (推荐)</option>
+                                <option value="itchat">itchat</option>
+                                <option value="gewechat">gewe-chat</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Token / Puppet Token</label>
+                            <input type="password" id="wechat-bot-token" placeholder="puppet_padlocal_xxx 或留空扫码">
+                            <div class="hint">Wechaty 需要 puppet token；itchat 留空即可</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="platform-item" data-platform="qq-bot">
+                    <div class="platform-toggle">
+                        <input type="checkbox" id="chk-qq-bot">
+                        <label for="chk-qq-bot">QQ 机器人</label>
+                    </div>
+                    <div class="platform-config" id="cfg-qq-bot" style="display:none">
+                        <div class="form-group">
+                            <label>协议框架</label>
+                            <select id="qq-bot-framework">
+                                <option value="onebot">OneBot (NapCat/LLOneBot)</option>
+                                <option value="official">QQ 官方机器人 API</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="qq-onebot-cfg">
+                            <label>WebSocket 地址</label>
+                            <input type="text" id="qq-bot-ws" placeholder="ws://127.0.0.1:3001">
+                            <div class="hint">NapCat/LLOneBot 的 WS 正向连接地址</div>
+                        </div>
+                        <div class="form-group" id="qq-official-cfg" style="display:none">
+                            <label>App ID</label>
+                            <input type="text" id="qq-bot-appid" placeholder="102012345">
+                            <label style="margin-top:8px">App Secret</label>
+                            <input type="password" id="qq-bot-secret" placeholder="">
+                            <div class="hint">从 q.qq.com 开放平台获取</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="platform-item" data-platform="wecom">
+                    <div class="platform-toggle">
+                        <input type="checkbox" id="chk-wecom">
+                        <label for="chk-wecom">企业微信</label>
+                    </div>
+                    <div class="platform-config" id="cfg-wecom" style="display:none">
+                        <div class="form-group">
+                            <label>Corp ID</label>
+                            <input type="text" id="wecom-corpid" placeholder="ww...">
+                        </div>
+                        <div class="form-group">
+                            <label>Agent ID</label>
+                            <input type="text" id="wecom-agentid" placeholder="1000002">
+                        </div>
+                        <div class="form-group">
+                            <label>Secret</label>
+                            <input type="password" id="wecom-secret" placeholder="">
+                            <div class="hint">从企业微信管理后台 → 自建应用获取</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="platform-item" data-platform="dingtalk">
+                    <div class="platform-toggle">
+                        <input type="checkbox" id="chk-dingtalk">
+                        <label for="chk-dingtalk">钉钉机器人</label>
+                    </div>
+                    <div class="platform-config" id="cfg-dingtalk" style="display:none">
+                        <div class="form-group">
+                            <label>App Key</label>
+                            <input type="text" id="dingtalk-appkey" placeholder="dingxxx">
+                        </div>
+                        <div class="form-group">
+                            <label>App Secret</label>
+                            <input type="password" id="dingtalk-secret" placeholder="">
+                            <div class="hint">从钉钉开放平台 → 机器人管理获取</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="platform-item" data-platform="feishu">
+                    <div class="platform-toggle">
+                        <input type="checkbox" id="chk-feishu">
+                        <label for="chk-feishu">飞书机器人</label>
+                    </div>
+                    <div class="platform-config" id="cfg-feishu" style="display:none">
+                        <div class="form-group">
+                            <label>App ID</label>
+                            <input type="text" id="feishu-appid" placeholder="cli_xxx">
+                        </div>
+                        <div class="form-group">
+                            <label>App Secret</label>
+                            <input type="password" id="feishu-secret" placeholder="">
+                            <div class="hint">从飞书开放平台 → 自建应用获取</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 4: Save -->
+        <div class="card">
+            <h2>4. 保存并启动</h2>
+            <button class="btn-secondary" id="testBtn" onclick="testConnection()">测试连接</button>
+            <button class="btn-primary" onclick="saveConfig()">保存配置</button>
+            <div class="status" id="status"></div>
+        </div>
+
+        <div class="footer">
+            <p>基于 <a href="https://github.com/NousResearch/hermes-agent" target="_blank">Hermes Agent</a> (Nous Research) 驱动 | MIT 开源协议</p>
+        </div>
+    </div>
+
+    <script>
+    // Provider selection
+    const providerBtns = document.querySelectorAll('.provider-btn');
+    let selectedProvider = '';
+
+    const providerHints = {
+        deepseek: '编程能力强，极具性价比。获取密钥: platform.deepseek.com',
+        kimi: '256K 超长上下文。获取密钥: platform.moonshot.cn',
+        qwen: '免费额度大。获取密钥: dashscope.console.aliyun.com',
+        glm: '学术研究首选。获取密钥: open.bigmodel.cn',
+        minimax: '语音与多模态。获取密钥: platform.minimaxi.com',
+        doubao: '火山引擎生态。获取密钥: console.volcengine.com',
+        openrouter: '200+ 模型聚合，需翻墙。获取密钥: openrouter.ai',
+        custom: '任何兼容 OpenAI 的接口地址'
+    };
+
+    providerBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            providerBtns.forEach(b => b.classList.remove('selected'));
+            btn.classList.add('selected');
+
+            selectedProvider = btn.dataset.provider;
+            document.getElementById('baseUrl').value = btn.dataset.url;
+            document.getElementById('modelName').value = btn.dataset.model;
+
+            const info = document.getElementById('modelInfo');
+            info.style.display = 'block';
+            info.textContent = providerHints[selectedProvider] || '';
+        });
+    });
+
+    // Save configuration
+    function saveConfig() {
+        const apiKey = document.getElementById('apiKey').value.trim();
+        const baseUrl = document.getElementById('baseUrl').value.trim();
+        const modelName = document.getElementById('modelName').value.trim();
+        const status = document.getElementById('status');
+
+        if (!apiKey) {
+            status.className = 'status error';
+            status.textContent = '请输入 API 密钥';
+            return;
+        }
+        if (!baseUrl) {
+            status.className = 'status error';
+            status.textContent = '请输入 API 地址';
+            return;
+        }
+        if (!modelName) {
+            status.className = 'status error';
+            status.textContent = '请输入模型名称';
+            return;
+        }
+
+        const providerName = selectedProvider || 'custom';
+
+        // Hermes built-in providers that just need env var + provider name
+        const builtinProviders = {
+            'deepseek': { hermesName: 'deepseek', envVar: 'DEEPSEEK_API_KEY' },
+            'kimi': { hermesName: 'kimi-coding', envVar: 'KIMI_API_KEY' },
+            'qwen': { hermesName: 'alibaba-coding-plan', envVar: 'ALIBABA_API_KEY' },
+            'glm': { hermesName: 'zai', envVar: 'GLM_API_KEY' },
+            'minimax': { hermesName: 'minimax-cn', envVar: 'MINIMAX_API_KEY' },
+            'openrouter': { hermesName: 'openrouter', envVar: 'OPENROUTER_API_KEY' },
+        };
+
+        const builtin = builtinProviders[providerName];
+        let configYaml, envContent;
+
+        const platforms = getEnabledPlatforms();
+        const platformsYaml = platformsToYaml(platforms);
+
+        if (builtin) {
+            // Built-in provider: use Hermes native resolution + .env for API key
+            configYaml = `# U-Hermes Configuration (auto-generated)
+# Edit manually or re-run Config.html to change
+
+model:
+  provider: "${builtin.hermesName}"
+  model: "${modelName}"
+
+gateway:
+${platformsYaml}
+skills:
+  external_dirs:
+    - "../skills-cn"
+
+memory:
+  enabled: true
+
+cron:
+  enabled: true
+`;
+            envContent = `${builtin.envVar}=${apiKey}\n`;
+        } else {
+            // Custom provider: use custom_providers list
+            const providerSlug = providerName.toLowerCase().replace(/\s+/g, '-');
+            const hermesProvider = `custom:${providerSlug}`;
+
+            configYaml = `# U-Hermes Configuration (auto-generated)
+# Edit manually or re-run Config.html to change
+
+model:
+  provider: "${hermesProvider}"
+  model: "${modelName}"
+
+custom_providers:
+  - name: "${providerSlug}"
+    base_url: "${baseUrl}"
+    key_env: "OPENAI_API_KEY"
+
+gateway:
+${platformsYaml}
+skills:
+  external_dirs:
+    - "../skills-cn"
+
+memory:
+  enabled: true
+
+cron:
+  enabled: true
+`;
+            envContent = `OPENAI_API_KEY=${apiKey}\nOPENAI_BASE_URL=${baseUrl}\n`;
+        }
+
+        // Try to save via local config-server, or show manual instructions
+        // 保存期间锁住两个按钮，避免和"测试连接"互相覆盖状态提示
+        const saveBtn = document.querySelector('.btn-primary');
+        const testBtn = document.getElementById('testBtn');
+        saveBtn.disabled = true;
+        if (testBtn) testBtn.disabled = true;
+        tryLocalSave(configYaml, envContent).then(saved => {
+            if (saved) {
+                status.className = 'status success';
+                status.textContent = '配置已保存！现在可以关闭此页面，运行 Windows-Start.bat（或 Mac-Start.command）启动智能体。';
+            } else {
+                showManualSave(configYaml, envContent, status);
+            }
+        }).finally(() => {
+            saveBtn.disabled = false;
+            if (testBtn) testBtn.disabled = false;
+        });
+    }
+
+    async function tryLocalSave(configContent, envContent) {
+        // Try config-server on common ports
+        const ports = [18790, 18791, 18792];
+        for (const port of ports) {
+            try {
+                const resp = await fetch(`http://127.0.0.1:${port}/save-config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: configContent
+                });
+                if (resp.ok) {
+                    // Also save .env file
+                    if (envContent) {
+                        await fetch(`http://127.0.0.1:${port}/save-env`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'text/plain' },
+                            body: envContent
+                        }).catch(() => {});
+                    }
+                    return true;
+                }
+            } catch (e) { /* try next */ }
+        }
+        return false;
+    }
+
+    async function testConnection() {
+        const apiKey = document.getElementById('apiKey').value.trim();
+        const baseUrl = document.getElementById('baseUrl').value.trim();
+        const modelName = document.getElementById('modelName').value.trim();
+        const status = document.getElementById('status');
+        const btn = document.getElementById('testBtn');
+
+        if (!apiKey) { status.className = 'status error'; status.textContent = '请输入 API 密钥'; return; }
+        if (!baseUrl) { status.className = 'status error'; status.textContent = '请输入 API 地址'; return; }
+        if (!modelName) { status.className = 'status error'; status.textContent = '请输入模型名称'; return; }
+
+        // 测试期间锁住两个按钮，避免和"保存配置"互相覆盖状态提示
+        const saveBtn = document.querySelector('.btn-primary');
+        btn.disabled = true;
+        if (saveBtn) saveBtn.disabled = true;
+        status.className = 'status info';
+        status.textContent = '正在测试连接（最长等待 20 秒）…';
+        try {
+            const ports = [18790, 18791, 18792];
+            for (const port of ports) {
+                try {
+                    const resp = await fetch(`http://127.0.0.1:${port}/test`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model: modelName })
+                    });
+                    if (resp.ok) {
+                        const j = await resp.json();
+                        status.className = j.ok ? 'status success' : 'status error';
+                        status.textContent = j.message;
+                        return;
+                    }
+                } catch (e) { /* try next port */ }
+            }
+            status.className = 'status error';
+            status.textContent = '配置服务未运行，无法测试。请通过启动器（Windows-Start.bat）打开本页面。';
+        } finally {
+            btn.disabled = false;
+            if (saveBtn) saveBtn.disabled = false;
+        }
+    }
+
+    // Platform toggle logic
+    document.querySelectorAll('.platform-item input[type="checkbox"]').forEach(chk => {
+        chk.addEventListener('change', () => {
+            const platform = chk.closest('.platform-item').dataset.platform;
+            const cfg = document.getElementById('cfg-' + platform);
+            if (cfg) cfg.style.display = chk.checked ? 'block' : 'none';
+        });
+    });
+
+    // QQ Bot framework switch
+    const qqFramework = document.getElementById('qq-bot-framework');
+    if (qqFramework) {
+        qqFramework.addEventListener('change', () => {
+            document.getElementById('qq-onebot-cfg').style.display = qqFramework.value === 'onebot' ? 'block' : 'none';
+            document.getElementById('qq-official-cfg').style.display = qqFramework.value === 'official' ? 'block' : 'none';
+        });
+    }
+
+    // Collect enabled platforms into config
+    function getEnabledPlatforms() {
+        const platforms = [];
+
+        if (document.getElementById('chk-telegram').checked) {
+            const token = document.getElementById('telegram-token').value.trim();
+            if (token) platforms.push({ type: 'telegram', token: token });
+        }
+
+        if (document.getElementById('chk-discord').checked) {
+            const token = document.getElementById('discord-token').value.trim();
+            if (token) platforms.push({ type: 'discord', token: token });
+        }
+
+        if (document.getElementById('chk-wechat-bot').checked) {
+            const protocol = document.getElementById('wechat-bot-protocol').value;
+            const token = document.getElementById('wechat-bot-token').value.trim();
+            platforms.push({ type: 'wechat', protocol: protocol, token: token || null });
+        }
+
+        if (document.getElementById('chk-qq-bot').checked) {
+            const framework = document.getElementById('qq-bot-framework').value;
+            if (framework === 'onebot') {
+                const ws = document.getElementById('qq-bot-ws').value.trim();
+                platforms.push({ type: 'qq', framework: 'onebot', ws_url: ws || 'ws://127.0.0.1:3001' });
+            } else {
+                const appid = document.getElementById('qq-bot-appid').value.trim();
+                const secret = document.getElementById('qq-bot-secret').value.trim();
+                if (appid) platforms.push({ type: 'qq', framework: 'official', app_id: appid, app_secret: secret });
+            }
+        }
+
+        if (document.getElementById('chk-wecom').checked) {
+            const corpid = document.getElementById('wecom-corpid').value.trim();
+            const agentid = document.getElementById('wecom-agentid').value.trim();
+            const secret = document.getElementById('wecom-secret').value.trim();
+            if (corpid) platforms.push({ type: 'wecom', corp_id: corpid, agent_id: agentid, secret: secret });
+        }
+
+        if (document.getElementById('chk-dingtalk').checked) {
+            const appkey = document.getElementById('dingtalk-appkey').value.trim();
+            const secret = document.getElementById('dingtalk-secret').value.trim();
+            if (appkey) platforms.push({ type: 'dingtalk', app_key: appkey, app_secret: secret });
+        }
+
+        if (document.getElementById('chk-feishu').checked) {
+            const appid = document.getElementById('feishu-appid').value.trim();
+            const secret = document.getElementById('feishu-secret').value.trim();
+            if (appid) platforms.push({ type: 'feishu', app_id: appid, app_secret: secret });
+        }
+
+        return platforms;
+    }
+
+    // Generate platforms YAML block
+    function platformsToYaml(platforms) {
+        if (!platforms.length) return '  platforms: []\n';
+        let yaml = '  platforms:\n';
+        platforms.forEach(p => {
+            yaml += `    - type: "${p.type}"\n`;
+            Object.entries(p).forEach(([k, v]) => {
+                if (k !== 'type' && v !== null && v !== undefined) {
+                    yaml += `      ${k}: "${v}"\n`;
+                }
+            });
+        });
+        return yaml;
+    }
+
+    function showManualSave(configContent, envContent, statusEl) {
+        const envNote = envContent ? `<p style="font-size:0.85em; color:#a0a0a0; margin-top:12px">
+            同时保存以下内容为 <code>data/.env</code>：
+        </p>
+        <textarea style="width:100%;height:60px;margin-top:4px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${envContent}</textarea>` : '';
+
+        statusEl.className = 'status success';
+        statusEl.innerHTML = `
+            <p style="margin-bottom:8px"><strong>配置服务未运行。</strong>请手动保存：</p>
+            <p style="font-size:0.85em; color:#a0a0a0">
+                复制以下内容，保存为 U-Hermes 文件夹下的 <code>data/config.yaml</code>
+            </p>
+            <textarea style="width:100%;height:200px;margin-top:10px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${configContent}</textarea>
+            ${envNote}
+            <p style="margin-top:8px;font-size:0.85em">然后运行 <code>Windows-Start.bat</code> 或 <code>bash Mac-Start.command</code></p>
+        `;
+    }
+    </script>
+</body>
+</html>

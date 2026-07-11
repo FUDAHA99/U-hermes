@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>U-Hermes — U盘里的 AI 智能体</title>
+<meta name="description" content="U-Hermes：插上U盘，双击启动，浏览器里直接和 AI 对话。免安装、免注册，数据全在自己手里。">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        background: linear-gradient(160deg, #0f172a 0%, #1e293b 60%, #0f172a 100%);
+        color: #e2e8f0;
+        line-height: 1.7;
+        min-height: 100vh;
+    }
+    .container { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+
+    /* Hero */
+    .hero { text-align: center; padding: 72px 0 48px; }
+    .hero .logo { font-size: 3.2em; }
+    .hero h1 {
+        font-size: 2.6em;
+        margin: 8px 0 4px;
+        background: linear-gradient(135deg, #7dd3fc, #38bdf8, #818cf8);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+    .hero .tagline { font-size: 1.25em; color: #94a3b8; margin-bottom: 8px; }
+    .hero .sub { color: #64748b; font-size: 0.95em; }
+
+    /* Download buttons */
+    .downloads { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin: 32px 0 10px; }
+    .btn {
+        display: inline-block;
+        padding: 14px 30px;
+        border-radius: 10px;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 1.05em;
+        transition: transform 0.1s, opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.88; }
+    .btn:active { transform: scale(0.97); }
+    .btn-win { background: linear-gradient(135deg, #7dd3fc, #38bdf8); color: #0f172a; }
+    .btn-mac { background: transparent; color: #7dd3fc; border: 1.5px solid #38bdf8; }
+    .mirror-note { text-align: center; color: #64748b; font-size: 0.9em; }
+    .mirror-note a { color: #7dd3fc; text-decoration: none; }
+    .mirror-links { text-align: center; margin-top: 6px; font-size: 0.95em; }
+    .mirror-links a { color: #7dd3fc; text-decoration: none; margin: 0 10px; }
+    .mirror-links a:hover { text-decoration: underline; }
+
+    /* Sections */
+    section { padding: 40px 0; }
+    section h2 { font-size: 1.7em; color: #f1f5f9; text-align: center; margin-bottom: 28px; }
+
+    /* Steps */
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+    .step {
+        background: rgba(30, 41, 59, 0.7);
+        border: 1px solid rgba(125, 211, 252, 0.15);
+        border-radius: 14px;
+        padding: 26px 22px;
+        text-align: center;
+    }
+    .step .num {
+        display: inline-block;
+        width: 40px; height: 40px; line-height: 40px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #7dd3fc, #38bdf8);
+        color: #0f172a;
+        font-weight: 700;
+        font-size: 1.2em;
+        margin-bottom: 12px;
+    }
+    .step h3 { color: #f1f5f9; margin-bottom: 6px; font-size: 1.1em; }
+    .step p { color: #94a3b8; font-size: 0.92em; }
+
+    /* Features */
+    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .feature {
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid rgba(125, 211, 252, 0.1);
+        border-radius: 12px;
+        padding: 20px;
+    }
+    .feature .icon { font-size: 1.6em; }
+    .feature h3 { color: #e2e8f0; font-size: 1.02em; margin: 6px 0 4px; }
+    .feature p { color: #8ea0b5; font-size: 0.9em; }
+
+    /* FAQ */
+    .faq-item {
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid rgba(125, 211, 252, 0.1);
+        border-radius: 12px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    .faq-item summary {
+        padding: 16px 20px;
+        cursor: pointer;
+        font-weight: 600;
+        color: #e2e8f0;
+        list-style: none;
+    }
+    .faq-item summary::before { content: "▸ "; color: #7dd3fc; }
+    .faq-item[open] summary::before { content: "▾ "; }
+    .faq-item .answer { padding: 0 20px 16px 38px; color: #94a3b8; font-size: 0.94em; }
+
+    /* Footer */
+    footer {
+        text-align: center;
+        padding: 36px 0 44px;
+        color: #64748b;
+        font-size: 0.9em;
+        border-top: 1px solid rgba(125, 211, 252, 0.08);
+        margin-top: 20px;
+    }
+    footer a { color: #7dd3fc; text-decoration: none; }
+
+    @media (max-width: 600px) {
+        .hero { padding: 48px 0 32px; }
+        .hero h1 { font-size: 2em; }
+    }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+    <div class="hero">
+        <div class="logo">🔌🤖</div>
+        <h1>U-Hermes</h1>
+        <p class="tagline">U 盘里的 AI 智能体 — 插上就能用</p>
+        <p class="sub">免安装 · 免注册 · 数据全在自己手里 · 拔了U盘就带走</p>
+
+        <div class="downloads">
+            <a class="btn btn-win" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-win">⬇ Windows 版下载</a>
+            <a class="btn btn-mac" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-mac">⬇ Mac 版下载 (Apple 芯片)</a>
+        </div>
+        <div class="mirror-links" id="mirror-links" style="display:none">
+            国内加速：<a href="#" id="mirror-win">Windows 加速下载</a>｜<a href="#" id="mirror-mac">Mac 加速下载</a>
+        </div>
+        <p class="mirror-note" style="margin-top:10px">
+            所有版本见 <a href="https://github.com/FUDAHA99/U-hermes/releases">GitHub Releases</a>
+            ｜下载慢？在下载链接前加上 <code>https://ghfast.top/</code> 即可加速
+        </p>
+    </div>
+
+    <section>
+        <h2>三步开始使用</h2>
+        <div class="steps">
+            <div class="step">
+                <div class="num">1</div>
+                <h3>下载解压</h3>
+                <p>把压缩包解压到 U 盘或电脑任意文件夹，无需安装任何东西</p>
+            </div>
+            <div class="step">
+                <div class="num">2</div>
+                <h3>双击启动</h3>
+                <p>运行 Windows-Start.bat，首次会自动打开配置页，选模型、填密钥、点"测试连接"确认可用</p>
+            </div>
+            <div class="step">
+                <div class="num">3</div>
+                <h3>开始对话</h3>
+                <p>浏览器自动打开聊天界面，直接和你的 AI 智能体对话</p>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2>为什么选 U-Hermes</h2>
+        <div class="features">
+            <div class="feature">
+                <div class="icon">🔒</div>
+                <h3>数据在自己手里</h3>
+                <p>对话记录、记忆、技能全部存在你的 U 盘里，不上传任何服务器</p>
+            </div>
+            <div class="feature">
+                <div class="icon">🧠</div>
+                <h3>越用越懂你</h3>
+                <p>基于 Hermes Agent 引擎，自动从使用经验中总结技能、积累记忆</p>
+            </div>
+            <div class="feature">
+                <div class="icon">🇨🇳</div>
+                <h3>国内模型友好</h3>
+                <p>DeepSeek、Kimi、通义、智谱等国内模型开箱即用，无需科学上网</p>
+            </div>
+            <div class="feature">
+                <div class="icon">🔁</div>
+                <h3>故障自动切换</h3>
+                <p>主模型超时或额度不足时自动切换备用模型，对话不中断</p>
+            </div>
+            <div class="feature">
+                <div class="icon">🩺</div>
+                <h3>一键诊断</h3>
+                <p>遇到问题不用猜：菜单里一键诊断，用人话告诉你哪里出了问题、怎么解决</p>
+            </div>
+            <div class="feature">
+                <div class="icon">💬</div>
+                <h3>接入聊天平台</h3>
+                <p>可接入 QQ、微信、钉钉、飞书、Telegram、Discord 等消息平台</p>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2>常见问题</h2>
+        <details class="faq-item">
+            <summary>需要付费吗？</summary>
+            <div class="answer">U-Hermes 本身完全免费开源（MIT 协议）。你只需要一个 AI 模型的 API 密钥——国内模型（如 DeepSeek）按量计费，日常使用一个月通常只要几块钱。</div>
+        </details>
+        <details class="faq-item">
+            <summary>API 密钥去哪里申请？</summary>
+            <div class="answer">配置页里每个模型都有申请入口提示。以 DeepSeek 为例：打开 platform.deepseek.com → 注册 → 充值几块钱 → 创建 API Key → 复制到 U-Hermes 配置页，点"测试连接"验证后保存即可。</div>
+        </details>
+        <details class="faq-item">
+            <summary>发消息 AI 不回复怎么办？</summary>
+            <div class="answer">运行 Windows-Menu.bat 选择"一键诊断"，它会自动检查配置、网络和 API 状态，并用人话告诉你问题和解决办法。最常见的原因是 API 密钥过期或余额不足。</div>
+        </details>
+        <details class="faq-item">
+            <summary>换一台电脑还能用吗？</summary>
+            <div class="answer">可以。把 U 盘插到新电脑上直接运行启动脚本即可，程序会自动修复路径。你的配置、记忆和对话记录都在 U 盘里跟着走。</div>
+        </details>
+        <details class="faq-item">
+            <summary>Windows 提示"已保护你的电脑"？</summary>
+            <div class="answer">这是 Windows 对未签名脚本的默认提示。点"更多信息"→"仍要运行"即可。项目完全开源，代码可在 GitHub 查验。</div>
+        </details>
+        <details class="faq-item">
+            <summary>如何更新到新版本？</summary>
+            <div class="answer">小更新：运行 Windows-Menu.bat 选择"更新"。大版本：下载新的压缩包解压，把旧目录里的 data 文件夹复制过去，配置和记忆就都保留了。</div>
+        </details>
+    </section>
+
+    <footer>
+        <p>
+            <a href="https://github.com/FUDAHA99/U-hermes">GitHub</a> ·
+            <a href="https://github.com/FUDAHA99/U-hermes/releases">下载</a> ·
+            <a href="https://github.com/FUDAHA99/U-hermes/issues">反馈问题</a>
+        </p>
+        <p style="margin-top:8px">基于 <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> (Nous Research) 驱动 · MIT 开源协议</p>
+    </footer>
+
+</div>
+
+<script>
+// 尝试获取最新版本的直链和加速链接；失败则保持指向 releases/latest
+(async function () {
+    try {
+        const resp = await fetch('https://api.github.com/repos/FUDAHA99/U-hermes/releases/latest');
+        if (!resp.ok) return;
+        const rel = await resp.json();
+        const win = (rel.assets || []).find(a => a.name.includes('windows'));
+        const mac = (rel.assets || []).find(a => a.name.includes('mac'));
+        if (win) {
+            document.getElementById('dl-win').href = win.browser_download_url;
+            document.getElementById('dl-win').textContent = '⬇ Windows 版下载 (' + rel.tag_name + ')';
+            document.getElementById('mirror-win').href = 'https://ghfast.top/' + win.browser_download_url;
+        }
+        if (mac) {
+            document.getElementById('dl-mac').href = mac.browser_download_url;
+            document.getElementById('dl-mac').textContent = '⬇ Mac 版下载 (' + rel.tag_name + ')';
+            document.getElementById('mirror-mac').href = 'https://ghfast.top/' + mac.browser_download_url;
+        }
+        if (win || mac) document.getElementById('mirror-links').style.display = 'block';
+    } catch (e) { /* 保持默认链接 */ }
+})();
+</script>
+
+</body>
+</html>

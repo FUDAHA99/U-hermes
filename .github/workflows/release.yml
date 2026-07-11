@@ -1,0 +1,297 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}  # manual run = build + smoke test only, no release
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # --- Build Portable Packages ---
+  portable-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build portable package
+        shell: pwsh
+        run: |
+          cd portable
+          # Download embedded Python
+          $zipName = "python-3.11.9-embed-amd64.zip"
+          $url = "https://www.python.org/ftp/python/3.11.9/$zipName"
+          Invoke-WebRequest -Uri $url -OutFile $zipName
+          New-Item -ItemType Directory -Path "runtime/python-win-x64" -Force
+          Expand-Archive $zipName -DestinationPath "runtime/python-win-x64" -Force
+          Remove-Item $zipName
+          # Enable site-packages
+          $pth = Get-ChildItem "runtime/python-win-x64" -Filter "python*._pth" | Select-Object -First 1
+          (Get-Content $pth.FullName) -replace '^#import site', 'import site' | Set-Content $pth.FullName
+
+          # Download uv
+          $uvZip = "uv-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest "https://github.com/astral-sh/uv/releases/download/0.7.12/$uvZip" -OutFile $uvZip
+          New-Item -ItemType Directory -Path "runtime/uv" -Force
+          Expand-Archive $uvZip -DestinationPath "runtime/uv" -Force
+          Remove-Item $uvZip
+          # Fix nested dir: uv extracts with a subdirectory
+          $nested = Get-ChildItem "runtime/uv" -Directory | Select-Object -First 1
+          if ($nested) {
+            Get-ChildItem $nested.FullName | Move-Item -Destination "runtime/uv" -Force
+            Remove-Item $nested.FullName -Recurse -Force
+          }
+
+          # Download Node.js
+          $nodeZip = "node-v22.22.1-win-x64.zip"
+          Invoke-WebRequest "https://nodejs.org/dist/v22.22.1/$nodeZip" -OutFile $nodeZip
+          New-Item -ItemType Directory -Path "runtime/node-win-x64" -Force
+          Expand-Archive $nodeZip -DestinationPath "runtime/node-temp" -Force
+          $inner = Get-ChildItem "runtime/node-temp" -Directory | Select-Object -First 1
+          Copy-Item "$($inner.FullName)/*" "runtime/node-win-x64" -Recurse -Force
+          Remove-Item "runtime/node-temp" -Recurse -Force
+          Remove-Item $nodeZip
+
+          # Clone Hermes Agent
+          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git hermes/hermes-agent
+
+          # Apply patches (--ignore-whitespace handles CRLF/LF mismatch)
+          cd hermes/hermes-agent
+          git apply --ignore-whitespace ../../patches/hermes-web-auto-locale.patch --verbose
+          git apply --ignore-whitespace ../../patches/hermes-cli-win-noconsole.patch --verbose
+          cd ../..
+
+          # Build Web UI (built-in dashboard)
+          cd hermes/hermes-agent/web
+          npm install
+          npm run build
+          cd ../../..
+
+          # Create venv and install (includes messaging extra for aiohttp/gateway API server)
+          $pythonExe = "runtime/python-win-x64/python.exe"
+          & "runtime/uv/uv.exe" venv "hermes/.venv" --python $pythonExe
+          & "runtime/uv/uv.exe" pip install "hermes/hermes-agent[cli,pty,mcp,cron,messaging]" --python "hermes/.venv/Scripts/python.exe"
+
+          # Create portable hermes.cmd wrapper (hermes.exe breaks when drive letter changes)
+          '@echo off' + "`n" + '"%~dp0python.exe" -m hermes_cli.main %*' | Set-Content "hermes/.venv/Scripts/hermes.cmd" -Encoding ascii
+
+          # Install Hermes Web UI (npm package)
+          $NPM = "runtime\node-win-x64\npm.cmd"
+          & $NPM install -g hermes-web-ui --prefix "runtime/node-win-x64"
+
+          # Initialize data
+          New-Item -ItemType Directory -Path "data/memory","data/skills","data/sessions","data/cron" -Force
+
+          # Create default config.yaml
+          @"
+          model:
+            provider: ""
+            model: ""
+          api_server:
+            extra:
+              port: 8642
+          skills:
+            external_dirs:
+              - "../skills-cn"
+          memory:
+            enabled: true
+          cron:
+            enabled: true
+          "@ | Set-Content "data/config.yaml" -Encoding utf8
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          cd portable
+          $py = "hermes/.venv/Scripts/python.exe"
+
+          Write-Host "=== [1/4] Python package imports ==="
+          & $py -c "import hermes_cli.main, agent, gateway; print('imports OK')"
+          if ($LASTEXITCODE -ne 0) { Write-Error "package import failed"; exit 1 }
+
+          Write-Host "=== [2/4] hermes.exe entry point ==="
+          & "hermes/.venv/Scripts/hermes.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Error "hermes.exe failed"; exit 1 }
+
+          Write-Host "=== [3/4] helper scripts compile ==="
+          & $py -m py_compile scripts/config-server.py scripts/diagnose.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "helper script compile failed"; exit 1 }
+
+          Write-Host "=== [4/4] Web UI server starts and answers HTTP ==="
+          $env:PORT = "8648"
+          $env:AUTH_DISABLED = "1"
+          $env:HERMES_BIN = (Resolve-Path "hermes/.venv/Scripts/hermes.exe").Path
+          $node = (Resolve-Path "runtime/node-win-x64/node.exe").Path
+          $server = (Resolve-Path "runtime/node-win-x64/node_modules/hermes-web-ui/dist/server/index.js").Path
+          $proc = Start-Process -FilePath $node -ArgumentList "`"$server`"" -PassThru -WindowStyle Hidden
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 2
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8648" -UseBasicParsing -TimeoutSec 5
+              if ($r.StatusCode -eq 200) { $ok = $true; break }
+            } catch {}
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { Write-Error "Web UI did not answer HTTP 200 on 8648 within 60s"; exit 1 }
+          Write-Host "Smoke test passed."
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart('v') } else { "0.0.0-ci" }
+          $zipName = "u-hermes-portable-windows-v${version}.zip"
+          Compress-Archive -Path "portable/*" -DestinationPath $zipName -Force
+          echo "ARTIFACT=$zipName" >> $env:GITHUB_ENV
+
+      - name: Upload to Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARTIFACT }}
+
+  portable-mac:
+    runs-on: macos-14  # ARM64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build portable package
+        env:
+          NODE_MIRROR: https://nodejs.org/dist
+          PYPI_MIRROR: https://pypi.org/simple
+        run: |
+          cd portable
+          bash setup.sh
+
+          # Apply patches (--ignore-whitespace handles CRLF/LF mismatch)
+          cd hermes/hermes-agent
+          git apply --ignore-whitespace ../../patches/hermes-web-auto-locale.patch --verbose
+          git apply --ignore-whitespace ../../patches/hermes-cli-win-noconsole.patch --verbose
+          cd ../..
+
+          # Build Web UI (built-in dashboard)
+          cd hermes/hermes-agent/web
+          npm install
+          npm run build
+          cd ../../..
+
+          # Download Node.js portable for macOS ARM64
+          NODE_VER="v22.16.0"
+          curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-darwin-arm64.tar.xz" -o node.tar.xz
+          mkdir -p runtime/node-mac-arm64
+          tar xf node.tar.xz --strip-components=1 -C runtime/node-mac-arm64
+          rm node.tar.xz
+
+          # Install Hermes Web UI (npm package)
+          runtime/node-mac-arm64/bin/npm install -g hermes-web-ui --prefix runtime/node-mac-arm64
+
+          # Initialize data
+          mkdir -p data/memory data/skills data/sessions data/cron
+
+          # Create default config.yaml
+          cat > data/config.yaml << 'CFGEOF'
+          model:
+            provider: ""
+            model: ""
+          api_server:
+            extra:
+              port: 8642
+          skills:
+            external_dirs:
+              - "../skills-cn"
+          memory:
+            enabled: true
+          cron:
+            enabled: true
+          CFGEOF
+
+      - name: Smoke test
+        run: |
+          cd portable
+          PY=hermes/.venv/bin/python
+
+          echo "=== [1/4] Python package imports ==="
+          "$PY" -c "import hermes_cli.main, agent, gateway; print('imports OK')"
+
+          echo "=== [2/4] hermes CLI entry point ==="
+          hermes/.venv/bin/hermes --help >/dev/null
+
+          echo "=== [3/4] helper scripts compile ==="
+          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py
+
+          echo "=== [4/4] Web UI server starts and answers HTTP ==="
+          SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)
+          test -n "$SERVER"
+          PORT=8648 AUTH_DISABLED=1 HERMES_BIN="$PWD/hermes/.venv/bin/hermes" \
+            runtime/node-mac-arm64/bin/node "$SERVER" &
+          SERVER_PID=$!
+          ok=0
+          for i in $(seq 1 30); do
+            sleep 2
+            if curl -fsS -o /dev/null http://127.0.0.1:8648; then ok=1; break; fi
+          done
+          kill $SERVER_PID 2>/dev/null || true
+          if [ "$ok" != "1" ]; then echo "Web UI did not answer HTTP on 8648 within 60s"; exit 1; fi
+          echo "Smoke test passed."
+
+      - name: Package
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0-ci"; fi
+          ZIP_NAME="u-hermes-portable-mac-v${VERSION}.zip"
+          cd portable && zip -r "../${ZIP_NAME}" . -x "*.uv-cache*"
+          echo "ARTIFACT=${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: Upload to Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: ${{ env.ARTIFACT }}
+          body: |
+            ## U-Hermes ${{ github.ref_name }}
+
+            U盘自进化 AI 智能体 - 基于 Hermes Agent (Nous Research) 驱动
+
+            ### 下载
+
+            | 平台 | 文件 | 说明 |
+            |------|------|------|
+            | Windows 便携版 | `u-hermes-portable-windows-*.zip` | 解压到U盘或文件夹，运行 `Windows-Start.bat` |
+            | Mac 便携版 | `u-hermes-portable-mac-*.zip` | 解压后运行 `bash Mac-Start.command` |
+
+            ### 国内加速下载（GitHub 直连慢时使用）
+
+            - [Windows 加速下载](https://ghfast.top/https://github.com/FUDAHA99/U-hermes/releases/download/${{ github.ref_name }}/u-hermes-portable-windows-${{ github.ref_name }}.zip)
+            - [Mac 加速下载](https://ghfast.top/https://github.com/FUDAHA99/U-hermes/releases/download/${{ github.ref_name }}/u-hermes-portable-mac-${{ github.ref_name }}.zip)
+
+            加速链接由公共服务提供，如失效可在官方下载链接前加上 `https://ghfast.top/`。
+
+            ### 首次使用
+
+            1. 双击启动脚本
+            2. 自动打开配置页面
+            3. 选择模型 → 输入 API Key → 点"测试连接"验证 → 保存 → 完成！
+
+            ### 更新日志
+
+            查看 commit 记录了解详情。

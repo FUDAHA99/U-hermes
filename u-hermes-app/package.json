@@ -1,0 +1,112 @@
+{
+  "name": "u-hermes",
+  "version": "1.0.0",
+  "description": "U-Hermes - Self-improving AI Agent Desktop App",
+  "main": "src/main.js",
+  "author": "U-Hermes <hello@u-claw.org> (https://u-claw.org)",
+  "license": "MIT",
+  "homepage": "https://u-claw.org",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build:mac-arm64": "electron-builder --mac --arm64",
+    "build:mac-x64": "electron-builder --mac --x64",
+    "build:win": "electron-builder --win",
+    "build:all": "electron-builder --mac --win",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "org.uhermes.desktop",
+    "productName": "U-Hermes",
+    "copyright": "Copyright © 2026 U-Hermes",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "!node_modules/**/*.md",
+      "!node_modules/**/test/**"
+    ],
+    "asar": false,
+    "extraResources": [
+      {
+        "from": "resources/Config.html",
+        "to": "resources/Config.html"
+      },
+      {
+        "from": "resources/runtime/python-${platform}-${arch}",
+        "to": "resources/runtime/python-${platform}-${arch}"
+      },
+      {
+        "from": "resources/runtime/uv",
+        "to": "resources/runtime/uv"
+      },
+      {
+        "from": "resources/hermes",
+        "to": "resources/hermes"
+      },
+      {
+        "from": "resources/skills-cn",
+        "to": "resources/skills-cn"
+      },
+      {
+        "from": "resources/cloud",
+        "to": "resources/cloud"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/icon.png",
+      "identity": null,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "U-Hermes",
+      "icon": "assets/icon.png",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "U-Hermes"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "assets/icon.png",
+      "category": "Development"
+    }
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0"
+  }
+}

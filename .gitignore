@@ -1,0 +1,45 @@
+# Reference repos (for development only)
+u-claw-ref/
+hermes-agent-ref/
+
+# Runtime dependencies
+portable/runtime/
+portable/hermes/
+portable/.uv-cache/
+portable/data/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# Build artifacts
+*.dmg
+*.exe
+*.zip
+release/
+
+# Local working files (not for release)
+packages/
+portable-commercial-baseline/
+portable/backups/
+portable/*.log
+
+# Private business files (kept local, excluded from public repo)
+cloud-api/
+DEV-NOTES.md
+PLAN.md
