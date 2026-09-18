@@ -128,7 +128,7 @@ jobs:
           # falls back to the registry and can load a same-version host install's
           # stdlib and DLLs -- which crashes with an access violation.
           $pyTag = (Get-ChildItem "runtime/python-win-x64" -Filter "python3*.dll" |
-                    Where-Object { $_.Name -match '^python\d+\.dll$' } |
+                    Where-Object { $_.Name -match '^python\d{2,}\.dll$' } |  # python313.dll, not python3.dll
                     Select-Object -First 1).BaseName
           $base = (Resolve-Path "runtime/python-win-x64").Path
           $venv = (Resolve-Path "hermes/.venv").Path
