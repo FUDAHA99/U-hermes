@@ -12,10 +12,9 @@ RUNTIME_DIR="$SCRIPT_DIR/runtime"
 HERMES_DIR="$SCRIPT_DIR/hermes"
 DATA_DIR="$SCRIPT_DIR/data"
 
-# Versions
-PYTHON_VERSION="3.11.9"
-NODE_VERSION="v22.22.1"
-UV_VERSION="0.7.12"
+# Versions (single source of truth, shared with .github/workflows/release.yml)
+# shellcheck source=versions.env
+. "$SCRIPT_DIR/versions.env"
 
 # Mirrors (overridable via environment variables for CI)
 PYPI_MIRROR="${PYPI_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
@@ -235,8 +234,13 @@ install_dependencies() {
     # Install with China mirror
     info "Installing Hermes Agent packages (China mirror)..."
     export UV_INDEX_URL="$PYPI_MIRROR"
-    # Use non-editable install for portable builds (editable breaks when path changes)
-    "$uv_exe" pip install "$agent_dir[cli,pty,mcp,cron,messaging]" --python "$venv_python" 2>&1 | tail -5
+    # Non-editable: an editable install bakes an absolute path into the venv,
+    # which breaks as soon as the drive letter changes.
+    # HERMES_NIX_BUILD=1 is upstream's escape hatch for packaging contexts --
+    # since Jul 2026 their setup.py refuses to build a wheel without it.
+    # Extras: `cli` was removed upstream; pty/cron are no-op aliases now.
+    export HERMES_NIX_BUILD=1
+    "$uv_exe" pip install "$agent_dir[pty,mcp,cron,messaging]" --python "$venv_python" 2>&1 | tail -5
 
     # Verify
     if "$venv_python" -c "import agent; print('ok')" 2>/dev/null | grep -q "ok"; then

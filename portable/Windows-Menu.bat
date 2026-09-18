@@ -116,7 +116,9 @@ call "%NODE_DIR%\npm.cmd" install -g hermes-web-ui@latest --prefix "%NODE_DIR%"
 echo.
 echo   [2/2] 修复 Hermes Agent 安装...
 :: 非可编辑安装（-e 会把绝对路径写进 venv，换盘符后损坏便携性）
-"%UV_EXE%" pip install "%SCRIPT_DIR%\hermes\hermes-agent[cli,pty,mcp,cron,messaging]" --python "%VENV_PYTHON%" --reinstall-package hermes-agent
+:: HERMES_NIX_BUILD=1 是上游给打包场景留的开关，2026年7月起不设它会拒绝构建
+set "HERMES_NIX_BUILD=1"
+"%UV_EXE%" pip install "%SCRIPT_DIR%\hermes\hermes-agent[pty,mcp,cron,messaging]" --python "%VENV_PYTHON%" --reinstall-package hermes-agent
 
 :: 修补 exe 启动器中的 Python 路径
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\scripts\fix-portable-paths.ps1" -VenvDir "%SCRIPT_DIR%\hermes\.venv" -RuntimeDir "%SCRIPT_DIR%\runtime" -AgentDir "%SCRIPT_DIR%\hermes\hermes-agent" -UvExe "%UV_EXE%"

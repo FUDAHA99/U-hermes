@@ -9,33 +9,38 @@ on:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   # --- Build Portable Packages ---
   portable-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Build portable package
         shell: pwsh
         run: |
           cd portable
+
+          # Pinned toolchain versions (shared with setup.sh)
+          $V = @{}
+          foreach ($line in Get-Content versions.env) {
+            if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$') { $V[$matches[1]] = $matches[2] }
+          }
+          Write-Host "Toolchain: Python $($V.PYTHON_EMBED_VERSION), Node $($V.NODE_VERSION), uv $($V.UV_VERSION), web-ui $($V.HERMES_WEB_UI_VERSION)"
+
           # Download embedded Python
-          $zipName = "python-3.11.9-embed-amd64.zip"
-          $url = "https://www.python.org/ftp/python/3.11.9/$zipName"
+          $zipName = "python-$($V.PYTHON_EMBED_VERSION)-embed-amd64.zip"
+          $url = "https://www.python.org/ftp/python/$($V.PYTHON_EMBED_VERSION)/$zipName"
           Invoke-WebRequest -Uri $url -OutFile $zipName
           New-Item -ItemType Directory -Path "runtime/python-win-x64" -Force
           Expand-Archive $zipName -DestinationPath "runtime/python-win-x64" -Force
@@ -46,7 +51,7 @@ jobs:
 
           # Download uv
           $uvZip = "uv-x86_64-pc-windows-msvc.zip"
-          Invoke-WebRequest "https://github.com/astral-sh/uv/releases/download/0.7.12/$uvZip" -OutFile $uvZip
+          Invoke-WebRequest "https://github.com/astral-sh/uv/releases/download/$($V.UV_VERSION)/$uvZip" -OutFile $uvZip
           New-Item -ItemType Directory -Path "runtime/uv" -Force
           Expand-Archive $uvZip -DestinationPath "runtime/uv" -Force
           Remove-Item $uvZip
@@ -58,8 +63,8 @@ jobs:
           }
 
           # Download Node.js
-          $nodeZip = "node-v22.22.1-win-x64.zip"
-          Invoke-WebRequest "https://nodejs.org/dist/v22.22.1/$nodeZip" -OutFile $nodeZip
+          $nodeZip = "node-$($V.NODE_VERSION)-win-x64.zip"
+          Invoke-WebRequest "https://nodejs.org/dist/$($V.NODE_VERSION)/$nodeZip" -OutFile $nodeZip
           New-Item -ItemType Directory -Path "runtime/node-win-x64" -Force
           Expand-Archive $nodeZip -DestinationPath "runtime/node-temp" -Force
           $inner = Get-ChildItem "runtime/node-temp" -Directory | Select-Object -First 1
@@ -81,17 +86,28 @@ jobs:
           npm run build
           cd ../../..
 
-          # Create venv and install (includes messaging extra for aiohttp/gateway API server)
+          # Create venv and install.
+          # HERMES_NIX_BUILD=1 is upstream's escape hatch for packaging contexts:
+          # since Jul 2026 their setup.py refuses to build a wheel otherwise, to
+          # steer end users to the official installer. We are a packager, like the
+          # Nix derivation it was written for. The resulting wheel deliberately
+          # omits web_dist/locales/skills, which resolve at runtime from the source
+          # checkout we ship alongside the venv.
+          # Extras: `cli` was removed upstream (uv only warns); `pty` and `cron` are
+          # now no-op aliases kept for clarity; `mcp` and `messaging` still matter.
+          $env:HERMES_NIX_BUILD = "1"
           $pythonExe = "runtime/python-win-x64/python.exe"
           & "runtime/uv/uv.exe" venv "hermes/.venv" --python $pythonExe
-          & "runtime/uv/uv.exe" pip install "hermes/hermes-agent[cli,pty,mcp,cron,messaging]" --python "hermes/.venv/Scripts/python.exe"
+          & "runtime/uv/uv.exe" pip install "hermes/hermes-agent[pty,mcp,cron,messaging]" --python "hermes/.venv/Scripts/python.exe"
+          if ($LASTEXITCODE -ne 0) { Write-Error "hermes-agent install failed"; exit 1 }
 
           # Create portable hermes.cmd wrapper (hermes.exe breaks when drive letter changes)
           '@echo off' + "`n" + '"%~dp0python.exe" -m hermes_cli.main %*' | Set-Content "hermes/.venv/Scripts/hermes.cmd" -Encoding ascii
 
-          # Install Hermes Web UI (npm package)
+          # Install Hermes Web UI (npm package, pinned -- upstream ships 2-4/week)
           $NPM = "runtime\node-win-x64\npm.cmd"
-          & $NPM install -g hermes-web-ui --prefix "runtime/node-win-x64"
+          & $NPM install -g "hermes-web-ui@$($V.HERMES_WEB_UI_VERSION)" --prefix "runtime/node-win-x64"
+          if ($LASTEXITCODE -ne 0) { Write-Error "hermes-web-ui install failed"; exit 1 }
 
           # Initialize data
           New-Item -ItemType Directory -Path "data/memory","data/skills","data/sessions","data/cron" -Force
@@ -133,7 +149,6 @@ jobs:
 
           Write-Host "=== [4/4] Web UI server starts and answers HTTP ==="
           $env:PORT = "8648"
-          $env:AUTH_DISABLED = "1"
           $env:HERMES_BIN = (Resolve-Path "hermes/.venv/Scripts/hermes.exe").Path
           $node = (Resolve-Path "runtime/node-win-x64/node.exe").Path
           $server = (Resolve-Path "runtime/node-win-x64/node_modules/hermes-web-ui/dist/server/index.js").Path
@@ -160,19 +175,19 @@ jobs:
 
       - name: Upload to Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.ARTIFACT }}
 
   portable-mac:
     runs-on: macos-14  # ARM64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Build portable package
         env:
@@ -180,6 +195,14 @@ jobs:
           PYPI_MIRROR: https://pypi.org/simple
         run: |
           cd portable
+          # Pinned toolchain versions (same file setup.sh reads)
+          . ./versions.env
+          echo "Toolchain: Node $NODE_VERSION, uv $UV_VERSION, web-ui $HERMES_WEB_UI_VERSION"
+
+          # setup.sh downloads the Node/uv runtimes and creates the venv.
+          # HERMES_NIX_BUILD=1 is upstream's escape hatch for packaging contexts:
+          # since Jul 2026 their setup.py refuses to build a wheel otherwise.
+          export HERMES_NIX_BUILD=1
           bash setup.sh
 
           # Apply U-Hermes tweaks (anchor-based and idempotent; exits non-zero
@@ -192,15 +215,14 @@ jobs:
           npm run build
           cd ../../..
 
-          # Download Node.js portable for macOS ARM64
-          NODE_VER="v22.16.0"
-          curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-darwin-arm64.tar.xz" -o node.tar.xz
-          mkdir -p runtime/node-mac-arm64
-          tar xf node.tar.xz --strip-components=1 -C runtime/node-mac-arm64
-          rm node.tar.xz
+          # Node.js for macOS already came from setup.sh (same versions.env pin).
+          # A second download here used to overlay a different version onto the
+          # same directory, shipping a hybrid tree.
+          test -x runtime/node-mac-arm64/bin/node || { echo "setup.sh did not install Node"; exit 1; }
+          echo "Bundled Node: $(runtime/node-mac-arm64/bin/node --version)"
 
-          # Install Hermes Web UI (npm package)
-          runtime/node-mac-arm64/bin/npm install -g hermes-web-ui --prefix runtime/node-mac-arm64
+          # Install Hermes Web UI (npm package, pinned -- upstream ships 2-4/week)
+          runtime/node-mac-arm64/bin/npm install -g "hermes-web-ui@${HERMES_WEB_UI_VERSION}" --prefix runtime/node-mac-arm64
 
           # Initialize data
           mkdir -p data/memory data/skills data/sessions data/cron
@@ -239,7 +261,7 @@ jobs:
           echo "=== [4/4] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)
           test -n "$SERVER"
-          PORT=8648 AUTH_DISABLED=1 HERMES_BIN="$PWD/hermes/.venv/bin/hermes" \
+          PORT=8648 HERMES_BIN="$PWD/hermes/.venv/bin/hermes" \
             runtime/node-mac-arm64/bin/node "$SERVER" &
           SERVER_PID=$!
           ok=0
@@ -260,7 +282,7 @@ jobs:
 
       - name: Upload to Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: ${{ env.ARTIFACT }}

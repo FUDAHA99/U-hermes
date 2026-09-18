@@ -273,10 +273,15 @@ function Install-Dependencies {
     Write-Step "  " "Installing Hermes Agent packages (China mirror)..." "DarkGray"
     $env:UV_INDEX_URL = $pypiMirror
 
-    # Install hermes-agent (non-editable for portable builds)
+    # Install hermes-agent. Non-editable: an editable install bakes an absolute
+    # path into the venv, which breaks as soon as the drive letter changes.
+    # HERMES_NIX_BUILD=1 is upstream's escape hatch for packaging contexts --
+    # since Jul 2026 their setup.py refuses to build a wheel without it.
+    # Extras: `cli` was removed upstream; pty/cron are no-op aliases now.
+    $env:HERMES_NIX_BUILD = "1"
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $UvExe pip install "$AgentDir[cli,pty,mcp,cron,messaging]" --python $venvPython 2>&1 | ForEach-Object {
+    & $UvExe pip install "$AgentDir[pty,mcp,cron,messaging]" --python $venvPython 2>&1 | ForEach-Object {
         if ($_ -match "error|Error|ERROR") { Write-Host "    $_" -ForegroundColor Red }
     }
     $ErrorActionPreference = $prevEAP
