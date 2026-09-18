@@ -110,7 +110,7 @@ if exist "%DATA_DIR%\.env" (
 :: Protect config from Web UI overwrites
 :: ============================================================================
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\scripts\protect-config.ps1" -ConfigFile "%DATA_DIR%\config.yaml"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\scripts\protect-config.ps1" -ConfigFile "%DATA_DIR%\config.yaml" -InstallDir "%SCRIPT_DIR%"
 
 :: ============================================================================
 :: Check if config exists and has a model set

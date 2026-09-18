@@ -1,9 +1,11 @@
-# protect-config.ps1 — Keep config.yaml healthy across launches.
+﻿# protect-config.ps1 — Keep config.yaml healthy across launches.
 #   1. Restore custom_providers after the Web UI rewrites the file
 #   2. Make sure the gateway API server has a key, which upstream now requires
+#   3. Give the agent a workspace outside the install directory
 
 param(
-    [Parameter(Mandatory)][string]$ConfigFile
+    [Parameter(Mandatory)][string]$ConfigFile,
+    [string]$InstallDir
 )
 
 $backupFile = "$ConfigFile.providers.bak"
@@ -11,6 +13,36 @@ $backupFile = "$ConfigFile.providers.bak"
 if (-not (Test-Path $ConfigFile)) { exit 0 }
 
 $content = Get-Content $ConfigFile -Raw -Encoding utf8
+
+# --- Agent workspace ------------------------------------------------------
+# terminal.cwd is where the gateway, messaging and cron runs do their work.
+# Upstream defaults it to "." -- the directory the launcher started from --
+# which means everything the agent creates lands among the program files.
+# Point it at a folder BESIDE the install instead, so a user's projects are
+# never entangled with files an upgrade replaces.
+#
+# Only filled in when the user has not chosen one: a real path is left alone,
+# so whatever they set here or in the config page wins.
+if ($InstallDir) {
+    $cwdMatch = [regex]::Match($content, "(?m)^(\s+)cwd:\s*(.*)$")
+    $current = if ($cwdMatch.Success) { $cwdMatch.Groups[2].Value.Trim().Trim("'", '"') } else { "" }
+    if ($current -in @("", ".", "./", ".\")) {
+        $workspace = Join-Path (Split-Path $InstallDir -Parent) "U-Hermes工作区"
+        if (-not (Test-Path $workspace)) {
+            New-Item -ItemType Directory -Path $workspace -Force | Out-Null
+        }
+        $escaped = $workspace -replace "'", "''"
+        if ($cwdMatch.Success) {
+            $content = $content -replace "(?m)^(\s+)cwd:\s*.*$", "`${1}cwd: '$escaped'"
+        } elseif ($content -match '(?m)^terminal:\s*$') {
+            $content = $content -replace "(?m)^(terminal:\s*)$", "`${1}`n  cwd: '$escaped'"
+        } else {
+            $content = $content.TrimEnd() + "`nterminal:`n  cwd: '$escaped'`n"
+        }
+        Set-Content -Path $ConfigFile -Value $content -Encoding utf8 -NoNewline
+        Write-Host "  [OK] Agent workspace set to $workspace" -ForegroundColor Green
+    }
+}
 
 # --- Gateway API key ------------------------------------------------------
 # Since hermes-agent 0.21 the api_server platform refuses to start without a

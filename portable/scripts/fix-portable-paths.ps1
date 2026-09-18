@@ -1,4 +1,4 @@
-# fix-portable-paths.ps1 — Make the portable venv work from wherever it was copied to.
+﻿# fix-portable-paths.ps1 — Make the portable venv work from wherever it was copied to.
 #
 # CI builds the venv under D:\a\..., users run it from H:\Hermes\ or a different
 # drive letter every time. Three things have to be repaired on arrival:
