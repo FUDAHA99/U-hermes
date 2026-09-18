@@ -70,11 +70,10 @@ jobs:
           # Clone Hermes Agent
           git clone --depth 1 https://github.com/NousResearch/hermes-agent.git hermes/hermes-agent
 
-          # Apply patches (--ignore-whitespace handles CRLF/LF mismatch)
-          cd hermes/hermes-agent
-          git apply --ignore-whitespace ../../patches/hermes-web-auto-locale.patch --verbose
-          git apply --ignore-whitespace ../../patches/hermes-cli-win-noconsole.patch --verbose
-          cd ../..
+          # Apply U-Hermes tweaks (anchor-based and idempotent; exits non-zero
+          # if upstream drifted, so drift fails CI instead of reaching users)
+          python scripts/apply-upstream-tweaks.py hermes/hermes-agent
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
           # Build Web UI (built-in dashboard)
           cd hermes/hermes-agent/web
@@ -183,11 +182,9 @@ jobs:
           cd portable
           bash setup.sh
 
-          # Apply patches (--ignore-whitespace handles CRLF/LF mismatch)
-          cd hermes/hermes-agent
-          git apply --ignore-whitespace ../../patches/hermes-web-auto-locale.patch --verbose
-          git apply --ignore-whitespace ../../patches/hermes-cli-win-noconsole.patch --verbose
-          cd ../..
+          # Apply U-Hermes tweaks (anchor-based and idempotent; exits non-zero
+          # if upstream drifted, so drift fails CI instead of reaching users)
+          python3 scripts/apply-upstream-tweaks.py hermes/hermes-agent
 
           # Build Web UI (built-in dashboard)
           cd hermes/hermes-agent/web

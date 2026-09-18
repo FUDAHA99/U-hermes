@@ -16,8 +16,10 @@ U-Hermes combines the **portable USB distribution** of [U-Claw](https://github.c
 **Core capabilities:**
 - **Plug and play** — insert USB, double-click, AI ready. Zero external dependencies
 - **Self-improving** — auto-creates skills from experience, improves them during use
-- **Chat Web UI** — built-in browser chat interface (hermes_client), auto-opens on startup
-- **Web Dashboard** — Hermes Agent native dashboard for skills, sessions, cron management
+- **Chat Web UI** — built-in browser chat interface (hermes-web-ui), auto-opens on startup
+- **Web Dashboard** — skills, sessions and cron management in the same UI
+- **Self-healing** — auto-repairs stale paths when the drive letter changes, restores config after UI overwrites
+- **Failover** — switches to a backup model automatically when the primary times out or runs out of credit
 - **Multi-platform messaging** — QQ / WeChat / DingTalk / Feishu / Telegram / Discord / WhatsApp / Signal / Slack
 - **China-optimized** — domestic model support, China mirrors, Chinese skills pre-installed
 - **Dual platform** — Windows + macOS (ARM64) portable builds via CI
@@ -73,8 +75,10 @@ bash Mac-Start.command
 
 | Feature | Description |
 |---------|-------------|
-| **Chat Web UI** | Built-in hermes_client chat interface, auto-opens in browser |
-| **Web Dashboard** | Hermes Agent dashboard on port 9119 |
+| **Chat Web UI** | Built-in hermes-web-ui chat interface on port 8648, auto-opens in browser |
+| **One-click diagnostics** | Checks config, ports and API connectivity, explains errors in plain language |
+| **Connection test** | Verifies the API key from the config page before saving |
+| **Model failover** | Falls back to a backup provider on timeout, 401 or quota errors |
 | **Self-learning** | Creates skills from experience, improves them automatically |
 | **10 Chinese skills** | Xiaohongshu, Douyin, WeChat articles, Weibo, Bilibili, Zhihu, etc. |
 | **Multi-model** | DeepSeek, Kimi, Qwen, GLM, MiniMax, Doubao + Claude/GPT/Gemini |
@@ -113,14 +117,20 @@ U-Hermes/                        ← Copy to USB drive
 ├── Config.html                  Web configuration page
 ├── setup.ps1 / setup.sh         First-time dependency download
 │
+├── scripts/                     Maintenance helpers
+│   ├── apply-upstream-tweaks.py Applies our tweaks to the vendored agent
+│   ├── fix-portable-paths.ps1   Repairs venv paths after a drive-letter change
+│   ├── protect-config.ps1       Restores config.yaml after a Web UI overwrite
+│   ├── config-server.py         Backs the config page (save + connection test)
+│   └── diagnose.py              One-click diagnostics
+│
 ├── runtime/                     ← Downloaded by setup (not in git)
 │   ├── python-win-x64/          Embedded Python 3.11
-│   ├── node-win-x64/            Node.js 22 (browser tools)
+│   ├── node-win-x64/            Node.js 22 + hermes-web-ui (Chat Web UI)
 │   └── uv/                      uv package manager
 │
 ├── hermes/                      ← Downloaded by setup (not in git)
 │   ├── hermes-agent/            Hermes Agent source
-│   ├── hermes-client/           Chat Web UI (hermes_client)
 │   └── .venv/                   Python virtual environment
 │
 ├── skills-cn/                   Pre-installed Chinese skills
@@ -158,10 +168,10 @@ U-Hermes/                        ← Copy to USB drive
 | Component | Size |
 |-----------|------|
 | Python 3.11 + uv | ~71 MB |
-| Node.js 22 LTS | ~94 MB |
+| Node.js 22 LTS + hermes-web-ui | ~144 MB |
 | Hermes Agent + deps | ~383 MB |
-| hermes_client | ~50 MB |
-| Total | **~600 MB** |
+| Download (zip) | **~350 MB** Windows / **~400 MB** macOS |
+| Unpacked | **~600 MB** |
 | Recommended USB | **4 GB+** |
 
 ---
@@ -199,12 +209,17 @@ git tag v0.x.0
 git push origin v0.x.0
 ```
 
-GitHub Actions builds both Windows and Mac portable packages, then publishes them to Releases.
+GitHub Actions builds both Windows and Mac portable packages, runs smoke tests
+(package imports, CLI entry point, and a real Web UI boot answering HTTP), then
+publishes them to Releases.
+
+Run the workflow manually from the Actions tab to build and smoke-test without
+publishing a release — useful for checking whether upstream drift broke the build.
 
 ## Credits
 
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research — the self-improving AI engine
-- [hermes_client](https://github.com/lotsoftick/hermes_client) — Chat Web UI
+- [hermes-web-ui](https://www.npmjs.com/package/hermes-web-ui) — Chat Web UI
 - [U-Claw](https://github.com/dongsheng123132/u-claw) — original USB portable AI concept
 - All model providers for their APIs
 
