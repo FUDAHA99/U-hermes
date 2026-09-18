@@ -214,7 +214,26 @@ GitHub Actions builds both Windows and Mac portable packages, runs smoke tests
 publishes them to Releases.
 
 Run the workflow manually from the Actions tab to build and smoke-test without
-publishing a release — useful for checking whether upstream drift broke the build.
+publishing a release.
+
+### Pinned versions and the weekly canary
+
+The whole toolchain is pinned in [`portable/versions.env`](portable/versions.env),
+which both `setup.sh` and the CI workflow read — including `HERMES_AGENT_REF`,
+the upstream release tag the AI engine is built from. Releases are therefore
+reproducible.
+
+Because upstream moves fast (~21,500 commits landed between two of our builds),
+a scheduled **canary** run every Monday builds against upstream *latest* instead
+of the pins. If upstream breaks us, that scheduled run fails within days rather
+than the breakage surfacing months later when someone cuts a release. Trigger one
+on demand with the `canary` checkbox on a manual run.
+
+To take a newer engine: run the canary, and if it is green, bump
+`HERMES_AGENT_REF` (and any other pin) and tag a release.
+
+Note that GitHub disables scheduled workflows after 60 days without repository
+activity; re-enable it from the Actions tab if the project goes quiet.
 
 ## Credits
 

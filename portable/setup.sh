@@ -194,11 +194,24 @@ install_hermes_source() {
     info "[3/4] Downloading Hermes Agent..."
     ensure_dir "$HERMES_DIR"
 
+    # Pinned release tag, unless CANARY=true asks for upstream HEAD.
+    local agent_ref="${HERMES_AGENT_REF:-}"
+    if [ "${CANARY:-}" = "true" ]; then
+        agent_ref=""
+        info "CANARY: building against hermes-agent HEAD"
+    fi
+
     if command -v git &>/dev/null; then
         rm -rf "$agent_dir"
-        git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$agent_dir" 2>/dev/null
+        if [ -n "$agent_ref" ]; then
+            git clone --depth 1 --branch "$agent_ref" https://github.com/NousResearch/hermes-agent.git "$agent_dir" 2>/dev/null
+        else
+            git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$agent_dir" 2>/dev/null
+        fi
     else
+        local zip_ref="${agent_ref:-main}"
         local zip_url="https://github.com/NousResearch/hermes-agent/archive/refs/heads/main.zip"
+        [ -n "$agent_ref" ] && zip_url="https://github.com/NousResearch/hermes-agent/archive/refs/tags/${zip_ref}.zip"
         local zip_path="$HERMES_DIR/hermes-agent.zip"
         download "$zip_url" "$zip_path" "Hermes Agent (zip)"
         unzip -qo "$zip_path" -d "$HERMES_DIR"
