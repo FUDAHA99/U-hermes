@@ -117,9 +117,20 @@ jobs:
           model:
             provider: ""
             model: ""
-          api_server:
-            extra:
-              port: 8642
+          # SQLite WAL is not crash-safe on the exFAT/FAT32 filesystems USB drives
+          # ship with, and unplugging the drive is how this product usually gets
+          # closed. Upstream's auto-fallback only triggers when SQLite itself
+          # reports WAL unsupported, which exFAT does not.
+          database:
+            journal_mode: "delete"
+          # Gateway API server. Upstream reads this under platforms.*, not at the
+          # top level, where it was silently ignored.
+          platforms:
+            api_server:
+              enabled: true
+              extra:
+                port: 8642
+                host: 127.0.0.1
           skills:
             external_dirs:
               - "../skills-cn"
@@ -232,9 +243,20 @@ jobs:
           model:
             provider: ""
             model: ""
-          api_server:
-            extra:
-              port: 8642
+          # SQLite WAL is not crash-safe on the exFAT/FAT32 filesystems USB drives
+          # ship with, and unplugging the drive is how this product usually gets
+          # closed. Upstream's auto-fallback only triggers when SQLite itself
+          # reports WAL unsupported, which exFAT does not.
+          database:
+            journal_mode: "delete"
+          # Gateway API server. Upstream reads this under platforms.*, not at the
+          # top level, where it was silently ignored.
+          platforms:
+            api_server:
+              enabled: true
+              extra:
+                port: 8642
+                host: 127.0.0.1
           skills:
             external_dirs:
               - "../skills-cn"

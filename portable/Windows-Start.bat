@@ -134,11 +134,16 @@ if not exist "%DATA_DIR%\config.yaml" (
         echo   enabled: true
     ) > "%DATA_DIR%\config.yaml"
 )
+:: Only the model section at the top of the file decides this. Other sections
+:: (delegation, memory, auxiliary...) carry their own empty provider: "" keys,
+:: and matching those would send a configured user back to the setup page.
 set "MODEL_CONFIGURED=1"
-for /f "tokens=*" %%L in ('findstr /N /C:"provider:" "%DATA_DIR%\config.yaml"') do (
-    echo %%L | findstr /C:"1:" >nul 2>&1 && echo %%L | findstr /C:"provider: \"\"" >nul 2>&1 && set "MODEL_CONFIGURED=0"
-    echo %%L | findstr /C:"2:" >nul 2>&1 && echo %%L | findstr /C:"provider: \"\"" >nul 2>&1 && set "MODEL_CONFIGURED=0"
-    echo %%L | findstr /C:"3:" >nul 2>&1 && echo %%L | findstr /C:"provider: \"\"" >nul 2>&1 && set "MODEL_CONFIGURED=0"
+set /a _CFGLINE=0
+for /f "usebackq delims=" %%L in ("%DATA_DIR%\config.yaml") do (
+    set /a _CFGLINE+=1
+    if !_CFGLINE! leq 5 (
+        echo %%L | findstr /C:"provider: \"\"" >nul 2>&1 && set "MODEL_CONFIGURED=0"
+    )
 )
 if "%MODEL_CONFIGURED%"=="0" (
     echo.
