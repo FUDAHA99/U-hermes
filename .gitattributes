@@ -1,9 +1,9 @@
-# Patch files must keep LF line endings or git apply fails on macOS/Linux
-*.patch text eol=lf
-
 # Shell scripts should keep LF
 *.sh text eol=lf
 *.command text eol=lf
+
+# Sourced by setup.sh on macOS; CRLF would make the values carry a stray \r
+*.env text eol=lf
 
 # Windows batch/PowerShell scripts must use CRLF or cmd.exe will crash
 *.bat text eol=crlf
