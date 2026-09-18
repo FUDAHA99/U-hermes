@@ -81,11 +81,14 @@ set "PYTHONIOENCODING=utf-8"
 set "UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple"
 set "PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple"
 
-:: Hermes Web UI settings
-set "AUTH_DISABLED=1"
+:: Hermes Web UI settings (AUTH_DISABLED is not a real knob -- it appears
+:: nowhere in the web-ui bundle; auth uses a token under HERMES_WEB_UI_HOME)
 set "PORT=8648"
 set "HERMES_WEB_UI_HOME=%DATA_DIR%\webui"
-set "HERMES_BIN=%VENV_DIR%\Scripts\hermes.exe"
+:: hermes.cmd resolves python.exe relative to itself, so it survives a drive
+:: letter change. The .exe carries an absolute path baked in at build time,
+:: and newer uv trampolines cannot be rewritten in place.
+set "HERMES_BIN=%VENV_DIR%\Scripts\hermes.cmd"
 set "HERMES_AGENT_BRIDGE_PYTHON=%VENV_PYTHON%"
 set "HERMES_AGENT_ROOT=%HERMES_DIR%\hermes-agent"
 set "HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=0"
@@ -122,9 +125,14 @@ if not exist "%DATA_DIR%\config.yaml" (
         echo model:
         echo   provider: ""
         echo   model: ""
-        echo api_server:
-        echo   extra:
-        echo     port: 8642
+        echo database:
+        echo   journal_mode: "delete"
+        echo platforms:
+        echo   api_server:
+        echo     enabled: true
+        echo     extra:
+        echo       port: 8642
+        echo       host: 127.0.0.1
         echo skills:
         echo   external_dirs:
         echo     - "../skills-cn"
@@ -204,10 +212,10 @@ if not "%~1"=="" (
     goto :check_exit
 )
 
-:: --- Pre-launch: Sync config to ~/.hermes/ for GatewayManager ---
-:: The Web UI's GatewayManager overrides HERMES_HOME to ~/.hermes
-:: so the gateway reads ~/.hermes/config.yaml instead of data/config.yaml.
-:: We must copy model+provider config AND set port=8642 before launching.
+:: --- Pre-launch: mirror the config into ~/.hermes ---
+:: HERMES_HOME IS honoured by both the Web UI and the gateway (verified), so
+:: this is a fallback, not a workaround for an override: it keeps a working
+:: config in the default location for any component started without our env.
 set "USER_HERMES_DIR=%USERPROFILE%\.hermes"
 if not exist "%USER_HERMES_DIR%" mkdir "%USER_HERMES_DIR%" 2>nul
 :: Copy full data/config.yaml (model, custom_providers, skills, etc.)

@@ -1,6 +1,6 @@
-# protect-config.ps1 — Protect custom_providers from Web UI config overwrites
-# The Web UI settings page does a full rewrite of config.yaml, wiping custom_providers.
-# This script saves a backup of the providers section and restores it if overwritten.
+# protect-config.ps1 — Keep config.yaml healthy across launches.
+#   1. Restore custom_providers after the Web UI rewrites the file
+#   2. Make sure the gateway API server has a key, which upstream now requires
 
 param(
     [Parameter(Mandatory)][string]$ConfigFile
@@ -11,6 +11,28 @@ $backupFile = "$ConfigFile.providers.bak"
 if (-not (Test-Path $ConfigFile)) { exit 0 }
 
 $content = Get-Content $ConfigFile -Raw -Encoding utf8
+
+# --- Gateway API key ------------------------------------------------------
+# Since hermes-agent 0.21 the api_server platform refuses to start without a
+# strong key, "including loopback-only binds on 127.0.0.1". Generate one per
+# install on first run so the gateway comes up without the user doing anything.
+if ($content -match '(?m)^platforms:' -and $content -match '(?m)^\s+api_server:') {
+    $keyMatch = [regex]::Match($content, "(?m)^(\s+)key:\s*(.*)$")
+    $needsKey = (-not $keyMatch.Success) -or
+                ($keyMatch.Groups[2].Value.Trim().Trim("'", '"').Length -lt 32)
+    if ($needsKey) {
+        $bytes = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $key = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
+        if ($keyMatch.Success) {
+            $content = $content -replace "(?m)^(\s+)key:\s*.*$", "`${1}key: '$key'"
+        } else {
+            $content = $content -replace "(?m)^(\s+api_server:\s*)$", "`${1}`n    key: '$key'"
+        }
+        Set-Content -Path $ConfigFile -Value $content -Encoding utf8 -NoNewline
+        Write-Host "  [OK] Generated a gateway API key for this install." -ForegroundColor Green
+    }
+}
 
 # Check if config has custom_providers with actual entries
 $hasProviders = $content -match 'custom_providers:\s*\r?\n\s+-\s+name:'

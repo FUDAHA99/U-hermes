@@ -86,7 +86,6 @@ jobs:
           Remove-Item "runtime/node-temp" -Recurse -Force
           Remove-Item $nodeZip
 
-          # Clone Hermes Agent
           # Clone Hermes Agent: the pinned release tag normally, upstream HEAD
           # on canary runs so drift is caught by a scheduled failure.
           if ($env:CANARY -eq "true") {
@@ -123,6 +122,21 @@ jobs:
           & "runtime/uv/uv.exe" venv "hermes/.venv" --python $pythonExe
           & "runtime/uv/uv.exe" pip install "hermes/hermes-agent[pty,mcp,cron,messaging]" --python "hermes/.venv/Scripts/python.exe"
           if ($LASTEXITCODE -ne 0) { Write-Error "hermes-agent install failed"; exit 1 }
+
+          # Isolate the bundled interpreter from any Python on the user's machine.
+          # Without a ._pth beside the venv's python.exe, the embedded interpreter
+          # falls back to the registry and can load a same-version host install's
+          # stdlib and DLLs -- which crashes with an access violation.
+          $pyTag = (Get-ChildItem "runtime/python-win-x64" -Filter "python3*.dll" |
+                    Where-Object { $_.Name -match '^python\d+\.dll$' } |
+                    Select-Object -First 1).BaseName
+          $base = (Resolve-Path "runtime/python-win-x64").Path
+          $venv = (Resolve-Path "hermes/.venv").Path
+          @(
+            (Join-Path $base "$pyTag.zip"), $base, (Join-Path $base "DLLs"),
+            (Join-Path $venv "Lib\site-packages"), (Join-Path $venv "Scripts"), $venv, "import site"
+          ) -join "`r`n" | Set-Content "hermes/.venv/Scripts/$pyTag._pth" -Encoding ascii
+          Write-Host "Wrote $pyTag._pth into the venv"
 
           # Create portable hermes.cmd wrapper (hermes.exe breaks when drive letter changes)
           '@echo off' + "`n" + '"%~dp0python.exe" -m hermes_cli.main %*' | Set-Content "hermes/.venv/Scripts/hermes.cmd" -Encoding ascii
@@ -174,9 +188,17 @@ jobs:
           & $py -c "import hermes_cli.main, agent, gateway; print('imports OK')"
           if ($LASTEXITCODE -ne 0) { Write-Error "package import failed"; exit 1 }
 
-          Write-Host "=== [2/4] hermes.exe entry point ==="
-          & "hermes/.venv/Scripts/hermes.exe" --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { Write-Error "hermes.exe failed"; exit 1 }
+          Write-Host "=== [2/4] CLI entry point (plugin + logging init) ==="
+          # --help exits before plugin discovery, so it misses crashes in that path.
+          # `profile list` loads plugins and the logging stack -- where a host-Python
+          # leak showed up as an access violation that --help sailed past.
+          & "hermes/.venv/Scripts/hermes.cmd" profile list
+          if ($LASTEXITCODE -ne 0) { Write-Error "hermes CLI failed"; exit 1 }
+          $root = (Get-Location).Path
+          $paths = & $py -c "import sys; print('|'.join(p for p in sys.path if p))"
+          $leak = $paths -split '\|' | Where-Object { -not $_.ToLower().StartsWith($root.ToLower()) }
+          if ($leak) { Write-Error "sys.path escapes the package: $($leak -join ', ')"; exit 1 }
+          Write-Host "sys.path is self-contained"
 
           Write-Host "=== [3/4] helper scripts compile ==="
           & $py -m py_compile scripts/config-server.py scripts/diagnose.py
