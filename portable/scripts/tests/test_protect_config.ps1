@@ -151,6 +151,19 @@ $key = Get-ApiServerKey $cfg
 Check ($key.Length -ge 32) 'a strong key is generated'
 Check ($key -ne 'short') 'the weak one is not carried over'
 
+# Unzipping straight to a drive root is the normal thing to do with a USB
+# stick, and it used to kill this script before it reached the gateway key.
+Write-Host 'installed at a drive root'
+$cfg = Run-Case 'drive-root' @"
+model:
+  provider: "deepseek"
+"@
+foreach ($root in @('H:', 'H:', 'Z:')) {
+    $out = & $script -ConfigFile $cfg -InstallDir $root 2>&1 | Out-String
+    Check (-not ($out -match 'Exception|异常|FullyQualifiedErrorId')) "InstallDir '$root' does not throw"
+}
+Check ((Get-ApiServerKey $cfg).Length -ge 32) 'the gateway key is still created at a drive root'
+
 Write-Host 'a cwd set on something other than terminal is not touched'
 $cfg = Run-Case 'cwd-scope' @"
 terminal:

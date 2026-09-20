@@ -1,6 +1,7 @@
 ﻿# ============================================================================
 # U-Hermes Portable Setup Script (Windows)
-# Downloads: Embedded Python 3.11 + uv + Hermes Agent + dependencies
+# Downloads the toolchain pinned in versions.env: embedded Python + uv +
+# Node + the pinned hermes-agent tag.
 # All downloads use China mirrors where possible.
 # ============================================================================
 
@@ -347,6 +348,15 @@ function Initialize-Data {
     $configFile = Join-Path $dataDir "config.yaml"
     if (-not (Test-Path $configFile)) {
         # Write default config with Chinese-friendly defaults
+        # Must match the default written by .github/workflows/release.yml and
+        # Windows-Start.bat. This copy had drifted into a third shape that the
+        # engine reads differently: a `providers:` block it does not read at
+        # all, `api_server:` at the TOP level instead of under `platforms:`
+        # (so the gateway got no port and no key), `skills.extra_dirs` instead
+        # of `external_dirs` (so the bundled Chinese skills never loaded), a
+        # `gateway.platforms` LIST that nothing reads, the dead
+        # api.minimax.chat endpoint, and no database.journal_mode at all.
+        # Anyone who built from source got that config.
         $defaultConfig = @"
 # U-Hermes Configuration
 # Docs: https://hermes-agent.nousresearch.com/docs/user-guide/configuration
@@ -354,50 +364,24 @@ function Initialize-Data {
 model:
   provider: ""
   model: ""
-  # Uncomment and fill in your preferred provider:
-  # provider: "deepseek"
-  # model: "deepseek-chat"
-
-providers:
-  deepseek:
-    api_key: ""
-    base_url: "https://api.deepseek.com/v1"
-  kimi:
-    api_key: ""
-    base_url: "https://api.moonshot.cn/v1"
-  qwen:
-    api_key: ""
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  glm:
-    api_key: ""
-    base_url: "https://open.bigmodel.cn/api/paas/v4"
-  minimax:
-    api_key: ""
-    base_url: "https://api.minimax.chat/v1"
-  doubao:
-    api_key: ""
-    base_url: "https://ark.cn-beijing.volces.com/api/v3"
-api_server:
-  extra:
-    port: 8642
-
-gateway:
-  platforms: []
-  # Example:
-  # platforms:
-  #   - type: telegram
-  #     token: "YOUR_BOT_TOKEN"
-  #   - type: qqbot
-  #     app_id: "YOUR_APP_ID"
-  #     app_secret: "YOUR_SECRET"
-
+# Read by hermes_state_wal.resolve_journal_mode(). See the comment in
+# Windows-Start.bat for what actually decides the mode on this package.
+database:
+  journal_mode: "delete"
+# The gateway api server. Upstream reads this under platforms.*, and the key
+# specifically under platforms.api_server.extra.key; protect-config.ps1 fills
+# it in on first launch.
+platforms:
+  api_server:
+    enabled: true
+    extra:
+      port: 8642
+      host: 127.0.0.1
 skills:
-  extra_dirs:
+  external_dirs:
     - "../skills-cn"
-
 memory:
   enabled: true
-
 cron:
   enabled: true
 "@

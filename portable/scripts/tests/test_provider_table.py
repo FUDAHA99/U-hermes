@@ -24,8 +24,35 @@ PORTABLE = os.path.dirname(os.path.dirname(HERE))
 REPO = os.path.dirname(PORTABLE)
 CONFIG_HTML = os.path.join(PORTABLE, "Config.html")
 
+def _engine_label(source):
+    """Which engine this run validated against, and whether it is the pinned one.
+
+    Printed on every run because it is the difference between a meaningful
+    result and a meaningless one. This suite once reported "all checks
+    passed" against a locally installed 0.14.0 while CI checked the 0.21.3
+    that ships, and the two disagree about things this file asserts.
+    """
+    version = "unknown"
+    try:
+        import importlib.metadata as md
+        version = md.version("hermes-agent")
+    except Exception:
+        pass
+    pin = ""
+    try:
+        with open(os.path.join(PORTABLE, "versions.env"), encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("HERMES_AGENT_REF"):
+                    pin = line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    print("validating against hermes-agent %s from %s (versions.env pins %s)"
+          % (version, source, pin or "nothing"))
+
+
 try:
     from hermes_cli.auth import PROVIDER_REGISTRY
+    _engine_label("the installed engine")
 except ImportError:
     ref = os.path.join(REPO, "hermes-agent-ref")
     if not os.path.isdir(ref):
@@ -33,6 +60,7 @@ except ImportError:
         sys.exit(0)
     sys.path.insert(0, ref)
     from hermes_cli.auth import PROVIDER_REGISTRY
+    _engine_label("hermes-agent-ref/, which is NOT what ships")
 
 # Handled outside PROVIDER_REGISTRY by the engine (aggregator /
 # user-supplied), so they get explicit expectations below instead of a

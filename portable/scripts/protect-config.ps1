@@ -24,10 +24,24 @@ $content = Get-Content $ConfigFile -Raw -Encoding utf8
 # Only filled in when the user has not chosen one: a real path is left alone,
 # so whatever they set here or in the config page wins.
 if ($InstallDir) {
+  try {
     $cwdMatch = [regex]::Match($content, "(?m)^(\s+)cwd:\s*(.*)$")
     $current = if ($cwdMatch.Success) { $cwdMatch.Groups[2].Value.Trim().Trim("'", '"') } else { "" }
     if ($current -in @("", ".", "./", ".\")) {
-        $workspace = Join-Path (Split-Path $InstallDir -Parent) "U-Hermes工作区"
+        # Unzipped straight to a drive root, which is exactly what someone
+        # does with a USB stick: Split-Path THROWS on "H:" and returns an
+        # empty string for "H:\", and Join-Path then throws on the empty
+        # path. That killed this script before it reached the gateway key
+        # below, so the install came up with no key and exited 78 every
+        # launch -- with a red stack trace as the only clue.
+        # [IO.Path]::Combine, not Join-Path: the cmdlet resolves PSDrives and
+        # throws DriveNotFoundException for a drive that is not mounted,
+        # which is not a reason to abandon the config file.
+        $parent = ""
+        try { $parent = Split-Path $InstallDir -Parent } catch { $parent = "" }
+        if (-not $parent) { $parent = [System.IO.Path]::GetPathRoot($InstallDir) }
+        if (-not $parent) { $parent = $InstallDir }
+        $workspace = [System.IO.Path]::Combine($parent, "U-Hermes工作区")
         if (-not (Test-Path $workspace)) {
             New-Item -ItemType Directory -Path $workspace -Force | Out-Null
         }
@@ -50,6 +64,11 @@ if ($InstallDir) {
         Set-Content -Path $ConfigFile -Value $content -Encoding utf8 -NoNewline
         Write-Host "  [OK] Agent workspace set to $workspace" -ForegroundColor Green
     }
+  } catch {
+    # Never fatal. Whatever went wrong choosing a folder, the gateway key
+    # below is what decides whether the product can answer a message.
+    Write-Host "  [!] Could not set the agent workspace ($($_.Exception.GetType().Name)); continuing." -ForegroundColor Yellow
+  }
 }
 
 # --- Gateway API key ------------------------------------------------------
