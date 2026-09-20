@@ -118,7 +118,10 @@ platforms:
 "@
 Check ((Get-ApiServerKey $cfg) -eq $existing) 'the existing key is kept'
 
-Write-Host 'a key left at the position the engine ignores is migrated'
+# A key at the legacy position is the user's key, and on hermes-agent 0.21.3
+# it is a WORKING one: from_dict promotes non-typed keys into extra. Minting a
+# replacement would silently rotate a live credential, so it gets moved.
+Write-Host 'a strong key at the legacy position is moved, not rotated'
 $stray = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000'
 $cfg = Run-Case 'stray-key' @"
 platforms:
@@ -129,10 +132,24 @@ platforms:
       port: 8642
 "@
 $key = Get-ApiServerKey $cfg
-Check ($key.Length -ge 32) 'the engine can now see a key'
-Check ($key -ne $stray) 'a fresh key was generated rather than trusting the inert one'
-Check (-not ((Get-Text $cfg) -match [regex]::Escape($stray))) 'the inert key line is gone'
+Check ($key -eq $stray) 'the existing key is kept, not replaced'
+$lineCount = ((Get-Text $cfg) -split "`r?`n" | Where-Object { $_ -match '^\s+key\s*:' }).Count
+Check ($lineCount -eq 1) 'it ends up in exactly one place'
+Check ((Get-Text $cfg) -match '^\s{6}key:' -or (Get-Text $cfg) -match "(?m)^      key:") 'and that place is under extra:'
 Check ((Get-Text $cfg) -match 'port: 8642') 'the rest of extra survives'
+
+Write-Host 'a weak key at the legacy position is replaced'
+$cfg = Run-Case 'weak-key' @"
+platforms:
+  api_server:
+    enabled: true
+    key: 'short'
+    extra:
+      port: 8642
+"@
+$key = Get-ApiServerKey $cfg
+Check ($key.Length -ge 32) 'a strong key is generated'
+Check ($key -ne 'short') 'the weak one is not carried over'
 
 Write-Host 'a cwd set on something other than terminal is not touched'
 $cfg = Run-Case 'cwd-scope' @"

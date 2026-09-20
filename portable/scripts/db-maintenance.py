@@ -1,27 +1,35 @@
 # -*- coding: utf-8 -*-
 """U-Hermes 聊天记录清理 / 数据库瘦身
 
-聊天记录数据库只增不减，而产品里原本没有任何清理入口 —— U 盘迟早被自己
-的历史记录塞满，用户还看不出是什么占的地方。
+聊天记录数据库只增不减，而产品里原本没有任何**手动**清理入口 —— U 盘被
+自己的历史记录塞满时，用户看不出是什么占的地方，也没有办法当场腾空间。
 
-这个脚本做三件事，顺序有讲究：
+关于自动清理，不同引擎版本不一样，所以这里不做假设：
+  0.14.0  sessions.auto_prune 默认关闭
+  0.21.3  默认开启（保留 90 天），但有节流：每 24 小时最多一次，VACUUM
+          每 30 天最多一次，而且要空闲页占比够高才会真的压缩
+无论哪种，"我现在就要腾出空间" 都需要一个手动入口，这就是本脚本。
 
-  1. 删除超过 N 天的旧对话（引擎自己的 prune_sessions）
+三个步骤：
+
+  1. 删除不活跃超过 N 天的旧对话（引擎自己的 prune_sessions）
   2. 让两张 FTS5 索引表 optimize 一次
   3. VACUUM，把空出来的页真正还给文件系统
 
-第 2 步是自己加的。FTS5 删除行时不会真的从索引里拿掉内容，而是写入
-"删除标记"，索引因此不降反增；optimize 才会把这些段合并掉。用引擎自带的
-schema 造库实测（241 MB / 16000 条消息，删掉 86%）：
+第 2 步在新引擎上是多余的（0.21.3 的 vacuum() 自己会先调 optimize_fts），
+在旧引擎上不可缺少，而重复调用只是多花不到一秒。宁可多做一次，也不要假设
+用户装的是哪个版本 —— 这份代码之前就是因为假设了版本而出过错。
 
-    只 prune            —— 文件不变（`hermes sessions prune` 根本不 VACUUM）
-    prune + VACUUM      —— 241 MB -> 61 MB   回收 75%
+它为什么不可缺少：FTS5 删除行时不会真的从索引里拿掉内容，而是写入"删除
+标记"，索引因此不降反增；optimize 才会把这些段合并掉。用 0.14.0 引擎的
+schema 造库实测（241 MB / 16000 条中文消息，删掉 86%）：
+
+    只 prune                  —— 241 MB 不变（那条命令根本不 VACUUM）
+    prune + VACUUM            —— 241 MB -> 61 MB   回收 75%
     prune + optimize + VACUUM —— 241 MB -> 34 MB   回收 86%
 
-optimize 只花了不到一秒，白拿十来个百分点。
-
 optimize 的语义和 SQLite 版本有关：3.42 之前一次调用只做部分合并，要循环
-多次。随包的运行时是 3.45，一次调用即完整合并。
+多次。随包的运行时是 3.45+，一次调用即完整合并。
 
 用法:  db-maintenance.py <data-dir> [--days N] [--yes]
 退出码 0 成功 / 1 失败 / 2 服务还在运行，什么都没做
@@ -127,20 +135,28 @@ def main():
 
     db = SessionDB(Path(db_path))
     conn = db._conn
-    cutoff = time.time() - days * 86400
     total = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    # prune only touches ended sessions, so count the same way it does.
-    doomed = conn.execute(
-        "SELECT COUNT(*) FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL",
-        (cutoff,),
-    ).fetchone()[0]
-    print("  共 %d 段对话 / %d 条消息，其中 %d 段是 %d 天前结束的。"
+
+    # Ask the engine how many its own prune would take. Counting by hand got
+    # this wrong: newer engines measure INACTIVITY, not when the session
+    # started, so a hand-rolled `started_at < cutoff` can promise a dozen
+    # deletions and then delete none.
+    counter = getattr(db, "count_prune_matches", None)
+    if callable(counter):
+        doomed = counter(older_than_days=days)
+    else:
+        cutoff = time.time() - days * 86400
+        doomed = conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL",
+            (cutoff,),
+        ).fetchone()[0]
+    print("  共 %d 段对话 / %d 条消息，其中 %d 段已经 %d 天没有动过。"
           % (total, messages, doomed, days))
 
     if not doomed:
         print()
-        print("  %s 没有超过 %d 天的旧对话，没有可删除的内容。" % (OK, days))
+        print("  %s 没有 %d 天没动过的旧对话，没有可删除的内容。" % (OK, days))
         print("      要腾出空间，可以换一个更小的天数，例如 30。")
         db.close()
         return 0
@@ -167,8 +183,9 @@ def main():
                                sessions_dir=Path(data_dir) / "sessions")
     print("        删除了 %d 段。" % pruned)
 
-    # The step the engine never takes. Without it the VACUUM below reclaims
-    # noticeably less, because the delete markers are still in the index.
+    # Redundant on 0.21.3, whose vacuum() calls optimize_fts() itself;
+    # necessary on 0.14.0, which does not. Running it twice costs under a
+    # second, and guessing the engine version is what went wrong here before.
     print("  [2/3] 正在整理搜索索引...")
     for table in ("messages_fts", "messages_fts_trigram"):
         try:

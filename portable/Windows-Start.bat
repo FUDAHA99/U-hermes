@@ -124,13 +124,21 @@ if not exist "%DATA_DIR%\config.yaml" (
     echo   [i] 首次启动，正在创建默认配置...
     echo.
     mkdir "%DATA_DIR%" 2>nul
-    :: journal_mode is NOT read by the pinned engine (v2026.9.14) -- it has no
-    :: such config key; hermes_state hardcodes PRAGMA journal_mode=WAL and
-    :: falls back to DELETE only when SQLite itself raises, which exFAT does
-    :: not. Verified against the packaged engine. Left in place because a
-    :: later version may read it, and because synchronous=FULL makes a
-    :: committed message durable either way -- but do not tell users the
-    :: database is out of WAL mode, because it is not.
+    :: journal_mode IS read by the pinned engine: hermes_state_wal's
+    :: resolve_journal_mode() reads database.journal_mode before any pragma
+    :: is issued. (An earlier comment here claimed the opposite -- it was
+    :: written by reading the 0.14.0 checkout in portable\hermes, which is
+    :: four months older than the v2026.9.14 the release actually builds.)
+    ::
+    :: On this package it is belt-and-braces rather than the deciding factor:
+    :: the bundled interpreter links SQLite 3.45.1, which the engine's own
+    :: is_sqlite_wal_reset_vulnerable() classifies as carrying the WAL-reset
+    :: corruption bug, so a NEW database is forced to DELETE whatever the
+    :: config says. The line is what makes DELETE stick once the bundled
+    :: SQLite is new enough for that gate to stop firing.
+    ::
+    :: It does NOT rescue an existing WAL database: the engine refuses to
+    :: downgrade one in place. See section 八 of 0-先看我-使用说明.txt.
     (
         echo model:
         echo   provider: ""

@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # U-Hermes Portable Setup Script (Windows)
 # Downloads: Embedded Python 3.11 + uv + Hermes Agent + dependencies
 # All downloads use China mirrors where possible.
@@ -20,10 +20,37 @@ $uvCacheDir = Join-Path $scriptDir ".uv-cache"
 # Fix cross-drive cache issue (uv defaults to %LOCALAPPDATA% which may be on C:)
 $env:UV_CACHE_DIR = $uvCacheDir
 
-# Versions
-$pythonVersion = "3.11.9"
-$nodeVersion = "v22.22.1"
-$uvVersion = "0.7.12"
+# Versions -- read from versions.env, the single source of truth that
+# release.yml and setup.sh already use.
+#
+# This script used to carry its own copies (Python 3.11.9, Node v22.22.1,
+# uv 0.7.12) which had drifted away from the pins, so a Windows developer
+# running setup.ps1 built a toolchain no release has ever shipped. It also
+# cloned hermes-agent from main rather than HERMES_AGENT_REF, which is how
+# the local engine ended up four months behind the released one -- and how
+# a day of conclusions came to be checked against the wrong source.
+$versionsFile = Join-Path $scriptDir "versions.env"
+$V = @{}
+if (Test-Path $versionsFile) {
+    foreach ($line in Get-Content $versionsFile) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$') { $V[$Matches[1]] = $Matches[2] }
+    }
+} else {
+    Write-Host "  [!] versions.env not found beside this script; using fallbacks." -ForegroundColor Yellow
+}
+function Pin([string]$name, [string]$fallback) {
+    if ($V.ContainsKey($name) -and $V[$name]) { return $V[$name] }
+    return $fallback
+}
+
+$pythonVersion = Pin "PYTHON_EMBED_VERSION" "3.13.15"
+$nodeVersion   = Pin "NODE_VERSION"         "v24.21.0"
+$uvVersion     = Pin "UV_VERSION"           "0.12.16"
+$agentRef      = Pin "HERMES_AGENT_REF"     ""
+if ($env:CANARY -eq "true") {
+    $agentRef = ""
+    Write-Host "  [i] CANARY: building against hermes-agent HEAD" -ForegroundColor Cyan
+}
 
 # Mirrors (China-friendly)
 $pypiMirror = "https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -226,10 +253,15 @@ function Install-HermesSource {
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
     if ($gitCmd) {
         if (Test-Path $agentDir) { Remove-Item $agentDir -Recurse -Force }
-        & git clone --depth 1 https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+        if ($agentRef) {
+            & git clone --depth 1 --branch $agentRef https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+        } else {
+            & git clone --depth 1 https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+        }
     } else {
         # Download as zip
-        $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/main.zip"
+        $zipRef = if ($agentRef) { $agentRef } else { "main" }
+        $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/$(if ($agentRef) { 'tags' } else { 'heads' })/$zipRef.zip"
         $zipPath = Join-Path $hermesDir "hermes-agent.zip"
         Download-File -Url $zipUrl -Dest $zipPath -Desc "Hermes Agent (zip)"
         Expand-Archive -Path $zipPath -DestinationPath $hermesDir -Force

@@ -102,12 +102,20 @@ $bytes = New-Object byte[] 32
 $newKey = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
 $changed = $false
 
-# The key belongs under `extra:`, NOT as a sibling of `enabled:`. The engine
-# builds the platform with PlatformConfig.from_dict, which keeps only the
-# fields it knows plus `extra=data.get("extra", {})`, and then does
-# `extra.get("key", os.getenv("API_SERVER_KEY", ""))`. A bare `key:` one level
-# up is dropped on the floor, the api server starts with an empty key and
-# logs "All requests will be accepted without authentication".
+# The key belongs under `extra:`. The engine reads it as
+# `extra.get("key", os.getenv("API_SERVER_KEY", ""))`, and a keyless
+# api_server refuses to start rather than running open.
+#
+# Where a bare `platforms.api_server.key` ends up depends on the engine
+# version, so this must never assume:
+#   0.14.0  PlatformConfig.from_dict keeps only the fields it knows plus
+#           `extra`, so a bare key is dropped and the gateway has none.
+#   0.21.3  from_dict promotes every non-typed key into extra
+#           (gateway/config.py: `{**{k: v for k, v in data.items()
+#           if k not in cls._TYPED_KEYS}, **extra}`), so a bare key WORKS.
+# Therefore a bare key that is already strong gets MOVED, never replaced:
+# regenerating it would silently rotate a working credential out from under
+# whatever client is using it.
 $platformsIdx = Find-Key -Lines $lines -Name 'platforms' -Indent 0 -Start 0 -End $lines.Count
 if ($platformsIdx -lt 0) {
     $block = @(
@@ -133,44 +141,58 @@ if ($platformsIdx -lt 0) {
         Write-Host "  [OK] Added the gateway api_server block with a key." -ForegroundColor Green
     } else {
         $apiEnd = Find-BlockEnd -Lines $lines -Start $apiIdx -Indent 2
+
+        # A key at the legacy position (a sibling of enabled:, indent 4).
+        # 0.21.3 reads it; 0.14.0 does not. Either way it is the user's key.
+        $strayIdx = Find-Key -Lines $lines -Name 'key' -Indent 4 -Start ($apiIdx + 1) -End $apiEnd
+        $stray = ''
+        if ($strayIdx -ge 0 -and $lines[$strayIdx] -match '^\s*key\s*:\s*(.*)$') {
+            $stray = $Matches[1].Trim().Trim("'", '"')
+        }
+
         $extraIdx = Find-Key -Lines $lines -Name 'extra' -Indent 4 -Start ($apiIdx + 1) -End $apiEnd
-        if ($extraIdx -lt 0) {
-            $lines.InsertRange($apiIdx + 1, @('    extra:', "      key: '$newKey'")) | Out-Null
-            $changed = $true
-            Write-Host "  [OK] Generated a gateway API key for this install." -ForegroundColor Green
-        } else {
+        $keyIdx = -1
+        $current = ''
+        if ($extraIdx -ge 0) {
             $extraEnd = Find-BlockEnd -Lines $lines -Start $extraIdx -Indent 4
             $keyIdx = Find-Key -Lines $lines -Name 'key' -Indent 6 -Start ($extraIdx + 1) -End $extraEnd
-            $current = ''
             if ($keyIdx -ge 0 -and $lines[$keyIdx] -match '^\s*key\s*:\s*(.*)$') {
                 $current = $Matches[1].Trim().Trim("'", '"')
             }
-            if ($current.Length -lt 32) {
-                if ($keyIdx -ge 0) {
-                    $lines[$keyIdx] = "      key: '$newKey'"
-                } else {
-                    $lines.Insert($extraIdx + 1, "      key: '$newKey'") | Out-Null
-                }
+        }
+
+        if ($current.Length -ge 32) {
+            # Already correct. extra wins over a sibling on this engine, so a
+            # leftover stray is inert -- drop it rather than leave two keys.
+            if ($strayIdx -ge 0) {
+                $lines.RemoveAt($strayIdx) | Out-Null
                 $changed = $true
+                Write-Host "  [OK] Removed a duplicate gateway key outside extra." -ForegroundColor Green
+            }
+        } else {
+            # MOVE a strong legacy key; only mint a new one when there is none.
+            $keyValue = $newKey
+            $moved = $false
+            if ($stray.Length -ge 32) { $keyValue = $stray; $moved = $true }
+
+            if ($extraIdx -lt 0) {
+                $lines.InsertRange($apiIdx + 1, @('    extra:', "      key: '$keyValue'")) | Out-Null
+            } elseif ($keyIdx -ge 0) {
+                $lines[$keyIdx] = "      key: '$keyValue'"
+            } else {
+                $lines.Insert($extraIdx + 1, "      key: '$keyValue'") | Out-Null
+            }
+            # Re-locate the stray: the inserts above may have shifted it.
+            $apiEnd = Find-BlockEnd -Lines $lines -Start $apiIdx -Indent 2
+            $strayIdx = Find-Key -Lines $lines -Name 'key' -Indent 4 -Start ($apiIdx + 1) -End $apiEnd
+            if ($strayIdx -ge 0) { $lines.RemoveAt($strayIdx) | Out-Null }
+
+            $changed = $true
+            if ($moved) {
+                Write-Host "  [OK] Moved the existing gateway key to where the engine reads it." -ForegroundColor Green
+            } else {
                 Write-Host "  [OK] Generated a gateway API key for this install." -ForegroundColor Green
             }
-        }
-    }
-}
-
-# A key left at the old, inert position by an earlier build would keep the
-# 32-character check happy while the gateway stayed unauthenticated. Remove it.
-$platformsIdx = Find-Key -Lines $lines -Name 'platforms' -Indent 0 -Start 0 -End $lines.Count
-if ($platformsIdx -ge 0) {
-    $platformsEnd = Find-BlockEnd -Lines $lines -Start $platformsIdx -Indent 0
-    $apiIdx = Find-Key -Lines $lines -Name 'api_server' -Indent 2 -Start ($platformsIdx + 1) -End $platformsEnd
-    if ($apiIdx -ge 0) {
-        $apiEnd = Find-BlockEnd -Lines $lines -Start $apiIdx -Indent 2
-        $strayIdx = Find-Key -Lines $lines -Name 'key' -Indent 4 -Start ($apiIdx + 1) -End $apiEnd
-        if ($strayIdx -ge 0) {
-            $lines.RemoveAt($strayIdx) | Out-Null
-            $changed = $true
-            Write-Host "  [OK] Removed a gateway key the engine never read." -ForegroundColor Green
         }
     }
 }

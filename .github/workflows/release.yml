@@ -155,14 +155,15 @@ jobs:
           model:
             provider: ""
             model: ""
-          # NOT HONOURED by the pinned engine (v2026.9.14): it has no config
-          # key for the journal mode. hermes_state.apply_wal_with_fallback
-          # hardcodes PRAGMA journal_mode=WAL and drops to DELETE only when
-          # SQLite itself raises, which exFAT does not. Verified on a fresh
-          # database created by the packaged engine: journal_mode = wal.
-          # Kept because synchronous=FULL makes a committed message durable
-          # either way, and a later engine may read this. Do not reason from
-          # it as if it were in effect.
+          # Read by the engine: hermes_state_wal.resolve_journal_mode()
+          # consults database.journal_mode before issuing any pragma.
+          # On this package it is not what decides the outcome, though --
+          # the bundled interpreter links a SQLite the engine's own
+          # is_sqlite_wal_reset_vulnerable() flags for the WAL-reset bug, so
+          # a new database is forced to DELETE regardless. This line is what
+          # keeps DELETE once the bundled SQLite is new enough (3.50.7+ /
+          # 3.51.3+) for that gate to stop firing. It does NOT downgrade an
+          # existing WAL database; the engine refuses to do that in place.
           database:
             journal_mode: "delete"
           # Gateway API server. Upstream reads this under platforms.*, not at the
@@ -371,14 +372,15 @@ jobs:
           model:
             provider: ""
             model: ""
-          # NOT HONOURED by the pinned engine (v2026.9.14): it has no config
-          # key for the journal mode. hermes_state.apply_wal_with_fallback
-          # hardcodes PRAGMA journal_mode=WAL and drops to DELETE only when
-          # SQLite itself raises, which exFAT does not. Verified on a fresh
-          # database created by the packaged engine: journal_mode = wal.
-          # Kept because synchronous=FULL makes a committed message durable
-          # either way, and a later engine may read this. Do not reason from
-          # it as if it were in effect.
+          # Read by the engine: hermes_state_wal.resolve_journal_mode()
+          # consults database.journal_mode before issuing any pragma.
+          # On this package it is not what decides the outcome, though --
+          # the bundled interpreter links a SQLite the engine's own
+          # is_sqlite_wal_reset_vulnerable() flags for the WAL-reset bug, so
+          # a new database is forced to DELETE regardless. This line is what
+          # keeps DELETE once the bundled SQLite is new enough (3.50.7+ /
+          # 3.51.3+) for that gate to stop firing. It does NOT downgrade an
+          # existing WAL database; the engine refuses to do that in place.
           database:
             journal_mode: "delete"
           # Gateway API server. Upstream reads this under platforms.*, not at the
