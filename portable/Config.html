@@ -234,7 +234,7 @@
                 <div class="provider-btn" data-provider="glm" data-url="https://open.bigmodel.cn/api/paas/v4" data-model="glm-4-flash">
                     GLM (Zhipu)
                 </div>
-                <div class="provider-btn" data-provider="minimax" data-url="https://api.minimax.chat/v1" data-model="MiniMax-Text-01">
+                <div class="provider-btn" data-provider="minimax" data-url="https://api.minimaxi.com/anthropic" data-model="MiniMax-M2">
                     MiniMax
                 </div>
                 <div class="provider-btn" data-provider="doubao" data-url="https://ark.cn-beijing.volces.com/api/v3" data-model="doubao-1.5-pro-32k">
@@ -427,6 +427,19 @@
     </div>
 
     <script>
+    // The launcher's config service serves this page and opens it with a
+    // one-run token, so every call goes back to that same origin carrying
+    // that token. Opened straight from disk (file://) there is no service
+    // and no token, and we fall back to showing the text to save by hand --
+    // the service refuses file:// pages on purpose, because a sandboxed
+    // iframe on any website sends the very same "null" origin.
+    const API_ORIGIN = location.protocol.startsWith('http') ? location.origin : '';
+    const API_TOKEN = new URLSearchParams(location.search).get('t') || '';
+    function apiUrl(path) {
+        if (!API_ORIGIN || !API_TOKEN) return null;
+        return API_ORIGIN + path + '?t=' + encodeURIComponent(API_TOKEN);
+    }
+
     // Provider selection
     const providerBtns = document.querySelectorAll('.provider-btn');
     let selectedProvider = '';
@@ -482,17 +495,29 @@
 
         const providerName = selectedProvider || 'custom';
 
-        // Hermes built-in providers that just need env var + provider name
+        // Hermes built-in providers.  All three fields have to line up with
+        // what the agent reads: `hermesName` must be a provider id it knows,
+        // `envVar` one of the key variables that provider looks at, and
+        // `urlVar` its base-url override.  The override matters most -- the
+        // agent otherwise calls the provider's own default endpoint, which is
+        // not always the one shown in the address box above, and the user
+        // gets a 401 on a key they just watched pass the connection test.
         const builtinProviders = {
-            'deepseek': { hermesName: 'deepseek', envVar: 'DEEPSEEK_API_KEY' },
-            'kimi': { hermesName: 'kimi-coding', envVar: 'KIMI_API_KEY' },
-            'qwen': { hermesName: 'alibaba-coding-plan', envVar: 'ALIBABA_API_KEY' },
-            'glm': { hermesName: 'zai', envVar: 'GLM_API_KEY' },
-            'minimax': { hermesName: 'minimax-cn', envVar: 'MINIMAX_API_KEY' },
-            'openrouter': { hermesName: 'openrouter', envVar: 'OPENROUTER_API_KEY' },
+            'deepseek':   { hermesName: 'deepseek',        envVar: 'DEEPSEEK_API_KEY',   urlVar: 'DEEPSEEK_BASE_URL' },
+            'kimi':       { hermesName: 'kimi-coding',     envVar: 'KIMI_API_KEY',       urlVar: 'KIMI_BASE_URL' },
+            'kimi-cn':    { hermesName: 'kimi-coding-cn',  envVar: 'KIMI_CN_API_KEY',    urlVar: '' },
+            'qwen':       { hermesName: 'alibaba',         envVar: 'DASHSCOPE_API_KEY',  urlVar: 'DASHSCOPE_BASE_URL' },
+            'glm':        { hermesName: 'zai',             envVar: 'GLM_API_KEY',        urlVar: 'GLM_BASE_URL' },
+            'minimax':    { hermesName: 'minimax-cn',      envVar: 'MINIMAX_CN_API_KEY', urlVar: 'MINIMAX_CN_BASE_URL' },
+            'openrouter': { hermesName: 'openrouter',      envVar: 'OPENROUTER_API_KEY', urlVar: '' },
         };
 
-        const builtin = builtinProviders[providerName];
+        // Kimi's mainland and international accounts are separate products
+        // with separate key namespaces, so the address decides which one.
+        const builtinKey = (providerName === 'kimi' && /moonshot\.cn/.test(baseUrl))
+            ? 'kimi-cn'
+            : providerName;
+        const builtin = builtinProviders[builtinKey];
         let configYaml, envContent;
 
         const platforms = getEnabledPlatforms();
@@ -505,11 +530,10 @@
 
 model:
   provider: "${builtin.hermesName}"
+  default: "${modelName}"
   model: "${modelName}"
 
-gateway:
-${platformsYaml}
-skills:
+${platformsYaml}skills:
   external_dirs:
     - "../skills-cn"
 
@@ -520,6 +544,7 @@ cron:
   enabled: true
 `;
             envContent = `${builtin.envVar}=${apiKey}\n`;
+            if (builtin.urlVar) envContent += `${builtin.urlVar}=${baseUrl}\n`;
         } else {
             // Custom provider: use custom_providers list
             const providerSlug = providerName.toLowerCase().replace(/\s+/g, '-');
@@ -530,6 +555,7 @@ cron:
 
 model:
   provider: "${hermesProvider}"
+  default: "${modelName}"
   model: "${modelName}"
 
 custom_providers:
@@ -537,9 +563,7 @@ custom_providers:
     base_url: "${baseUrl}"
     key_env: "OPENAI_API_KEY"
 
-gateway:
-${platformsYaml}
-skills:
+${platformsYaml}skills:
   external_dirs:
     - "../skills-cn"
 
@@ -572,29 +596,26 @@ cron:
     }
 
     async function tryLocalSave(configContent, envContent) {
-        // Try config-server on common ports
-        const ports = [18790, 18791, 18792];
-        for (const port of ports) {
-            try {
-                const resp = await fetch(`http://127.0.0.1:${port}/save-config`, {
+        const saveConfig = apiUrl('/save-config');
+        if (!saveConfig) return false;
+        try {
+            // .env first: saving the config schedules the service to shut down.
+            if (envContent) {
+                await fetch(apiUrl('/save-env'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain' },
-                    body: configContent
-                });
-                if (resp.ok) {
-                    // Also save .env file
-                    if (envContent) {
-                        await fetch(`http://127.0.0.1:${port}/save-env`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'text/plain' },
-                            body: envContent
-                        }).catch(() => {});
-                    }
-                    return true;
-                }
-            } catch (e) { /* try next */ }
+                    body: envContent
+                }).catch(() => {});
+            }
+            const resp = await fetch(saveConfig, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: configContent
+            });
+            return resp.ok;
+        } catch (e) {
+            return false;
         }
-        return false;
     }
 
     async function testConnection() {
@@ -615,10 +636,10 @@ cron:
         status.className = 'status info';
         status.textContent = '正在测试连接（最长等待 20 秒）…';
         try {
-            const ports = [18790, 18791, 18792];
-            for (const port of ports) {
+            const testUrl = apiUrl('/test');
+            if (testUrl) {
                 try {
-                    const resp = await fetch(`http://127.0.0.1:${port}/test`, {
+                    const resp = await fetch(testUrl, {
                         method: 'POST',
                         headers: { 'Content-Type': 'text/plain' },
                         body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model: modelName })
@@ -629,10 +650,10 @@ cron:
                         status.textContent = j.message;
                         return;
                     }
-                } catch (e) { /* try next port */ }
+                } catch (e) { /* fall through to the message below */ }
             }
             status.className = 'status error';
-            status.textContent = '配置服务未运行，无法测试。请通过启动器（Windows-Start.bat）打开本页面。';
+            status.textContent = '配置服务未连上，无法测试。请通过启动器（Windows-Start.bat）打开本页面，不要直接双击 Config.html。';
         } finally {
             btn.disabled = false;
             if (saveBtn) saveBtn.disabled = false;
@@ -712,23 +733,45 @@ cron:
     }
 
     // Generate platforms YAML block
+    // The engine reads a TOP-LEVEL `platforms:` MAPPING keyed by its own
+    // platform ids (gateway/config.py: `yaml_cfg.get("platforms")`, then
+    // `if isinstance(yaml_platforms, dict)`), and PlatformConfig.from_dict
+    // keeps only enabled / token / api_key / home_channel / reply_to_mode /
+    // gateway_restart_notification -- anything else has to sit under
+    // `extra:` or it is dropped.
+    //
+    // This page used to emit a LIST under `gateway:`, with its own names
+    // ("wechat", "qq"). Nothing read it, so no bot the user set up here ever
+    // came up, and nothing anywhere said so.
+    const PLATFORM_IDS = {
+        telegram: 'telegram', discord: 'discord', wechat: 'weixin',
+        qq: 'qqbot', wecom: 'wecom', dingtalk: 'dingtalk', feishu: 'feishu',
+    };
+    const PLATFORM_TOP_FIELDS = ['token', 'api_key'];
+
     function platformsToYaml(platforms) {
-        if (!platforms.length) return '  platforms: []\n';
-        let yaml = '  platforms:\n';
+        // Nothing enabled means nothing written: this section shares the
+        // top-level `platforms:` block with the gateway's own api_server
+        // entry, so it must only ever add, never replace.
+        if (!platforms.length) return '';
+        let yaml = 'platforms:\n';
         platforms.forEach(p => {
-            yaml += `    - type: "${p.type}"\n`;
+            const id = PLATFORM_IDS[p.type] || p.type;
+            yaml += `  ${id}:\n    enabled: true\n`;
+            const extra = [];
             Object.entries(p).forEach(([k, v]) => {
-                if (k !== 'type' && v !== null && v !== undefined) {
-                    yaml += `      ${k}: "${v}"\n`;
-                }
+                if (k === 'type' || v === null || v === undefined || v === '') return;
+                if (PLATFORM_TOP_FIELDS.indexOf(k) !== -1) yaml += `    ${k}: "${v}"\n`;
+                else extra.push(`      ${k}: "${v}"\n`);
             });
+            if (extra.length) yaml += '    extra:\n' + extra.join('');
         });
         return yaml;
     }
 
     function showManualSave(configContent, envContent, statusEl) {
         const envNote = envContent ? `<p style="font-size:0.85em; color:#a0a0a0; margin-top:12px">
-            同时保存以下内容为 <code>data/.env</code>：
+            同时把以下内容合并进 <code>data/.env</code>（同名变量替换，其它行保留）：
         </p>
         <textarea style="width:100%;height:60px;margin-top:4px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${envContent}</textarea>` : '';
 
@@ -736,7 +779,10 @@ cron:
         statusEl.innerHTML = `
             <p style="margin-bottom:8px"><strong>配置服务未运行。</strong>请手动保存：</p>
             <p style="font-size:0.85em; color:#a0a0a0">
-                复制以下内容，保存为 U-Hermes 文件夹下的 <code>data/config.yaml</code>
+                打开 U-Hermes 文件夹下的 <code>data/config.yaml</code>，把下面的内容<strong>合并</strong>进去：
+                同名段落（<code>model:</code> 等）整段替换，文件里其它段落
+                （<code>platforms:</code>、<code>database:</code>、<code>terminal:</code> 等）<strong>原样保留</strong>。
+                直接整个文件覆盖会删掉网关配置，智能体将无法启动。
             </p>
             <textarea style="width:100%;height:200px;margin-top:10px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${configContent}</textarea>
             ${envNote}
