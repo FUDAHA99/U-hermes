@@ -23,15 +23,16 @@ echo   [3] 仅启动消息网关
 echo   [4] 打开配置页面
 echo   [5] 模型设置 (hermes model)
 echo   [6] 一键诊断
-echo   [7] 更新 Hermes
+echo   [7] 清理聊天记录（释放 U 盘空间）
 echo   [8] 清理本机残留（在别人电脑上用完后执行）
-echo   [9] 退出
+echo   [9] 更新 Hermes
+echo   [0] 退出
 echo.
 :: set /p leaves the variable alone when the user just presses Enter, so
 :: without clearing it first an empty line silently re-ran whatever they
 :: chose last -- including [7] 更新.
 set "choice="
-set /p choice="  请选择 [1-9]: "
+set /p choice="  请选择 [0-9]: "
 
 if "%choice%"=="1" goto START_CLI
 if "%choice%"=="2" goto START_ALL
@@ -39,9 +40,10 @@ if "%choice%"=="3" goto START_GATEWAY
 if "%choice%"=="4" goto CONFIG
 if "%choice%"=="5" goto MODEL
 if "%choice%"=="6" goto DOCTOR
-if "%choice%"=="7" goto UPDATE
+if "%choice%"=="7" goto PRUNE
 if "%choice%"=="8" goto CLEANUP
-if "%choice%"=="9" goto EXIT
+if "%choice%"=="9" goto UPDATE
+if "%choice%"=="0" goto EXIT
 
 echo   无效选择。
 timeout /t 2 >nul
@@ -115,6 +117,26 @@ set "PYTHONIOENCODING=utf-8"
 set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%\runtime\python-win-x64;%PATH%"
 "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\diagnose.py"
 echo   （如需更深入的技术诊断，可另行运行: Windows-Start.bat doctor）
+pause
+goto MENU
+
+:PRUNE
+set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
+set "HERMES_HOME=%SCRIPT_DIR%\data"
+set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%untime\python-win-x64;%PATH%"
+echo.
+echo   删除超过 90 天的旧对话，并把数据库压缩到实际大小。
+echo   删掉的对话找不回来；配置、密钥、记忆和技能都不受影响。
+echo.
+"%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\db-maintenance.py" "%SCRIPT_DIR%\data" --days 90
+if errorlevel 2 (
+    echo.
+    echo   [i] 关掉所有 U-Hermes 窗口之后，再回到这里选 [7]。
+)
+echo.
 pause
 goto MENU
 

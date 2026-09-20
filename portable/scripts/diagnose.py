@@ -24,6 +24,11 @@ DATA_DIR = os.path.join(ROOT, "data")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.yaml")
 ENV_FILE = os.path.join(DATA_DIR, ".env")
 ERRORS_LOG = os.path.join(DATA_DIR, "logs", "errors.log")
+STATE_DB = os.path.join(DATA_DIR, "state.db")
+
+# 聊天记录超过这个大小就提示一句。U 盘常见 16-32 GB，几百 MB 的对话历史
+# 已经值得让人知道是什么占的地方了。
+STATE_DB_WARN_MB = 200
 
 OK = "[OK]"
 BAD = "[X] "
@@ -285,8 +290,10 @@ def main():
 
     # 5. 磁盘空间
     section("磁盘空间")
+    free_bytes = None
     try:
         usage = shutil.disk_usage(ROOT)
+        free_bytes = usage.free
         free_gb = usage.free / (1024 ** 3)
         if free_gb < 1:
             print("  %s 剩余空间仅 %.1f GB，可能影响运行" % (WARN, free_gb))
@@ -295,6 +302,34 @@ def main():
             print("  %s 剩余空间 %.1f GB" % (OK, free_gb))
     except OSError:
         print("  %s 无法读取磁盘信息" % WARN)
+
+    # 聊天记录只增不减，产品里以前没有任何清理入口 —— U 盘被自己的历史
+    # 记录塞满，而用户看不出是什么占的地方。
+    #
+    # 这里只看文件大小，不打开数据库：以只读方式连接一个 WAL 数据库，
+    # SQLite 仍然会在 data\ 下创建 -wal / -shm，写保护的 U 盘上会直接失败。
+    try:
+        db_bytes = os.path.getsize(STATE_DB)
+        for side in ("-wal", "-shm"):
+            if os.path.exists(STATE_DB + side):
+                db_bytes += os.path.getsize(STATE_DB + side)
+        db_mb = db_bytes / (1024 * 1024)
+        if db_mb < STATE_DB_WARN_MB:
+            print("  %s 聊天记录 %.0f MB" % (OK, db_mb))
+        else:
+            print("  %s 聊天记录已占 %.0f MB（只增不减）" % (WARN, db_mb))
+            print("       用 Windows-Menu.bat 的 [7] 清理聊天记录 可以释放。")
+            # 整理时要临时占用和数据库差不多大的空间，剩余空间不够的话
+            # 连清理都跑不动 —— 这种情况必须写进结论里。
+            if free_bytes is not None and free_bytes < db_bytes:
+                problems.append(
+                    "聊天记录已 %.0f MB，而剩余空间不足以整理它。请先把 "
+                    "data\\state.db 复制到别处备份，腾出至少 %.0f MB 再清理。"
+                    % (db_mb, db_mb))
+            elif db_mb >= 500:
+                problems.append("聊天记录已 %.0f MB，建议用菜单 [7] 清理。" % db_mb)
+    except OSError:
+        pass
 
     # 6. 最近错误分析
     section("最近错误分析")
