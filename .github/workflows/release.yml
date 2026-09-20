@@ -155,10 +155,14 @@ jobs:
           model:
             provider: ""
             model: ""
-          # SQLite WAL is not crash-safe on the exFAT/FAT32 filesystems USB drives
-          # ship with, and unplugging the drive is how this product usually gets
-          # closed. Upstream's auto-fallback only triggers when SQLite itself
-          # reports WAL unsupported, which exFAT does not.
+          # NOT HONOURED by the pinned engine (v2026.9.14): it has no config
+          # key for the journal mode. hermes_state.apply_wal_with_fallback
+          # hardcodes PRAGMA journal_mode=WAL and drops to DELETE only when
+          # SQLite itself raises, which exFAT does not. Verified on a fresh
+          # database created by the packaged engine: journal_mode = wal.
+          # Kept because synchronous=FULL makes a committed message durable
+          # either way, and a later engine may read this. Do not reason from
+          # it as if it were in effect.
           database:
             journal_mode: "delete"
           # Gateway API server. Upstream reads this under platforms.*, not at the
@@ -365,10 +369,14 @@ jobs:
           model:
             provider: ""
             model: ""
-          # SQLite WAL is not crash-safe on the exFAT/FAT32 filesystems USB drives
-          # ship with, and unplugging the drive is how this product usually gets
-          # closed. Upstream's auto-fallback only triggers when SQLite itself
-          # reports WAL unsupported, which exFAT does not.
+          # NOT HONOURED by the pinned engine (v2026.9.14): it has no config
+          # key for the journal mode. hermes_state.apply_wal_with_fallback
+          # hardcodes PRAGMA journal_mode=WAL and drops to DELETE only when
+          # SQLite itself raises, which exFAT does not. Verified on a fresh
+          # database created by the packaged engine: journal_mode = wal.
+          # Kept because synchronous=FULL makes a committed message durable
+          # either way, and a later engine may read this. Do not reason from
+          # it as if it were in effect.
           database:
             journal_mode: "delete"
           # Gateway API server. Upstream reads this under platforms.*, not at the

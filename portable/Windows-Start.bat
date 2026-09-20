@@ -124,6 +124,13 @@ if not exist "%DATA_DIR%\config.yaml" (
     echo   [i] 首次启动，正在创建默认配置...
     echo.
     mkdir "%DATA_DIR%" 2>nul
+    :: journal_mode is NOT read by the pinned engine (v2026.9.14) -- it has no
+    :: such config key; hermes_state hardcodes PRAGMA journal_mode=WAL and
+    :: falls back to DELETE only when SQLite itself raises, which exFAT does
+    :: not. Verified against the packaged engine. Left in place because a
+    :: later version may read it, and because synchronous=FULL makes a
+    :: committed message durable either way -- but do not tell users the
+    :: database is out of WAL mode, because it is not.
     (
         echo model:
         echo   provider: ""
@@ -160,6 +167,10 @@ set /a _CFGTRY=0
 
 :check_config
 "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\preflight.py" "%DATA_DIR%"
+:: Exactly 10 means "the user has to configure something". Anything else,
+:: including 9009 from a python that will not start, must not send them
+:: round the config page three times for a problem the page cannot fix.
+if errorlevel 11 goto :config_ok
 if not errorlevel 10 goto :config_ok
 
 set /a _CFGTRY+=1

@@ -434,7 +434,7 @@
             </details>
             <details class="faq-item">
                 <summary>换一台电脑还能用吗？</summary>
-                <div class="answer">可以。U 盘插到新电脑直接运行启动脚本，程序会自动修复路径。配置、记忆、对话记录都在 U 盘里跟着走。运行期间会在这台电脑的 <code>%USERPROFILE%\.hermes\</code> 放一份配置副本供引擎读取，<b>正常退出时会自动删掉</b>；如果那台电脑原本装过 Hermes，它自己的配置会被先移开、退出时还原。</div>
+                <div class="answer">可以。U 盘插到新电脑直接运行启动脚本，程序会自动修复路径。配置、记忆、对话记录都在 U 盘里跟着走。运行期间会在这台电脑的 <code>%USERPROFILE%\.hermes\</code> 放一份配置副本（<code>config.yaml</code> 和 <code>.env</code>，里面有你的 API 密钥）供引擎读取。<b>按 Ctrl+C 正常退出时会删掉这两个文件</b>，下次启动也会先清理上一次的残留；直接点窗口 X 关掉则来不及，可以用 Windows-Menu.bat 的 <code>[8] 清理本机残留</code> 补上。如果那台电脑原本装过 Hermes，它自己的配置会被先移开、退出时还原——那个文件夹里属于它的其它文件我们不会碰。</div>
             </details>
             <details class="faq-item">
                 <summary>Windows 提示"已保护你的电脑"？</summary>

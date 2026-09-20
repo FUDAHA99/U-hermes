@@ -208,8 +208,19 @@ del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
 if exist "%USER_HERMES_DIR%\config.yaml.before-u-hermes" move /Y "%USER_HERMES_DIR%\config.yaml.before-u-hermes" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
 if exist "%USER_HERMES_DIR%\.env.before-u-hermes" move /Y "%USER_HERMES_DIR%\.env.before-u-hermes" "%USER_HERMES_DIR%\.env" >nul 2>&1
 del /Q "%MIRROR_MARK%" >nul 2>&1
-echo   [OK] 已删除本机上的配置和密钥副本。
-echo   [i] 注意：聊天记录和配置本来就只在 U 盘上，这里清掉的是运行时的副本。
+echo   [OK] 已删除 U-Hermes 放在本机的 config.yaml 和 .env。
+echo.
+:: Only those two files are ours. Anything else in that folder belongs to a
+:: Hermes this machine had of its own -- deleting it would be destroying
+:: someone else's data -- so report it instead of guessing.
+set "_LEFT=0"
+for /f %%N in ('dir /b /a "%USER_HERMES_DIR%" 2^>nul ^| find /c /v ""') do set "_LEFT=%%N"
+if not "%_LEFT%"=="0" (
+    echo   [i] 该文件夹里还剩 %_LEFT% 项，不是 U-Hermes 放的，没有动：
+    echo       %USER_HERMES_DIR%
+    echo       如果这台电脑自己装过 Hermes，那些是它的数据；
+    echo       确认不需要的话可以手动删掉整个文件夹。
+)
 echo.
 pause
 goto MENU
