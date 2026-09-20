@@ -205,7 +205,7 @@ jobs:
           Write-Host "sys.path is self-contained"
 
           Write-Host "=== [3/5] helper scripts compile ==="
-          & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py
+          & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
           if ($LASTEXITCODE -ne 0) { Write-Error "helper script compile failed"; exit 1 }
 
           Write-Host "=== [4/5] config page regression tests ==="
@@ -216,6 +216,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "config merge test failed"; exit 1 }
           & $py scripts/tests/test_provider_table.py
           if ($LASTEXITCODE -ne 0) { Write-Error "provider table test failed"; exit 1 }
+          & $py scripts/tests/test_first_login.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "first-login test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
 
@@ -408,11 +410,12 @@ jobs:
           hermes/.venv/bin/hermes --help >/dev/null
 
           echo "=== [3/5] helper scripts compile ==="
-          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py
+          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
 
           echo "=== [4/5] config page regression tests ==="
           "$PY" scripts/tests/test_config_merge.py
           "$PY" scripts/tests/test_provider_table.py
+          "$PY" scripts/tests/test_first_login.py
 
           echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)

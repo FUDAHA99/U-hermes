@@ -337,13 +337,27 @@ echo       来不及清理，下次启动或用菜单 [8] 可以清掉）
 echo   -----------------------------------------------
 echo.
 
-:: Open the browser once the Web UI actually answers. A fixed delay was wrong
-:: on anything slower than the machine it was written on -- and the token
-:: query string it used to append never worked: that file does not exist at
-:: that path, and the API rejects the token either way.
-start /B "" "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\wait-for.py" --open http://127.0.0.1:8648/ 90
+:: Wait for the Web UI to actually answer, claim its account before anyone
+:: else can, then open the browser. A fixed delay was wrong on anything
+:: slower than the machine it was written on -- and the token query string
+:: it used to append never worked: that file does not exist at that path,
+:: and the API rejects the token either way.
+::
+:: The account matters because upstream ships it unclaimed: the first caller
+:: to post admin/123456 becomes super admin, and the login page prints those
+:: credentials to every visitor. Loopback-only (BIND_HOST above) keeps that
+:: off the network; this keeps it off a shared Windows PC too.
+start /B "" "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\first-login.py" http://127.0.0.1:8648 "%DATA_DIR%\webui" 90
 
 :: Run Web UI server in foreground (blocks until Ctrl+C or close)
+::
+:: From the install directory, deliberately. The Web UI resolves its account
+:: database as cwd + "packages/server/data" unless NODE_ENV=production, so
+:: without this the login store lands wherever the user happened to launch
+:: from -- a different database on every machine, and on C: rather than the
+:: stick when the shortcut starts elsewhere. setlocal at the top of this
+:: script restores the caller's directory, so Windows-Menu.bat is unaffected.
+cd /d "%SCRIPT_DIR%"
 "%NODE_EXE%" "%WEBUI_SERVER%"
 
 :: --- Cleanup: kill gateway when Web UI exits ---
