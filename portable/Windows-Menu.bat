@@ -17,16 +17,21 @@ echo     U-Hermes - AI 智能体
 echo     基于 Hermes Agent (Nous Research) 驱动
 echo   ============================================
 echo.
-echo   [1] 启动智能体 (命令行)
-echo   [2] 启动智能体 + 消息网关
+echo   [1] 启动智能体 (网页界面，推荐)
+echo   [2] 启动智能体 (命令行对话)
 echo   [3] 仅启动消息网关
 echo   [4] 打开配置页面
 echo   [5] 模型设置 (hermes model)
 echo   [6] 一键诊断
 echo   [7] 更新 Hermes
-echo   [8] 退出
+echo   [8] 清理本机残留（在别人电脑上用完后执行）
+echo   [9] 退出
 echo.
-set /p choice="  请选择 [1-8]: "
+:: set /p leaves the variable alone when the user just presses Enter, so
+:: without clearing it first an empty line silently re-ran whatever they
+:: chose last -- including [7] 更新.
+set "choice="
+set /p choice="  请选择 [1-9]: "
 
 if "%choice%"=="1" goto START_CLI
 if "%choice%"=="2" goto START_ALL
@@ -35,7 +40,8 @@ if "%choice%"=="4" goto CONFIG
 if "%choice%"=="5" goto MODEL
 if "%choice%"=="6" goto DOCTOR
 if "%choice%"=="7" goto UPDATE
-if "%choice%"=="8" goto EXIT
+if "%choice%"=="8" goto CLEANUP
+if "%choice%"=="9" goto EXIT
 
 echo   无效选择。
 timeout /t 2 >nul
@@ -46,7 +52,11 @@ call "%SCRIPT_DIR%\Windows-Start.bat"
 goto MENU
 
 :START_ALL
-call "%SCRIPT_DIR%\Windows-Start.bat" --gateway
+:: Was `--gateway`, which Windows-Start.bat shifts off before continuing down
+:: the Web UI path -- so this option did exactly what [1] did, under a
+:: different name. `chat` reaches the CLI branch and is genuinely a different
+:: way to use the agent.
+call "%SCRIPT_DIR%\Windows-Start.bat" chat
 goto MENU
 
 :START_GATEWAY
@@ -56,10 +66,15 @@ set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%\runtime\python-win-x64;%PATH%"
 echo.
-echo   正在启动消息网关...
-echo   按 Ctrl+C 停止。
+echo   正在启动消息网关，按 Ctrl+C 停止。
 echo.
-"%VENV_PYTHON%" -m hermes_cli.main gateway start
+:: `gateway start` detaches the process (CREATE_NEW_PROCESS_GROUP +
+:: DETACHED_PROCESS), so it ignores Ctrl+C, outlives this window and keeps
+:: holding port 8642 with no way to stop it from here. `gateway run` stays
+:: in the foreground, which is what the instruction above promises.
+"%VENV_PYTHON%" -m hermes_cli.main gateway run
+echo.
+pause
 goto MENU
 
 :CONFIG
@@ -75,9 +90,11 @@ rem pythonw 无窗口运行，不挂靠本控制台，退出菜单不会卡死
 for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":18790.*LISTENING"') do (
     taskkill /F /PID %%P >nul 2>&1
 )
+:: The service serves the page and opens it itself, at an address carrying a
+:: one-run token. Do not open Config.html from disk -- the service refuses
+:: file:// pages, because a sandboxed iframe on any website looks identical.
 start "" "%VENV_PYTHONW%" "%SCRIPT_DIR%\scripts\config-server.py"
-timeout /t 1 /nobreak >nul
-start "" "%SCRIPT_DIR%\Config.html"
+"%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe" "%SCRIPT_DIR%\scripts\wait-for.py" http://127.0.0.1:18790/ping 15
 goto MENU
 
 :MODEL
@@ -109,9 +126,23 @@ set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "NODE_DIR=%SCRIPT_DIR%\runtime\node-win-x64"
 set "UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple"
 
+:: Pinned, not @latest. Upstream ships 2-4 releases a week, so "update" used
+:: to mean "replace a tested component with whatever landed this morning" --
+:: which is how the build drifted for two months without anyone noticing.
+set "WEBUI_SPEC=hermes-web-ui"
+if exist "%SCRIPT_DIR%\versions.env" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%SCRIPT_DIR%\versions.env") do (
+        if /I "%%A"=="HERMES_WEB_UI_VERSION" set "WEBUI_SPEC=hermes-web-ui@%%B"
+    )
+)
+
 echo.
-echo   [1/2] 更新 Web 界面 (hermes-web-ui)...
-call "%NODE_DIR%\npm.cmd" install -g hermes-web-ui@latest --prefix "%NODE_DIR%"
+echo   [1/2] 更新 Web 界面 (%WEBUI_SPEC%)...
+call "%NODE_DIR%\npm.cmd" install -g %WEBUI_SPEC% --prefix "%NODE_DIR%"
+if errorlevel 1 (
+    echo   [i] 直连 npm 没成功，改用国内镜像重试...
+    call "%NODE_DIR%\npm.cmd" install -g %WEBUI_SPEC% --prefix "%NODE_DIR%" --registry=https://registry.npmmirror.com
+)
 
 echo.
 echo   [2/2] 修复 Hermes Agent 安装...
@@ -126,9 +157,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\scripts\fix-po
 echo.
 echo   更新完成。
 echo.
-echo   [i] 如需更新 AI 引擎核心版本，请从 GitHub Releases 下载最新压缩包，
-echo       解压后把旧的 data 文件夹复制过去即可保留全部配置和记忆：
+echo   [i] 如需更新 AI 引擎核心版本，要下载新的压缩包：
 echo       https://github.com/FUDAHA99/U-hermes/releases
+echo.
+echo       升级步骤（顺序不能反）：
+echo         1. 先关掉正在运行的 U-Hermes；
+echo         2. 把新压缩包解压到一个新文件夹（不要解压到当前目录覆盖）；
+echo         3. 把当前目录的整个 data 文件夹复制进新文件夹，
+echo            Windows 问"是否替换"时选"替换目标中的文件"；
+echo         4. 确认新文件夹能正常聊天之后，再删掉旧文件夹。
+echo       你的工作区在安装目录外面，升级不会动它。
+pause
+goto MENU
+
+:CLEANUP
+echo.
+echo   正在清理本机 %USERPROFILE%\.hermes 下的配置副本...
+set "USER_HERMES_DIR=%USERPROFILE%\.hermes"
+set "MIRROR_MARK=%USER_HERMES_DIR%\.u-hermes-mirror"
+if not exist "%MIRROR_MARK%" (
+    echo   [OK] 本机上没有 U-Hermes 留下的副本。
+    echo.
+    pause
+    goto MENU
+)
+del /Q "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
+del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
+if exist "%USER_HERMES_DIR%\config.yaml.before-u-hermes" move /Y "%USER_HERMES_DIR%\config.yaml.before-u-hermes" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
+if exist "%USER_HERMES_DIR%\.env.before-u-hermes" move /Y "%USER_HERMES_DIR%\.env.before-u-hermes" "%USER_HERMES_DIR%\.env" >nul 2>&1
+del /Q "%MIRROR_MARK%" >nul 2>&1
+echo   [OK] 已删除本机上的配置和密钥副本。
+echo   [i] 注意：聊天记录和配置本来就只在 U 盘上，这里清掉的是运行时的副本。
+echo.
 pause
 goto MENU
 

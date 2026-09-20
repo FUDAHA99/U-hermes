@@ -84,6 +84,11 @@ export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
 # Hermes Web UI settings
 export AUTH_DISABLED=1
 export PORT=8648
+# Loopback only. The Web UI defaults to BIND_HOST || "0.0.0.0", and its
+# login page prints the default credentials to every unauthenticated
+# visitor. On a shared network that hands an agent with shell access on
+# this machine to anyone who can reach port 8648.
+export BIND_HOST=127.0.0.1
 export HERMES_WEB_UI_HOME="$DATA_DIR/webui"
 export HERMES_BIN="$VENV_DIR/bin/hermes"
 export HERMES_AGENT_BRIDGE_PYTHON="$VENV_PYTHON"
