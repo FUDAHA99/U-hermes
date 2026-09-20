@@ -18,8 +18,10 @@ U-Hermes combines the **portable USB distribution** of [U-Claw](https://github.c
 - **Self-improving** — auto-creates skills from experience, improves them during use
 - **Chat Web UI** — built-in browser chat interface (hermes-web-ui), auto-opens on startup
 - **Web Dashboard** — skills, sessions and cron management in the same UI
+- **Acts, doesn't just chat** — reads and writes files, runs commands and scheduled jobs on the machine it is
+  plugged into, with a workspace kept outside the install directory so upgrades never touch your work
 - **Self-healing** — auto-repairs stale paths when the drive letter changes, restores config after UI overwrites
-- **Failover** — switches to a backup model automatically when the primary times out or runs out of credit
+- **Failover** — falls back to a backup model on timeout or quota errors, once you have configured one
 - **Multi-platform messaging** — QQ / WeChat / DingTalk / Feishu / Telegram / Discord / WhatsApp / Signal / Slack
 - **China-optimized** — domestic model support, China mirrors, Chinese skills pre-installed
 - **Dual platform** — Windows + macOS (ARM64) portable builds via CI
@@ -40,19 +42,30 @@ Download the latest release from [**Releases**](https://github.com/FUDAHA99/U-he
 GitHub 直连较慢时，在任意下载链接前加上 `https://ghfast.top/` 即可加速：
 
 ```
-https://ghfast.top/https://github.com/FUDAHA99/U-hermes/releases/download/v0.3.5/u-hermes-portable-windows-v0.3.5.zip
+https://ghfast.top/<把 Releases 页的下载链接原样粘在这里>
 ```
 
 每个 [Release 页面](https://github.com/FUDAHA99/U-hermes/releases) 也附有现成的加速链接。
 
 ## Quick Start
 
+**Before you start:** U-Hermes brings no AI of its own. You need an API key from a model
+provider ([DeepSeek](https://platform.deepseek.com), [Kimi](https://platform.moonshot.cn),
+[GLM](https://open.bigmodel.cn), [Qwen](https://dashscope.console.aliyun.com) ...). They bill
+per use — a few yuan covers a month of ordinary use, and most give a small free allowance.
+Without a key nothing will answer you; there is no way around this step.
+
 1. Download and unzip the portable package (to USB drive or local folder)
 2. Double-click the start script (`Windows-Start.bat` or `Mac-Start.command`)
-3. First launch auto-opens the config page
+3. First launch auto-opens the config page. It also downloads the web UI once, so it needs
+   an internet connection and a minute or two
 4. Select AI model (DeepSeek recommended for China)
-5. Enter API Key, click **测试连接** to verify, save, done!
-6. Browser auto-opens chat UI at `http://127.0.0.1:8648`
+5. Enter API Key, click **测试连接** to verify, save
+6. Press any key in the launcher window; the browser opens the chat UI at
+   `http://127.0.0.1:8648` as soon as it is actually up
+
+If something goes wrong, run `Windows-Menu.bat` → `[6] 一键诊断`. It checks the network,
+the key, the balance and the ports, and says what to do next in Chinese.
 
 ### Build from Source
 
@@ -78,9 +91,10 @@ bash Mac-Start.command
 | **Chat Web UI** | Built-in hermes-web-ui chat interface on port 8648, auto-opens in browser |
 | **One-click diagnostics** | Checks config, ports and API connectivity, explains errors in plain language |
 | **Connection test** | Verifies the API key from the config page before saving |
-| **Model failover** | Falls back to a backup provider on timeout, 401 or quota errors |
+| **Model failover** | Falls back to a backup provider on timeout, 401 or quota errors. Off until you add one (`hermes fallback add`) |
 | **Self-learning** | Creates skills from experience, improves them automatically |
-| **10 Chinese skills** | Xiaohongshu, Douyin, WeChat articles, Weibo, Bilibili, Zhihu, etc. |
+| **Shell and file access** | The agent works in a real terminal on your machine, in a workspace beside the install |
+| **12 Chinese skills** | Xiaohongshu, Douyin, WeChat articles, Weibo, Bilibili, Zhihu, Taobao listings, daily reports, China search / weather / translate |
 | **Multi-model** | DeepSeek, Kimi, Qwen, GLM, MiniMax, Doubao + Claude/GPT/Gemini |
 | **Messaging gateway** | QQ Bot, WeChat, WeCom, DingTalk, Feishu, Telegram, Discord, etc. |
 | **Scheduled tasks** | Built-in cron with delivery to any platform |
@@ -120,13 +134,16 @@ U-Hermes/                        ← Copy to USB drive
 ├── scripts/                     Maintenance helpers
 │   ├── apply-upstream-tweaks.py Applies our tweaks to the vendored agent
 │   ├── fix-portable-paths.ps1   Repairs venv paths after a drive-letter change
-│   ├── protect-config.ps1       Restores config.yaml after a Web UI overwrite
-│   ├── config-server.py         Backs the config page (save + connection test)
-│   └── diagnose.py              One-click diagnostics
+│   ├── protect-config.ps1       Restores config.yaml, keeps the gateway key present
+│   ├── config-server.py         Backs the config page (merging save + connection test)
+│   ├── preflight.py             Refuses to launch into a config that cannot answer
+│   ├── wait-for.py              Opens the browser when the UI is actually up
+│   ├── diagnose.py              One-click diagnostics
+│   └── tests/                   Regression tests, run by CI's smoke step
 │
 ├── runtime/                     ← Downloaded by setup (not in git)
-│   ├── python-win-x64/          Embedded Python 3.11
-│   ├── node-win-x64/            Node.js 22 + hermes-web-ui (Chat Web UI)
+│   ├── python-win-x64/          Embedded Python (see versions.env)
+│   ├── node-win-x64/            Node.js + hermes-web-ui (Chat Web UI)
 │   └── uv/                      uv package manager
 │
 ├── hermes/                      ← Downloaded by setup (not in git)
@@ -144,6 +161,7 @@ U-Hermes/                        ← Copy to USB drive
 │
 ├── data/                        ← User data (persists on USB)
 │   ├── config.yaml              Configuration
+│   ├── backups/                 Timestamped copies, written before every save
 │   ├── memory/                  AI memory
 │   ├── skills/                  User-created skills
 │   └── sessions/                Conversation history

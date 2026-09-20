@@ -295,10 +295,13 @@
 
     <!-- ============ Hero ============ -->
     <header class="hero">
-        <div class="pill rise"><span class="dot"></span>开源 · MIT 协议 · v<span id="ver">0.3.5</span> 已发布</div>
+        <!-- 版本号由下面的脚本从 GitHub 取。写死过一次，结果长期显示一个
+             已经下架的版本号 —— 取不到就不显示数字，好过显示错的。 -->
+        <div class="pill rise"><span class="dot"></span>开源 · MIT 协议 · <span id="ver">最新版已发布</span></div>
         <h1 class="rise d1">插上U盘<br><span class="grad">AI 就绪</span></h1>
         <p class="tagline rise d2">你的私人 AI 智能体，装在口袋里随身带走</p>
-        <p class="traits rise d2"><b>免安装</b> · <b>免注册</b> · <b>数据不出U盘</b> · 拔下即走</p>
+        <p class="traits rise d2"><b>免安装</b> · <b>能动手干活</b> · <b>数据不出U盘</b> · 拔下即走</p>
+        <p class="under-btn rise d2">需自备一个 AI 模型密钥（DeepSeek / Kimi / 智谱 等，按用量付费，几块钱起）</p>
 
         <div class="downloads rise d3">
             <a class="btn btn-win" href="https://github.com/FUDAHA99/U-hermes/releases/latest" id="dl-win">
@@ -329,13 +332,13 @@
         <div class="demo rise d5">
             <div class="demo-bar"><i></i><i></i><i></i><span class="addr">127.0.0.1:8648 — U-Hermes</span></div>
             <div class="demo-body">
-                <div class="msg user">帮我把这个文件夹里的发票整理成 Excel 报销表</div>
-                <div class="msg ai a1"><span class="who">U-HERMES</span>好的，我扫描了 23 张发票，正在识别金额和日期…</div>
-                <div class="msg ai a2"><span class="who">U-HERMES</span>已生成 报销明细.xlsx：共 23 笔，合计 ¥4,867.50。我还发现有 2 张发票重复，已标黄提醒 ✅<span class="caret"></span></div>
+                <div class="msg user">把工作区里这一堆导出的 csv 合并成一个，按日期排好</div>
+                <div class="msg ai a1"><span class="who">U-HERMES</span>看到 12 个 csv，表头不完全一致，我先对齐列名…</div>
+                <div class="msg ai a2"><span class="who">U-HERMES</span>已写出 merged.csv：4,312 行，按日期升序。有 3 行日期为空，单独放在 merged_问题行.csv 里了 ✅<span class="caret"></span></div>
             </div>
         </div>
     </div>
-    <p class="demo-cap">双击启动后，浏览器自动打开 — 这就是你和它工作的样子</p>
+    <p class="demo-cap">界面示意图 · 它不只是聊天：能在你的电脑上读写文件、执行命令</p>
 
     <!-- ============ 三步 ============ -->
     <section>
@@ -354,7 +357,7 @@
                 <span class="n">02</span>
                 <div class="icon">⚡</div>
                 <h3>双击启动</h3>
-                <p>运行 Windows-Start.bat<br>选模型、填密钥、<b>一键测试连接</b></p>
+                <p>运行 Windows-Start.bat<br>选模型、填密钥、<b>一键测试连接</b><br><span style="opacity:.7">首次启动需联网装一次界面</span></p>
             </div>
             <div class="step">
                 <span class="n">03</span>
@@ -383,9 +386,14 @@
                 <p>基于 Hermes Agent 引擎，自动从经验中总结技能、积累记忆</p>
             </div>
             <div class="feature">
+                <div class="icon">🛠️</div>
+                <h3>能动手，不只是聊天</h3>
+                <p>在你的电脑上读写文件、执行命令、按计划跑任务，工作区独立于安装目录</p>
+            </div>
+            <div class="feature">
                 <div class="icon">🔁</div>
-                <h3>故障自动切换</h3>
-                <p>主模型超时或欠费时自动切换备用模型，对话不中断</p>
+                <h3>可配故障切换</h3>
+                <p>配好备用模型后，主模型超时或欠费会自动切过去（菜单里的 hermes fallback）</p>
             </div>
             <div class="feature">
                 <div class="icon">🩺</div>
@@ -426,7 +434,7 @@
             </details>
             <details class="faq-item">
                 <summary>换一台电脑还能用吗？</summary>
-                <div class="answer">可以。U 盘插到新电脑直接运行启动脚本，程序会自动修复路径。配置、记忆、对话记录都在 U 盘里跟着走。</div>
+                <div class="answer">可以。U 盘插到新电脑直接运行启动脚本，程序会自动修复路径。配置、记忆、对话记录都在 U 盘里跟着走。运行期间会在这台电脑的 <code>%USERPROFILE%\.hermes\</code> 放一份配置副本供引擎读取，<b>正常退出时会自动删掉</b>；如果那台电脑原本装过 Hermes，它自己的配置会被先移开、退出时还原。</div>
             </details>
             <details class="faq-item">
                 <summary>Windows 提示"已保护你的电脑"？</summary>
@@ -434,7 +442,7 @@
             </details>
             <details class="faq-item">
                 <summary>如何更新到新版本？</summary>
-                <div class="answer">小更新：运行 Windows-Menu.bat 选"更新"。大版本：下载新压缩包解压，把旧目录的 data 文件夹复制过去，配置和记忆全保留。</div>
+                <div class="answer">小更新：运行 Windows-Menu.bat 选"更新"。大版本：先关掉 U-Hermes，把新压缩包解压到一个<b>新文件夹</b>（不要覆盖解压到原目录），再把原目录整个 <code>data</code> 文件夹复制进去、选"替换目标中的文件"，确认能正常聊天后再删旧目录。工作区在安装目录外面，升级不会动它。</div>
             </details>
         </div>
     </section>
@@ -471,7 +479,7 @@
         const rel = await resp.json();
         const win = (rel.assets || []).find(a => a.name.includes('windows'));
         const mac = (rel.assets || []).find(a => a.name.includes('mac'));
-        if (rel.tag_name) document.getElementById('ver').textContent = rel.tag_name.replace(/^v/, '');
+        if (rel.tag_name) document.getElementById('ver').textContent = rel.tag_name + ' 已发布';
         if (win) {
             document.getElementById('dl-win').href = win.browser_download_url;
             document.getElementById('dl-win2').href = win.browser_download_url;
