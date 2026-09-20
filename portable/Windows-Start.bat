@@ -97,7 +97,11 @@ set "HERMES_WEB_UI_HOME=%DATA_DIR%\webui"
 set "HERMES_BIN=%VENV_DIR%\Scripts\hermes.cmd"
 set "HERMES_AGENT_BRIDGE_PYTHON=%VENV_PYTHON%"
 set "HERMES_AGENT_ROOT=%HERMES_DIR%\hermes-agent"
-set "HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=0"
+:: Let the Web UI stop the gateway during its own shutdown. Closing this
+:: window with [X] never reaches the taskkill below, so with this at 0
+:: the gateway kept running and holding port 8642 after the user thought
+:: they had stopped everything.
+set "HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=1"
 
 :: Gateway API Server settings
 set "API_SERVER_ENABLED=true"
@@ -119,6 +123,14 @@ if exist "%DATA_DIR%\.env" (
 :: Creating the default has to come first. protect-config.ps1 returns
 :: immediately when the file is missing, so running it before this left a
 :: brand-new install with no gateway key until the second launch.
+:: The zip ships data\config.yaml.default rather than config.yaml, so that
+:: extracting a new build over an existing install cannot destroy the user's
+:: configuration. Copy it into place on first run.
+if not exist "%DATA_DIR%\config.yaml" if exist "%DATA_DIR%\config.yaml.default" (
+    mkdir "%DATA_DIR%" 2>nul
+    copy /Y "%DATA_DIR%\config.yaml.default" "%DATA_DIR%\config.yaml" >nul 2>&1
+)
+
 if not exist "%DATA_DIR%\config.yaml" (
     echo.
     echo   [i] 首次启动，正在创建默认配置...
@@ -347,7 +359,7 @@ echo.
 echo   -----------------------------------------------
 echo     浏览器地址: http://127.0.0.1:8648
 echo     停止服务: 按 Ctrl+C，看到提示时选 Y
-echo     （直接点窗口右上角的 X 关闭，本机上的配置副本
+echo     （点 X 关窗口也能停掉服务，但本机上的配置副本
 echo       来不及清理，下次启动或用菜单 [8] 可以清掉）
 echo   -----------------------------------------------
 echo.

@@ -93,7 +93,9 @@ export HERMES_WEB_UI_HOME="$DATA_DIR/webui"
 export HERMES_BIN="$VENV_DIR/bin/hermes"
 export HERMES_AGENT_BRIDGE_PYTHON="$VENV_PYTHON"
 export HERMES_AGENT_ROOT="$HERMES_DIR/hermes-agent"
-export HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=0
+# Let the Web UI stop the gateway during its own shutdown; otherwise
+# closing the terminal leaves it running and holding the port.
+export HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=1
 
 # Gateway API Server settings
 export API_SERVER_ENABLED=true
@@ -116,6 +118,13 @@ fi
 # ============================================================================
 # Check if config has model set
 # ============================================================================
+
+# The zip ships config.yaml.default so that extracting a new build over an
+# existing install cannot destroy the user's configuration.
+if [ ! -f "$DATA_DIR/config.yaml" ] && [ -f "$DATA_DIR/config.yaml.default" ]; then
+    mkdir -p "$DATA_DIR"
+    cp "$DATA_DIR/config.yaml.default" "$DATA_DIR/config.yaml"
+fi
 
 if [ ! -f "$DATA_DIR/config.yaml" ]; then
     echo ""

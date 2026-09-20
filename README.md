@@ -183,14 +183,18 @@ U-Hermes/                        ← Copy to USB drive
 
 ## Disk Usage
 
+Versions come from [`portable/versions.env`](portable/versions.env); sizes are
+measured, not estimated. The table used to name Python 3.11 and Node 22 and
+claim a 350 MB download — all three were wrong by the time anyone read them.
+
 | Component | Size |
 |-----------|------|
-| Python 3.11 + uv | ~71 MB |
-| Node.js 22 LTS + hermes-web-ui | ~144 MB |
-| Hermes Agent + deps | ~383 MB |
-| Download (zip) | **~350 MB** Windows / **~400 MB** macOS |
-| Unpacked | **~600 MB** |
-| Recommended USB | **4 GB+** |
+| Embedded Python + uv | ~72 MB |
+| Node.js + hermes-web-ui | ~274 MB |
+| Hermes Agent + venv | ~548 MB |
+| **Download (zip)** | **457 MB** Windows / **537 MB** macOS — measured on the v0.4.1 release |
+| **Unpacked** | **~1.3 GB** |
+| **Recommended USB** | **8 GB+** — the chat database grows with use; see `Windows-Menu.bat` → `[7] 清理聊天记录` |
 
 ---
 

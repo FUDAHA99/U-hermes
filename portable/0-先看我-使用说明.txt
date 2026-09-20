@@ -114,10 +114,13 @@ WAL 模式，那种情况下拔盘的风险要高得多。
 从 https://github.com/FUDAHA99/U-hermes/releases 下载新压缩包，然后：
 
   1. 先关掉正在运行的 U-Hermes
-  2. 把新压缩包解压到一个新文件夹（不要覆盖解压到当前目录）
-  3. 把当前目录的整个  data  文件夹复制进新文件夹，
-     Windows 问「是否替换」时选「替换目标中的文件」
-  4. 确认新文件夹能正常聊天之后，再删掉旧文件夹
+  2. 直接解压到当前目录，选「替换目标中的文件」
+
+配置、密钥、聊天记录和登录密码都在 data\ 里，新压缩包不会覆盖它们
+（压缩包里的默认配置叫 config.yaml.default，只有第一次启动、你还没有
+配置时才会被用到）。
+
+如果你想更稳妥一点，也可以解压到一个新文件夹，再把旧目录的整个 data\ 复制进去，确认能正常聊天后再删掉旧的。
 
 升级时有一件事要额外做一次（只有从旧版本升级才需要）：
 
@@ -133,7 +136,7 @@ data\logs\errors.log 里记一条错误。而 WAL 模式在 U 盘上被拔掉的
     cd 到 U-Hermes 目录，然后逐个执行
     hermes\.venv\Scripts\python.exe -c "import sqlite3;c=sqlite3.connect(r'data\state.db');print(c.execute('PRAGMA journal_mode=DELETE').fetchone());c.close()"
 
-对 dataesponse_store.db 和 data\kanban.db 重复一次（存在的话）。
+对 data\response_store.db 和 data\kanban.db 重复一次（存在的话）。
 看到输出 ('delete',) 就成功了，之后 -wal 和 -shm 文件会消失。
 
 

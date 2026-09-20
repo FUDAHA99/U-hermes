@@ -126,7 +126,7 @@ set "HERMES_HOME=%SCRIPT_DIR%\data"
 set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
-set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%untime\python-win-x64;%PATH%"
+set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%\runtime\python-win-x64;%PATH%"
 echo.
 echo   删除超过 90 天的旧对话，并把数据库压缩到实际大小。
 echo   删掉的对话找不回来；配置、密钥、记忆和技能都不受影响。
@@ -182,13 +182,11 @@ echo.
 echo   [i] 如需更新 AI 引擎核心版本，要下载新的压缩包：
 echo       https://github.com/FUDAHA99/U-hermes/releases
 echo.
-echo       升级步骤（顺序不能反）：
+echo       升级步骤：
 echo         1. 先关掉正在运行的 U-Hermes；
-echo         2. 把新压缩包解压到一个新文件夹（不要解压到当前目录覆盖）；
-echo         3. 把当前目录的整个 data 文件夹复制进新文件夹，
-echo            Windows 问"是否替换"时选"替换目标中的文件"；
-echo         4. 确认新文件夹能正常聊天之后，再删掉旧文件夹。
-echo       你的工作区在安装目录外面，升级不会动它。
+echo         2. 把新压缩包直接解压到当前目录，选"替换目标中的文件"。
+echo       配置、密钥和聊天记录都在 data 里，压缩包不会覆盖它们。
+echo       你的工作区在安装目录外面，同样不受影响。
 pause
 goto MENU
 

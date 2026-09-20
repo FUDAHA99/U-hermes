@@ -150,7 +150,11 @@ jobs:
           # Initialize data
           New-Item -ItemType Directory -Path "data/memory","data/skills","data/sessions","data/cron" -Force
 
-          # Create default config.yaml
+          # Ship the default as config.yaml.default, NOT config.yaml. The launcher
+          # copies it on first run. Shipping config.yaml itself made
+          # extracting a new zip over an existing install destroy the user's
+          # configuration -- and the verify step below asserted the very file
+          # that made it destructive.
           @"
           model:
             provider: ""
@@ -181,7 +185,7 @@ jobs:
             enabled: true
           cron:
             enabled: true
-          "@ | Set-Content "data/config.yaml" -Encoding utf8
+          "@ | Set-Content "data/config.yaml.default" -Encoding utf8
 
       - name: Smoke test
         shell: pwsh
@@ -273,7 +277,7 @@ jobs:
           foreach ($needed in @(
             "Windows-Start.bat", "Windows-Menu.bat", "Config.html",
             "scripts\preflight.py", "scripts\wait-for.py", "scripts\config-server.py",
-            "scripts\protect-config.ps1", "versions.env", "data\config.yaml"
+            "scripts\protect-config.ps1", "versions.env", "data\config.yaml.default"
           )) {
             if (-not (Test-Path (Join-Path $work $needed))) { Write-Error "missing from the zip: $needed"; exit 1 }
           }
@@ -367,8 +371,12 @@ jobs:
           # Initialize data
           mkdir -p data/memory data/skills data/sessions data/cron
 
-          # Create default config.yaml
-          cat > data/config.yaml << 'CFGEOF'
+          # Ship the default as config.yaml.default, NOT config.yaml. The launcher
+          # copies it on first run. Shipping config.yaml itself made
+          # extracting a new zip over an existing install destroy the user's
+          # configuration -- and the verify step below asserted the very file
+          # that made it destructive.
+          cat > data/config.yaml.default << 'CFGEOF'
           model:
             provider: ""
             model: ""
@@ -472,7 +480,7 @@ jobs:
 
           ls "$WORK" | grep -q "使用说明" || { echo "FAIL: no Chinese quick-start file in the zip"; exit 1; }
           for f in Mac-Start.command Config.html scripts/preflight.py scripts/wait-for.py \
-                   scripts/config-server.py versions.env data/config.yaml; do
+                   scripts/config-server.py versions.env data/config.yaml.default; do
             test -e "$WORK/$f" || { echo "FAIL: missing from the zip: $f"; exit 1; }
           done
           echo "Packaged artifact verified."
