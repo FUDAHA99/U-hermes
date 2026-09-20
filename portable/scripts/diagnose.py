@@ -4,6 +4,7 @@ U-Hermes 一键诊断
 检查运行环境、配置、服务端口、API 连通性和磁盘空间，
 并把最近的错误日志翻译成人话和解决建议。
 """
+import datetime
 import json
 import os
 import re
@@ -27,6 +28,20 @@ ERRORS_LOG = os.path.join(DATA_DIR, "logs", "errors.log")
 OK = "[OK]"
 BAD = "[X] "
 WARN = "[!] "
+
+# 错误日志里多久以内算"最近"
+RECENT_DAYS = 7
+
+
+def line_time(line):
+    """日志行的时间戳，认不出来返回 None。"""
+    match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", line)
+    if not match:
+        return None
+    try:
+        return datetime.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
 
 # 错误日志分类表：正则 → (人话解释, 解决建议)
 ERROR_CLASSES = [
@@ -98,28 +113,56 @@ def check_port(port):
 
 
 def call_provider(base_url, api_key, model):
-    """极简 chat/completions 调用，返回 (ok, 中文消息)。"""
+    """极简调用，返回 (ok, 中文消息)。
+
+    按地址判断协议：MiniMax 的 /anthropic、Kimi 的 /coding 说的是 Anthropic
+    Messages，用 /chat/completions 去探会拿到 404，显示成"模型名写错了"。
+    """
     url = base_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 5,
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + api_key,
-    }, method="POST")
+    anthropic = (
+        "/anthropic" in url
+        or url.endswith("/coding")
+        or "api.anthropic.com" in url
+    )
+    if anthropic:
+        req_url = url + "/v1/messages"
+        payload = json.dumps({
+            "model": model,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        ok_field = "content"
+    else:
+        req_url = url if url.endswith("/chat/completions") else url + "/chat/completions"
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 5,
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + api_key,
+        }
+        ok_field = "choices"
+
+    req = urllib.request.Request(req_url, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
-            if isinstance(data, dict) and data.get("choices"):
+            if isinstance(data, dict) and data.get(ok_field):
                 return True, "连接成功，模型响应正常。"
             return False, "服务已连通，但返回内容异常，请核对模型名称。"
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             return False, "API 密钥无效或无权限（HTTP %d），请更新密钥。" % e.code
+        if e.code == 402:
+            # 这是最常见的一种"明明配好了却不回话"。密钥是对的，只是没钱了。
+            return False, "账户余额不足（HTTP 402）。密钥本身有效，请到服务商官网充值。"
         if e.code == 404:
             return False, "接口地址或模型名称不存在（HTTP 404）。"
         if e.code == 429:
@@ -262,10 +305,25 @@ def main():
                 f.seek(max(0, size - 64 * 1024))
                 tail = f.read().decode("utf-8", "replace")
             lines = tail.splitlines()[-200:]
-            found = []  # (最后出现行号, 次数, 解释, 建议)
+
+            # 只看最近这些天。以前没有这一步，几个月前的旧错误会被当成
+            # "最近"报出来，读的人以为刚刚又出事了。
+            cutoff = datetime.datetime.now() - datetime.timedelta(days=RECENT_DAYS)
+            recent, stale = set(), 0
+            for i, line in enumerate(lines):
+                stamp = line_time(line)
+                if stamp is None or stamp >= cutoff:
+                    recent.add(i)  # 没有时间戳就无法判断新旧，保留
+                else:
+                    stale += 1
+
+            found = []       # (最后出现行号, 次数, 时间, 解释, 建议)
+            matched = set()
             for pattern, meaning, advice in ERROR_CLASSES:
                 rx = re.compile(pattern)
                 hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+                matched.update(hits)
+                hits = [i for i in hits if i in recent]
                 if hits:
                     ts_match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", lines[hits[-1]])
                     ts = ts_match.group(1) if ts_match else "时间未知"
@@ -276,7 +334,19 @@ def main():
                     print("  %s %s（最近 %s，共 %d 次）" % (WARN, meaning, ts, count))
                     print("       建议: %s" % advice)
             else:
-                print("  %s 最近日志中没有已知类型的错误" % OK)
+                print("  %s 最近 %d 天没有已知类型的错误" % (OK, RECENT_DAYS))
+
+            # 不认识的错误以前是直接丢掉的，于是日志里明明有几十行报错，
+            # 诊断却说"一切正常"。认不出来也要让人看见原文。
+            unknown = [i for i in sorted(recent) if i not in matched and lines[i].strip()]
+            if unknown:
+                print("  %s 另有 %d 行错误不属于已知类型，最近 3 条原文：" % (WARN, len(unknown)))
+                for i in unknown[-3:]:
+                    print("       %s" % lines[i].strip()[:160])
+                print("       看不懂的话，把这几行连同 data\\logs\\errors.log")
+                print("       发到 https://github.com/FUDAHA99/U-hermes/issues")
+            if stale:
+                print("  %s 另有 %d 行 %d 天前的旧错误，已忽略。" % (OK, stale, RECENT_DAYS))
         except OSError:
             print("  %s 无法读取错误日志" % WARN)
     else:
