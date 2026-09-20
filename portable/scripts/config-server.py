@@ -327,15 +327,27 @@ def _merge_mapping(existing_lines, incoming_lines, indent):
 
 def merge_yaml(existing_text, incoming_text):
     """Apply the page's settings on top of the file already on disk."""
+    # Windows PowerShell 5.1's Set-Content -Encoding utf8 writes a BOM, and
+    # protect-config.ps1 writes this file before the user ever opens the
+    # config page -- so on a fresh install the first key is ﻿model:,
+    # which the key pattern below does not match. Left alone, the page's
+    # model: block is appended as a SECOND top-level model: key and the
+    # stale one stays in the file forever. Strip it to work, put it back so
+    # the file's encoding is left exactly as it was found.
+    bom = existing_text.startswith("﻿")
+    if bom:
+        existing_text = existing_text[1:]
     if not existing_text.strip():
-        return incoming_text
+        return ("﻿" if bom else "") + incoming_text
     crlf = existing_text.count("\r\n") > existing_text.count("\n") / 2
     existing_lines = existing_text.replace("\r\n", "\n").splitlines(keepends=True)
     incoming_lines = incoming_text.replace("\r\n", "\n").splitlines(keepends=True)
     merged = "".join(_merge_mapping(existing_lines, incoming_lines, 0))
     if not merged.endswith("\n"):
         merged += "\n"
-    return merged.replace("\n", "\r\n") if crlf else merged
+    if crlf:
+        merged = merged.replace("\n", "\r\n")
+    return ("﻿" if bom else "") + merged
 
 
 def parse_yaml_mapping(text):
@@ -344,6 +356,7 @@ def parse_yaml_mapping(text):
     Used both to validate a merge before it is written and to reject a body
     that did not come from the config page.
     """
+    text = text.lstrip("﻿")
     try:
         import yaml
     except ImportError:

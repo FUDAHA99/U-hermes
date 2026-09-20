@@ -227,6 +227,31 @@ database:
         check(data["model"]["provider"] == "deepseek", "%s: the page's provider is still applied" % label)
 
 
+def test_byte_order_mark():
+    """A BOM on config.yaml must not hide the first key.
+
+    protect-config.ps1 writes this file before the user ever opens the config
+    page, and Windows PowerShell 5.1's Set-Content -Encoding utf8 writes a
+    BOM. With \\ufeff in front of it, `model:` stops looking like a key, and
+    the page's own model: block gets appended as a second top-level model:
+    -- leaving the stale one in the file on every fresh install.
+    """
+    with_bom = "﻿" + SHIPPED
+    merged = cs.merge_yaml(with_bom, FROM_PAGE)
+    keys = [ln for ln in merged.splitlines() if ln.lstrip("﻿").startswith("model:")]
+    check(len(keys) == 1, "exactly one top-level model: key survives (got %d)" % len(keys))
+    check(merged.startswith("﻿"), "the file keeps the BOM it came with")
+
+    data = cs.parse_yaml_mapping(merged)
+    check(data is not None, "a config with a BOM still parses after merge")
+    if data is not None:
+        check(data["model"]["provider"] == "deepseek", "the page's provider is applied")
+        check(data["platforms"]["api_server"]["extra"]["port"] == 8642,
+              "the gateway block survives a BOM'd merge")
+    check(not cs.merge_yaml(SHIPPED, FROM_PAGE).startswith("﻿"),
+          "a file without a BOM does not gain one")
+
+
 def test_provider_switch_does_not_inherit_the_old_endpoint():
     """Switching provider must not leave the previous one's endpoint behind.
 
@@ -274,6 +299,7 @@ def test_env_merge():
 
 if __name__ == "__main__":
     for fn in (test_nothing_is_lost, test_shape, test_foreign_indentation,
+               test_byte_order_mark,
                test_provider_switch_does_not_inherit_the_old_endpoint,
                test_bad_bodies_are_refused, test_env_merge):
         print(fn.__name__)
