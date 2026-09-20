@@ -33,7 +33,15 @@ if ($InstallDir) {
         }
         $escaped = $workspace -replace "'", "''"
         if ($cwdMatch.Success) {
-            $content = $content -replace "(?m)^(\s+)cwd:\s*.*$", "`${1}cwd: '$escaped'"
+            # Only the first one: a file-wide replace would also rewrite a cwd
+            # set on an individual toolset or platform.
+            #
+            # This has to be the INSTANCE method. [regex]::Replace has no
+            # (input, pattern, replacement, count) overload -- PowerShell
+            # binds a literal 1 to RegexOptions instead, where it means
+            # IgnoreCase, and every match gets replaced after all.
+            $cwdRegex = [regex]"(?m)^(\s+)cwd:\s*.*$"
+            $content = $cwdRegex.Replace($content, "`${1}cwd: '$escaped'", 1)
         } elseif ($content -match '(?m)^terminal:\s*$') {
             $content = $content -replace "(?m)^(terminal:\s*)$", "`${1}`n  cwd: '$escaped'"
         } else {
@@ -48,22 +56,128 @@ if ($InstallDir) {
 # Since hermes-agent 0.21 the api_server platform refuses to start without a
 # strong key, "including loopback-only binds on 127.0.0.1". Generate one per
 # install on first run so the gateway comes up without the user doing anything.
-if ($content -match '(?m)^platforms:' -and $content -match '(?m)^\s+api_server:') {
-    $keyMatch = [regex]::Match($content, "(?m)^(\s+)key:\s*(.*)$")
-    $needsKey = (-not $keyMatch.Success) -or
-                ($keyMatch.Groups[2].Value.Trim().Trim("'", '"').Length -lt 32)
-    if ($needsKey) {
-        $bytes = New-Object byte[] 32
-        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-        $key = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
-        if ($keyMatch.Success) {
-            $content = $content -replace "(?m)^(\s+)key:\s*.*$", "`${1}key: '$key'"
-        } else {
-            $content = $content -replace "(?m)^(\s+api_server:\s*)$", "`${1}`n    key: '$key'"
-        }
-        Set-Content -Path $ConfigFile -Value $content -Encoding utf8 -NoNewline
-        Write-Host "  [OK] Generated a gateway API key for this install." -ForegroundColor Green
+#
+# This walks the file line by line instead of running a regex over the whole
+# thing, for two reasons.  `key:` also appears under gateway.platforms for bot
+# tokens, and a file-wide replace would overwrite those with the gateway's
+# key.  And the block itself may be missing -- an older install, or a config
+# page that wrote a fresh file -- in which case the previous version of this
+# script quietly did nothing and the gateway exited with code 78 on every
+# launch after that.
+$eol = "`n"
+if ($content -match "`r`n") { $eol = "`r`n" }
+$lines = [System.Collections.ArrayList]@($content -split "`r?`n")
+
+function Get-Indent([string]$line) {
+    if ($line -match '^(\s*)') { return $Matches[1].Length }
+    return 0
+}
+
+# Index of a key at a given indent, searched inside [start, end).
+function Find-Key {
+    param([System.Collections.ArrayList]$Lines, [string]$Name, [int]$Indent, [int]$Start, [int]$End)
+    for ($i = $Start; $i -lt $End; $i++) {
+        $line = $Lines[$i]
+        if ($line.Trim() -eq '' -or $line.Trim().StartsWith('#')) { continue }
+        $ind = Get-Indent $line
+        if ($ind -lt $Indent) { break }
+        if ($ind -eq $Indent -and $line -match "^\s*$([regex]::Escape($Name))\s*:") { return $i }
     }
+    return -1
+}
+
+# Where a block's children stop.
+function Find-BlockEnd {
+    param([System.Collections.ArrayList]$Lines, [int]$Start, [int]$Indent)
+    for ($i = $Start + 1; $i -lt $Lines.Count; $i++) {
+        $line = $Lines[$i]
+        if ($line.Trim() -eq '' -or $line.Trim().StartsWith('#')) { continue }
+        if ((Get-Indent $line) -le $Indent) { return $i }
+    }
+    return $Lines.Count
+}
+
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$newKey = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
+$changed = $false
+
+# The key belongs under `extra:`, NOT as a sibling of `enabled:`. The engine
+# builds the platform with PlatformConfig.from_dict, which keeps only the
+# fields it knows plus `extra=data.get("extra", {})`, and then does
+# `extra.get("key", os.getenv("API_SERVER_KEY", ""))`. A bare `key:` one level
+# up is dropped on the floor, the api server starts with an empty key and
+# logs "All requests will be accepted without authentication".
+$platformsIdx = Find-Key -Lines $lines -Name 'platforms' -Indent 0 -Start 0 -End $lines.Count
+if ($platformsIdx -lt 0) {
+    $block = @(
+        '', 'platforms:', '  api_server:', '    enabled: true',
+        '    extra:', "      key: '$newKey'", '      port: 8642', '      host: 127.0.0.1'
+    )
+    while ($lines.Count -gt 0 -and $lines[$lines.Count - 1].Trim() -eq '') {
+        $lines.RemoveAt($lines.Count - 1) | Out-Null
+    }
+    $lines.AddRange($block) | Out-Null
+    $changed = $true
+    Write-Host "  [OK] Added the gateway api_server block with a key." -ForegroundColor Green
+} else {
+    $platformsEnd = Find-BlockEnd -Lines $lines -Start $platformsIdx -Indent 0
+    $apiIdx = Find-Key -Lines $lines -Name 'api_server' -Indent 2 -Start ($platformsIdx + 1) -End $platformsEnd
+    if ($apiIdx -lt 0) {
+        $block = @(
+            '  api_server:', '    enabled: true',
+            '    extra:', "      key: '$newKey'", '      port: 8642', '      host: 127.0.0.1'
+        )
+        $lines.InsertRange($platformsIdx + 1, $block) | Out-Null
+        $changed = $true
+        Write-Host "  [OK] Added the gateway api_server block with a key." -ForegroundColor Green
+    } else {
+        $apiEnd = Find-BlockEnd -Lines $lines -Start $apiIdx -Indent 2
+        $extraIdx = Find-Key -Lines $lines -Name 'extra' -Indent 4 -Start ($apiIdx + 1) -End $apiEnd
+        if ($extraIdx -lt 0) {
+            $lines.InsertRange($apiIdx + 1, @('    extra:', "      key: '$newKey'")) | Out-Null
+            $changed = $true
+            Write-Host "  [OK] Generated a gateway API key for this install." -ForegroundColor Green
+        } else {
+            $extraEnd = Find-BlockEnd -Lines $lines -Start $extraIdx -Indent 4
+            $keyIdx = Find-Key -Lines $lines -Name 'key' -Indent 6 -Start ($extraIdx + 1) -End $extraEnd
+            $current = ''
+            if ($keyIdx -ge 0 -and $lines[$keyIdx] -match '^\s*key\s*:\s*(.*)$') {
+                $current = $Matches[1].Trim().Trim("'", '"')
+            }
+            if ($current.Length -lt 32) {
+                if ($keyIdx -ge 0) {
+                    $lines[$keyIdx] = "      key: '$newKey'"
+                } else {
+                    $lines.Insert($extraIdx + 1, "      key: '$newKey'") | Out-Null
+                }
+                $changed = $true
+                Write-Host "  [OK] Generated a gateway API key for this install." -ForegroundColor Green
+            }
+        }
+    }
+}
+
+# A key left at the old, inert position by an earlier build would keep the
+# 32-character check happy while the gateway stayed unauthenticated. Remove it.
+$platformsIdx = Find-Key -Lines $lines -Name 'platforms' -Indent 0 -Start 0 -End $lines.Count
+if ($platformsIdx -ge 0) {
+    $platformsEnd = Find-BlockEnd -Lines $lines -Start $platformsIdx -Indent 0
+    $apiIdx = Find-Key -Lines $lines -Name 'api_server' -Indent 2 -Start ($platformsIdx + 1) -End $platformsEnd
+    if ($apiIdx -ge 0) {
+        $apiEnd = Find-BlockEnd -Lines $lines -Start $apiIdx -Indent 2
+        $strayIdx = Find-Key -Lines $lines -Name 'key' -Indent 4 -Start ($apiIdx + 1) -End $apiEnd
+        if ($strayIdx -ge 0) {
+            $lines.RemoveAt($strayIdx) | Out-Null
+            $changed = $true
+            Write-Host "  [OK] Removed a gateway key the engine never read." -ForegroundColor Green
+        }
+    }
+}
+
+if ($changed) {
+    $content = ($lines -join $eol)
+    Set-Content -Path $ConfigFile -Value $content -Encoding utf8 -NoNewline
 }
 
 # Check if config has custom_providers with actual entries
