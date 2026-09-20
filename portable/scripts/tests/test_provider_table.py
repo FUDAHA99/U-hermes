@@ -200,6 +200,27 @@ def main():
         "the messaging section writes a TOP-LEVEL platforms block, not one under gateway:",
     )
 
+    # The workspace is a Windows path, and a Windows path in a double-quoted
+    # YAML scalar is read as escape sequences: "C:\temp" parses to C:<TAB>emp
+    # with no error at all, and "D:\U-Hermes工作区" does not parse. Single
+    # quotes with '' doubling are the only correct form.
+    check(
+        re.search(r"yamlStr\s*=\s*s\s*=>\s*\"'\"", html) is not None,
+        "the workspace path is emitted single-quoted",
+    )
+    check(
+        re.search(r"cwd:\s*\$\{yamlStr\(", html) is not None,
+        "terminal.cwd goes through that quoting rather than being interpolated raw",
+    )
+    check(
+        "workspaceKnown" in html and re.search(r"workspaceKnown\s*\?", html) is not None,
+        "no terminal: block is written until the current workspace has been read back",
+    )
+    check(
+        re.search(r'id="workspaceDir"[^>]*\bdisabled\b', html) is not None,
+        "the workspace box starts disabled, so a failed read cannot blank the setting",
+    )
+
 
 if __name__ == "__main__":
     main()

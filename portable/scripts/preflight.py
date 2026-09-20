@@ -110,7 +110,33 @@ def say(*lines):
         print("   " + line)
 
 
+def print_workspace(data_dir):
+    """Print the configured workspace, or nothing.
+
+    The CLI does not honour terminal.cwd: cli.py overwrites it with
+    os.getcwd() whenever the backend is local, before anything reads the
+    config. So the launcher has to chdir there itself, or the folder the
+    user picked on the config page would apply to the Web UI and not to
+    `hermes chat` -- one product with two working directories, and a
+    settings box that shows only one of them.
+    """
+    config = load_config(os.path.join(data_dir, "config.yaml")) or {}
+    terminal = config.get("terminal")
+    if not isinstance(terminal, dict):
+        return 0
+    if str(terminal.get("backend") or "local") != "local":
+        return 0
+    cwd = str(terminal.get("cwd") or "").strip()
+    if cwd and cwd not in (".", "./", ".\\", "auto", "cwd"):
+        sys.stdout.write(cwd)
+    return 0
+
+
 def main(argv):
+    if "--print-workspace" in argv:
+        rest = [a for a in argv[1:] if a != "--print-workspace"]
+        return print_workspace(rest[0] if rest else "data")
+
     data_dir = argv[1] if len(argv) > 1 else "data"
     config_path = os.path.join(data_dir, "config.yaml")
 

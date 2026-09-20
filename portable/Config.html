@@ -268,9 +268,27 @@
             </div>
         </div>
 
-        <!-- Step 3: Messaging Platforms -->
+        <!-- Step 3: Agent workspace -->
         <div class="card">
-            <h2>3. 消息平台（可选）</h2>
+            <h2>3. 智能体工作区</h2>
+            <p style="font-size:0.85em; color:#a0a0a0; margin-bottom:16px;">
+                智能体默认在这个文件夹里读写文件、运行命令。它在安装目录外面，升级不会动它。<br>
+                这是「默认位置」，不是围栏 —— 你在对话里写明完整路径时，它照样能读写别处。
+            </p>
+            <div class="form-group">
+                <label>工作区文件夹</label>
+                <!-- Starts disabled on purpose. This is the one setting that
+                     already has a value before the page opens, so the box must
+                     not be writable until the service has said what that value
+                     is; otherwise saving would blank it. -->
+                <input type="text" id="workspaceDir" placeholder="正在读取当前设置…" disabled>
+                <div class="hint" id="workspaceHint">留空 = 用安装目录旁边的「U-Hermes工作区」。</div>
+            </div>
+        </div>
+
+        <!-- Step 4: Messaging Platforms -->
+        <div class="card">
+            <h2>4. 消息平台（可选）</h2>
             <p style="font-size:0.85em; color:#a0a0a0; margin-bottom:16px;">
                 配置后 AI 可通过这些平台接收和回复消息。不需要可跳过。
             </p>
@@ -413,9 +431,9 @@
             </div>
         </div>
 
-        <!-- Step 4: Save -->
+        <!-- Step 5: Save -->
         <div class="card">
-            <h2>4. 保存并启动</h2>
+            <h2>5. 保存并启动</h2>
             <button class="btn-secondary" id="testBtn" onclick="testConnection()">测试连接</button>
             <button class="btn-primary" onclick="saveConfig()">保存配置</button>
             <div class="status" id="status"></div>
@@ -470,6 +488,49 @@
         });
     });
 
+    // --- Agent workspace ---------------------------------------------------
+    // The one setting on this page that already has a value before the page
+    // opens: protect-config.ps1 fills terminal.cwd on first launch, and the
+    // engine falls back to the Windows profile of whoever is logged in when
+    // it is unset -- on a borrowed PC, that is someone else's Documents.
+    // A box that started empty and was always written would erase it, so the
+    // box stays disabled, and saveConfig() emits no terminal: block at all,
+    // until /workspace has said what is actually in the file.
+    let workspaceKnown = false;
+
+    // Single quotes, always. A Windows path in a double-quoted YAML scalar is
+    // read as escape sequences: "C:\temp" parses to C:<TAB>emp with no error
+    // at all, and "D:\U-Hermes工作区" fails to parse outright.
+    const yamlStr = s => "'" + String(s).replace(/'/g, "''") + "'";
+
+    async function loadWorkspace() {
+        const box = document.getElementById('workspaceDir');
+        const hint = document.getElementById('workspaceHint');
+        const url = apiUrl('/workspace');
+        if (url) {
+            try {
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    const d = await resp.json();
+                    if (d.ok) {
+                        workspaceKnown = true;
+                        box.disabled = false;
+                        box.value = d.cwd || '';
+                        box.placeholder = d.default || '';
+                        hint.textContent = (d.backend === 'local')
+                            ? '留空 = 恢复默认（' + (d.default || '安装目录旁边的工作区')
+                              + '）。命令直接在这台电脑上运行，没有沙箱。'
+                            : '当前运行方式是 ' + d.backend + '，这里填的是那一端的路径。';
+                        return;
+                    }
+                }
+            } catch (e) { /* fall through to the message below */ }
+        }
+        hint.textContent = '配置服务没连上，读不到当前的工作区，本次保存不会改动这一项。'
+                         + '要修改请通过启动器打开本页面。';
+    }
+    document.addEventListener('DOMContentLoaded', loadWorkspace);
+
     // Save configuration
     function saveConfig() {
         const apiKey = document.getElementById('apiKey').value.trim();
@@ -523,6 +584,19 @@
         const platforms = getEnabledPlatforms();
         const platformsYaml = platformsToYaml(platforms);
 
+        // Only when loadWorkspace() succeeded -- otherwise we would be writing
+        // over a path we never saw. An empty box then means "back to the
+        // default", which the config service resolves to the same folder
+        // protect-config.ps1 picks, so the two cannot disagree.
+        // No backend: here on purpose. The merge is per-key, so writing
+        // backend: local would silently revert anyone running docker or ssh.
+        const workspaceYaml = workspaceKnown
+            ? `terminal:
+  cwd: ${yamlStr(document.getElementById('workspaceDir').value.trim())}
+
+`
+            : '';
+
         if (builtin) {
             // Built-in provider: use Hermes native resolution + .env for API key
             configYaml = `# U-Hermes Configuration (auto-generated)
@@ -533,7 +607,7 @@ model:
   default: "${modelName}"
   model: "${modelName}"
 
-${platformsYaml}skills:
+${workspaceYaml}${platformsYaml}skills:
   external_dirs:
     - "../skills-cn"
 
@@ -563,7 +637,7 @@ custom_providers:
     base_url: "${baseUrl}"
     key_env: "OPENAI_API_KEY"
 
-${platformsYaml}skills:
+${workspaceYaml}${platformsYaml}skills:
   external_dirs:
     - "../skills-cn"
 

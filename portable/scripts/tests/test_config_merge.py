@@ -10,6 +10,7 @@ Run:  python portable/scripts/tests/test_config_merge.py
 """
 import importlib.util
 import os
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -278,6 +279,74 @@ model:
     check(data["model"].get("temperature") == 0.2, "settings not tied to the provider survive")
 
 
+def test_workspace():
+    """The workspace box must add a path without disturbing the block it lives in.
+
+    terminal.cwd decides where the agent reads and writes the user's files.
+    The engine falls back to the Windows profile of whoever is logged in when
+    it is unset, so on a borrowed PC a blanked value means the agent starts
+    writing into somebody else's Documents.
+    """
+    import tempfile
+
+    lived_in = """\
+model:
+  provider: "custom:longcat"
+terminal:
+  cwd: 'F:\\现有工作区'
+  backend: local
+  timeout: 120
+platforms:
+  api_server:
+    enabled: true
+    extra:
+      key: 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000'
+"""
+    from_page = """\
+model:
+  provider: "deepseek"
+  default: "deepseek-chat"
+
+terminal:
+  cwd: 'F:\\新的工作区'
+
+skills:
+  external_dirs:
+    - "../skills-cn"
+"""
+    data = cs.parse_yaml_mapping(cs.merge_yaml(lived_in, from_page))
+    check(data is not None, "the merged config parses")
+    if data is None:
+        return
+    check(data["terminal"]["cwd"] == "F:\\新的工作区", "the new workspace is applied")
+    check(data["terminal"]["backend"] == "local", "terminal.backend is not disturbed")
+    check(data["terminal"]["timeout"] == 120, "an unrelated terminal setting survives")
+    check(len(str(data["platforms"]["api_server"]["extra"]["key"])) >= 32,
+          "the gateway key survives a workspace change")
+
+    # A path that does not exist is otherwise invisible: the engine walks up
+    # to the nearest existing ancestor, so D:\我的工作\区 silently becomes D:\
+    # and the agent writes to the root of the drive.
+    root = tempfile.mkdtemp(prefix="uh-ws-")
+    fresh = os.path.join(root, "工作区", "子目录")
+    merged = cs.merge_yaml(lived_in, from_page.replace("F:\\新的工作区", fresh))
+    check(cs.settle_workspace(merged) is None, "a workspace that does not exist is accepted")
+    check(os.path.isdir(fresh), "...because it gets created rather than silently relocated")
+
+    blocker = os.path.join(root, "这是个文件")
+    with open(blocker, "w", encoding="utf-8") as f:
+        f.write("x")
+    merged = cs.merge_yaml(lived_in, from_page.replace("F:\\新的工作区", blocker))
+    check(cs.settle_workspace(merged) is not None, "a path that is a file is refused, not ignored")
+
+    # Nothing to create for a container or an ssh host.
+    remote = lived_in.replace("backend: local", "backend: docker")
+    merged = cs.merge_yaml(remote, from_page.replace("F:\\新的工作区", "/srv/work"))
+    check(cs.settle_workspace(merged) is None, "a non-local backend's path is left alone")
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def test_bad_bodies_are_refused():
     # A cross-site form POST cannot produce a YAML mapping, so requiring one
     # closes the sandboxed-iframe route around the Origin check.
@@ -301,6 +370,7 @@ if __name__ == "__main__":
     for fn in (test_nothing_is_lost, test_shape, test_foreign_indentation,
                test_byte_order_mark,
                test_provider_switch_does_not_inherit_the_old_endpoint,
+               test_workspace,
                test_bad_bodies_are_refused, test_env_merge):
         print(fn.__name__)
         fn()

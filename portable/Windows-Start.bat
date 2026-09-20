@@ -217,6 +217,13 @@ if /I "%~1"=="--gateway" shift
 :: script -- so on exactly the broken-network machine where someone reaches
 :: for the command line as a fallback, the fallback was unreachable too.
 if not "%~1"=="" (
+    :: Start in the workspace the user chose. The CLI overwrites
+    :: terminal.cwd with its own working directory whenever the backend is
+    :: local, so without this the config page's workspace box would apply to
+    :: the Web UI and not to `hermes chat`, and the CLI agent would write
+    :: into the program files instead.
+    for /f "usebackq delims=" %%W in (`""%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\preflight.py" --print-workspace "%DATA_DIR%""`) do set "AGENT_CWD=%%W"
+    if defined AGENT_CWD if exist "!AGENT_CWD!\" cd /d "!AGENT_CWD!"
     "%VENV_PYTHON%" -m hermes_cli.main %*
     goto :check_exit
 )

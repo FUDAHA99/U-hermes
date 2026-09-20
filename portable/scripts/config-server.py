@@ -40,6 +40,16 @@ BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 CONFIG_PAGE = os.path.join(PORTABLE_DIR, "Config.html")
 KEEP_BACKUPS = 10
 
+
+def default_workspace():
+    """Where the agent works when the user has not chosen anywhere.
+
+    Must stay identical to what protect-config.ps1 computes -- the parent of
+    the install directory plus U-Hermes工作区. If the two ever disagree, every
+    launch moves the user's files somewhere else.
+    """
+    return os.path.join(os.path.dirname(PORTABLE_DIR), "U-Hermes工作区")
+
 # This server hands out the user's API key on /test and rewrites their config
 # on /save-config, so it has to know the request came from its own page.
 #
@@ -398,6 +408,38 @@ def merge_env(existing_text, incoming_text):
     return "\n".join(out) + "\n"
 
 
+CWD_PLACEHOLDERS = (".", "./", ".\\", "auto", "cwd")
+
+
+def settle_workspace(merged):
+    """Make sure the chosen workspace exists. Returns an error message or None.
+
+    A path that does not exist is never an error the user gets to see: the
+    engine walks up to the nearest existing ancestor, so a typo like
+    D:\\我的工作\\区 quietly becomes D:\\ and the agent starts writing to the
+    root of the drive. Create the folder here, or refuse the save.
+    """
+    config = parse_yaml_mapping(merged) or {}
+    terminal = config.get("terminal")
+    if not isinstance(terminal, dict):
+        return None
+    if str(terminal.get("backend") or "local") != "local":
+        return None  # a path inside a container or over ssh; not ours to create
+    cwd = str(terminal.get("cwd") or "").strip()
+    if not cwd or cwd in CWD_PLACEHOLDERS:
+        return None
+    if os.path.isdir(cwd):
+        return None
+    if os.path.exists(cwd):
+        return "工作区路径 %s 已经存在，但不是文件夹。" % cwd
+    try:
+        os.makedirs(cwd)
+    except OSError as exc:
+        return ("建不出工作区文件夹 %s（%s）。请换一个位置，"
+                "或先手动建好这个文件夹。" % (cwd, exc.__class__.__name__))
+    return None
+
+
 def backup(path):
     """Keep a timestamped copy so a bad save is always recoverable."""
     if not os.path.exists(path):
@@ -521,16 +563,26 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
     def _route(self):
         return urllib.parse.urlsplit(self.path).path
 
-    def _request_ok(self):
+    def _request_ok(self, require_origin=True):
         """Is this really our own page talking to us?
 
-        Two independent gates, because either one alone has a hole. The
-        Origin must be this server -- "null", which every file:// page and
-        every sandboxed iframe sends, is not good enough and is refused.
-        And the request must carry the token this run was started with,
-        which only a page we served can know.
+        Two independent gates for anything that changes state, because
+        either one alone has a hole. The Origin must be this server --
+        "null", which every file:// page and every sandboxed iframe sends,
+        is not good enough and is refused. And the request must carry the
+        token this run was started with, which only a page we served knows.
+
+        require_origin=False for reads: browsers send no Origin at all on a
+        same-origin GET, so demanding one would reject our own page. The
+        token still has to be right, a foreign Origin is still refused, and
+        a cross-site caller cannot read the response anyway -- _cors only
+        ever names this server.
         """
-        if self.headers.get("Origin") not in ALLOWED_ORIGINS:
+        origin = self.headers.get("Origin")
+        if origin is None:
+            if require_origin:
+                return False
+        elif origin not in ALLOWED_ORIGINS:
             return False
         return secrets.compare_digest(self._token(), TOKEN)
 
@@ -553,6 +605,12 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
         # Readiness probe for the launcher. No state, no token.
         if route == "/ping":
             self._json(200, {"ok": True})
+            return
+        if route == "/workspace":
+            if not self._request_ok(require_origin=False):
+                self._json(403, {"ok": False})
+                return
+            self._json(200, self._workspace_state())
             return
         if route in ("/", "/Config.html"):
             if not secrets.compare_digest(self._token(), TOKEN):
@@ -607,6 +665,32 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def _workspace_state(self):
+        """The two terminal settings the page renders -- and nothing else.
+
+        Deliberately not "GET the config". Everything else in that file is
+        the user's API keys and their gateway key; a settings page has no
+        business being able to read them back, whatever guards the endpoint.
+        """
+        state = {"ok": True, "cwd": "", "backend": "local",
+                 "default": default_workspace()}
+        path = os.path.join(DATA_DIR, "config.yaml")
+        if not os.path.exists(path):
+            return state
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                config = parse_yaml_mapping(f.read())
+        except OSError:
+            return state
+        terminal = (config or {}).get("terminal")
+        if isinstance(terminal, dict):
+            cwd = str(terminal.get("cwd") or "").strip()
+            # "." and friends mean "not chosen"; showing them to the user as
+            # if they were a location would be worse than showing nothing.
+            state["cwd"] = "" if cwd in CWD_PLACEHOLDERS else cwd
+            state["backend"] = str(terminal.get("backend") or "local")
+        return state
+
     def _save_config(self, body):
         if parse_yaml_mapping(body) is None:
             self._json(400, {"ok": False, "message": "提交的配置不是有效的 YAML，已拒绝保存。"})
@@ -632,6 +716,12 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
         if existing.strip() and parse_yaml_mapping(merged) is None:
             self._json(500, {"ok": False, "message": "合并后的配置无法解析，已放弃保存，原文件未改动。"})
             print("  [!] merged config does not parse; kept the original")
+            return
+
+        problem = settle_workspace(merged)
+        if problem:
+            self._json(400, {"ok": False, "message": problem + " 配置未保存。"})
+            print("  [!] workspace refused: %s" % problem)
             return
 
         backup(path)
