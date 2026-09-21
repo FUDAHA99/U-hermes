@@ -69,8 +69,11 @@ WAL_CANNOT_VERIFY = (
 # and only the first of them means the danger was actually dealt with.
 def _wal_reset_line(action):
     return (
+        # 3.49.1 measured on the aligned install, not taken on trust: the
+        # engine's own is_sqlite_wal_reset_vulnerable() returns True for it,
+        # so this warning really does fire on the shipped build.
         "2026-09-21 09:12:03,050 WARNING hermes_state: state.db: linked SQLite "
-        "3.50.4 (interpreter 3.13.15) is vulnerable to the WAL-reset corruption "
+        "3.49.1 (interpreter 3.13.15) is vulnerable to the WAL-reset corruption "
         "bug (https://sqlite.org/wal.html#walresetbug) — " + action +
         ". Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); see "
         "`hermes doctor`. This warning fires once per process per database."

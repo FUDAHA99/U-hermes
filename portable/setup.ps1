@@ -12,6 +12,38 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Without this, a terminating error left powershell.exe exiting 0. The
+# installer died at step 1 of 5, said so in red, and then reported success to
+# Windows-Start.bat -- whose `if errorlevel 1` therefore never fired. The
+# user's next message was "Python 虚拟环境未找到", which is a symptom of the
+# thing that had just gone wrong four lines earlier.
+trap {
+    Write-Host ""
+    Write-Host "  [X] 安装中断：$($_.Exception.Message)" -ForegroundColor Red
+    if ($_.InvocationInfo) {
+        Write-Host "      位置：$($_.InvocationInfo.PositionMessage.Trim())" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    exit 1
+}
+
+# PowerShell 5.1 turns anything a NATIVE command writes to stderr into an
+# ErrorRecord, and under $ErrorActionPreference = "Stop" that is terminating.
+# get-pip.py prints one warning ("Scripts is not on PATH") on every single
+# run, so `& $python get-pip.py 2>$null` killed this installer at step 1/5 --
+# every time, on every Windows machine. It exited 0 while doing it, so
+# Windows-Start.bat's `if errorlevel 1` never fired and the user got a wall
+# of PowerShell red followed by "Python 虚拟环境未找到".
+#
+# git clone writes "Cloning into ..." to stderr too, and so does uv. Every
+# native call below goes through this.
+function Invoke-Native {
+    param([Parameter(Mandatory = $true)][scriptblock]$Command)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Command } finally { $ErrorActionPreference = $prev }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimeDir = Join-Path $scriptDir "runtime"
 $hermesDir = Join-Path $scriptDir "hermes"
@@ -156,7 +188,7 @@ function Install-Python {
     $getPipUrl = "https://bootstrap.pypa.io/get-pip.py"
     $getPipPath = Join-Path $pythonDir "get-pip.py"
     Download-File -Url $getPipUrl -Dest $getPipPath -Desc "pip installer"
-    & $pythonExe $getPipPath --quiet 2>$null
+    Invoke-Native { & $pythonExe $getPipPath --quiet }
     Remove-Item $getPipPath -Force -ErrorAction SilentlyContinue
 
     Write-Step "OK" "Python $pythonVersion installed." "Green"
@@ -217,6 +249,13 @@ function Install-Node {
     }
 
     Write-Step "3/5" "Installing Node.js $nodeVersion..." "Yellow"
+    # Replace, do not overlay. The extraction below is Copy-Item -Force onto
+    # whatever is already there, so upgrading Node left npm 10's files mixed
+    # in with npm 11's -- and the first `npm install` after that died with
+    # "Class extends value undefined is not a constructor or null". The old
+    # node_modules (including the previous hermes-web-ui) goes with it, which
+    # is correct: the pinned one is installed again below.
+    if (Test-Path $nodeDir) { Remove-Item $nodeDir -Recurse -Force }
     Ensure-Dir $nodeDir
 
     $zipName = "node-$nodeVersion-win-x64.zip"
@@ -259,9 +298,9 @@ function Install-HermesSource {
     if ($gitCmd) {
         if (Test-Path $agentDir) { Remove-Item $agentDir -Recurse -Force }
         if ($agentRef) {
-            & git clone --depth 1 --branch $agentRef https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+            Invoke-Native { & git clone --depth 1 --branch $agentRef https://github.com/NousResearch/hermes-agent.git $agentDir } | Out-Null
         } else {
-            & git clone --depth 1 https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+            Invoke-Native { & git clone --depth 1 https://github.com/NousResearch/hermes-agent.git $agentDir } | Out-Null
         }
     } else {
         # Download as zip
@@ -302,9 +341,20 @@ function Install-Dependencies {
 
     $pythonExe = Join-Path $PythonDir "python.exe"
 
-    # Create venv using uv
+    # Create venv using uv.
+    #
+    # --clear, because uv refuses to touch an existing venv and -Force exists
+    # precisely to rebuild one. Without it, `setup.ps1 -Force` printed
+    # "Failed to create virtual environment ... already exists", carried on,
+    # installed the packages into the OLD venv, and finished with
+    # "All dependencies installed successfully" -- over an interpreter it had
+    # just been told to replace. That is how this machine stayed on Python
+    # 3.11.9 while versions.env pinned 3.13.15.
     Write-Step "  " "Creating virtual environment..." "DarkGray"
-    & $UvExe venv $venvDir --python $pythonExe 2>&1 | Out-Null
+    Invoke-Native { & $UvExe venv $venvDir --python $pythonExe --clear } | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "uv could not create the virtual environment at $venvDir (uv exit $LASTEXITCODE)"
+    }
 
     # Install Hermes with core extras using China PyPI mirror
     Write-Step "  " "Installing Hermes Agent packages (China mirror)..." "DarkGray"
@@ -325,7 +375,7 @@ function Install-Dependencies {
 
     # Verify installation
     if (Test-Path $venvPython) {
-        $hermesCheck = & $venvPython -c "import agent; print('ok')" 2>$null
+        $hermesCheck = Invoke-Native { & $venvPython -c "import agent; print('ok')" }
         if ($hermesCheck -eq "ok") {
             Write-Step "OK" "All dependencies installed successfully." "Green"
         } else {
@@ -418,7 +468,12 @@ if (-not $SkipHermes) {
 
 # Step 6: Hermes Web UI (npm package)
 $webuiServer = Join-Path $nodeDir "node_modules\hermes-web-ui\dist\server\index.js"
-if (-not (Test-Path $webuiServer)) {
+# -Force has to reach here too. It did not, so `setup.ps1 -Force` left the Web
+# UI at whatever version was installed first -- 0.6.5 on this machine, against
+# a pin of 0.7.22. The two behave differently enough that a feature verified
+# on one of them can be a no-op on the other, which is exactly what happened
+# to the account claim in first-login.py.
+if ($Force -or -not (Test-Path $webuiServer)) {
     Write-Step "6/7" "Installing Hermes Web UI..." "Yellow"
     $npmCmd = Join-Path $nodeDir "npm.cmd"
     $prevEAP = $ErrorActionPreference
@@ -430,12 +485,32 @@ if (-not (Test-Path $webuiServer)) {
     & $npmCmd install -g $webUiSpec --prefix $nodeDir 2>&1 | ForEach-Object {
         if ($_ -match "error|Error|ERROR") { Write-Host "    $_" -ForegroundColor Red }
     }
+    # registry.npmjs.org is frequently unreachable from mainland China, which
+    # is where this product's users are. Windows-Start.bat has always retried
+    # on the mirror; this script never did, so building from source failed
+    # for exactly the audience it was written for.
+    if (-not (Test-Path $webuiServer)) {
+        Write-Step "  " "npm 直连没成功，改用国内镜像重试..." "DarkGray"
+        & $npmCmd install -g $webUiSpec --prefix $nodeDir --registry=https://registry.npmmirror.com 2>&1 | ForEach-Object {
+            if ($_ -match "error|Error|ERROR") { Write-Host "    $_" -ForegroundColor Red }
+        }
+    }
     $ErrorActionPreference = $prevEAP
     if (Test-Path $env:npm_config_cache) {
         Remove-Item $env:npm_config_cache -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path $webuiServer) {
-        Write-Step "OK" "Hermes Web UI installed ($webUiSpec)." "Green"
+    # "The file is there" is not "the right version is there". npm failed,
+    # the 0.6.5 tree from a previous install was still on disk, and this
+    # printed "Hermes Web UI installed (hermes-web-ui@0.7.22)" over it.
+    $installedWebUi = ""
+    $webuiPkg = Join-Path $nodeDir "node_modules\hermes-web-ui\package.json"
+    if (Test-Path $webuiPkg) {
+        try { $installedWebUi = (Get-Content -Raw $webuiPkg | ConvertFrom-Json).version } catch { }
+    }
+    if ($installedWebUi -and (-not $webUiVersion -or $installedWebUi -eq $webUiVersion)) {
+        Write-Step "OK" "Hermes Web UI $installedWebUi installed." "Green"
+    } elseif ($installedWebUi) {
+        Write-Step "WARN" "Hermes Web UI is $installedWebUi but versions.env pins $webUiVersion." "Yellow"
     } else {
         Write-Step "WARN" "Hermes Web UI install failed (will retry on first launch)." "Yellow"
     }
