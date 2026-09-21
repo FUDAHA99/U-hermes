@@ -55,6 +55,8 @@ if not exist "%VENV_PYTHON%" (
     if errorlevel 1 (
         echo.
         echo   [X] 安装失败，请检查上方错误信息。
+echo       还是不行的话，双击根目录的「出问题点我-诊断.bat」，
+echo       它会用中文说清卡在哪一层。
         pause
         exit /b 1
     )
@@ -64,6 +66,8 @@ if not exist "%VENV_PYTHON%" (
     echo.
     echo   [X] Python 虚拟环境未找到。
     echo       请先运行 setup.ps1 安装。
+echo       还是不行的话，双击根目录的「出问题点我-诊断.bat」，
+echo       它会用中文说清卡在哪一层。
     echo.
     pause
     exit /b 1
@@ -301,6 +305,8 @@ if exist "%WEBUI_SERVER%" goto :webui_ok
 echo.
 echo   [X] Web 界面装不上，上面几行是 npm 的原始报错。
 echo       多数情况是网络问题：换个网络或挂上代理，再重新双击本文件。
+echo       还是不行的话，双击根目录的「出问题点我-诊断.bat」，
+echo       它会用中文说清卡在哪一层。
 echo.
 pause
 exit /b 1
