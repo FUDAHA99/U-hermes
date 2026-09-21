@@ -88,6 +88,20 @@ SHELL_EXT = {".sh", ".command"}
 FAILURES = []
 
 
+def in_a_repo_checkout():
+    """These two suites read files that only exist in the source tree.
+
+    They ship inside the release zip, because scripts/tests goes in with
+    everything else under portable/. Run from an installed instance -- a USB
+    stick, an extracted download -- REPO resolves to the drive root, and this
+    one printed 1694 failures on a perfectly healthy install. A test suite
+    that screams on a correct install is worse than no test suite: it reads
+    as "the product is broken".
+    """
+    return (os.path.isfile(os.path.join(REPO, ".gitattributes"))
+            and os.path.isdir(os.path.join(REPO, ".github")))
+
+
 def check(condition, label):
     print(("  ok   " if condition else "  FAIL ") + label)
     if not condition:
@@ -291,6 +305,10 @@ def test_byte_order_marks():
 
 
 if __name__ == "__main__":
+    if not in_a_repo_checkout():
+        print("SKIP: 这是一个安装好的实例，不是源码仓库 —— "
+              "这个套件检查的是仓库里的源文件。")
+        sys.exit(0)
     for fn in (test_the_walk_reaches_what_actually_ships,
                test_no_lone_carriage_returns,
                test_gitattributes_still_pins_every_script_type,
