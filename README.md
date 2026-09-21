@@ -24,7 +24,7 @@ U-Hermes combines the **portable USB distribution** of [U-Claw](https://github.c
 - **Failover** — falls back to a backup model on timeout or quota errors, once you have configured one
 - **Multi-platform messaging** — QQ / WeChat / DingTalk / Feishu / Telegram / Discord / WhatsApp / Signal / Slack
 - **China-optimized** — domestic model support, China mirrors, Chinese skills pre-installed
-- **Dual platform** — Windows + macOS (ARM64) portable builds via CI
+- **Windows portable build via CI** — a macOS build exists in the workflow but cannot currently produce a working package, so it is not published (see Download)
 
 ---
 
@@ -35,7 +35,23 @@ Download the latest release from [**Releases**](https://github.com/FUDAHA99/U-he
 | Platform | File | Instructions |
 |----------|------|--------------|
 | Windows | `u-hermes-portable-windows-v*.zip` | Unzip, double-click `Windows-Start.bat` |
-| macOS (ARM64) | `u-hermes-portable-mac-v*.zip` | Unzip, run `bash Mac-Start.command` |
+
+**macOS is not shipping right now.** The mac zips attached to v0.4.0 and
+v0.4.1 do not run: `zip` was invoked without `-y`, so the venv's interpreter
+was dereferenced into a *copy* of the runner's python.org framework stub,
+which loads `/Library/Frameworks/Python.framework/Versions/3.11/Python` — a
+path that does not exist on a normal Mac. `Mac-Start.command` as shipped in those
+builds could not recover from it either: its rebuild was gated on
+`[ ! -f "$VENV_PYTHON" ]`, and that file is present, just unusable. (Both
+that gate and the `-y` are fixed on this branch and the
+macOS job now fails at "Verify the packaged artifact" rather than publishing
+another one.) The download is delisted rather than replaced because the
+build is still not self-contained. `setup.sh` never downloads an interpreter
+at all — it lets `uv venv --python 3.11` pick whatever the machine has — and
+`scripts/fix-portable-paths.sh` rewrites `pyvenv.cfg` to point at
+`runtime/python-mac-arm64`, a directory nothing in this repository creates.
+Making it work means bundling a relocatable Python the way the Windows job
+already bundles the embeddable one. Tracked, not done.
 
 ### 国内加速下载
 
@@ -56,7 +72,7 @@ per use — a few yuan covers a month of ordinary use, and most give a small fre
 Without a key nothing will answer you; there is no way around this step.
 
 1. Download and unzip the portable package (to USB drive or local folder)
-2. Double-click the start script (`Windows-Start.bat` or `Mac-Start.command`)
+2. Double-click `Windows-Start.bat`
 3. First launch auto-opens the config page. It also downloads the web UI once, so it needs
    an internet connection and a minute or two
 4. Select AI model (DeepSeek recommended for China)
@@ -76,7 +92,7 @@ cd u-hermes\portable
 powershell -ExecutionPolicy Bypass -File setup.ps1
 .\Windows-Start.bat
 
-# macOS
+# macOS (does not currently produce a working package -- see Download)
 git clone https://github.com/FUDAHA99/U-hermes.git
 cd u-hermes/portable && bash setup.sh
 bash Mac-Start.command
@@ -192,9 +208,54 @@ claim a 350 MB download — all three were wrong by the time anyone read them.
 | Embedded Python + uv | ~72 MB |
 | Node.js + hermes-web-ui | ~274 MB |
 | Hermes Agent + venv | ~548 MB |
-| **Download (zip)** | **457 MB** Windows / **537 MB** macOS — measured on the v0.4.1 release |
+| **Download (zip)** | **457 MB** — measured on the v0.4.1 Windows asset (the 537 MB macOS asset of the same tag is the withdrawn build) |
 | **Unpacked** | **~1.3 GB** |
 | **Recommended USB** | **8 GB+** — the chat database grows with use; see `Windows-Menu.bat` → `[7] 清理聊天记录` |
+
+---
+
+## Uninstall
+
+Deleting the folder removes the program. Three things live outside it.
+
+**1. Your workspace.** The agent reads and writes files in a folder *beside*
+the install directory, not inside it — `U-Hermes工作区` by default, or
+wherever the config page's *智能体工作区* box points. Upgrades deliberately
+never touch it, and neither does deleting the install folder. The launcher
+prints the path on every start. Your own files are in there, so delete it
+separately, once you are sure.
+
+**2. A config copy on every machine it has run on.** While running, U-Hermes
+mirrors `config.yaml` and `.env` (which holds your API key) into
+`%USERPROFILE%\.hermes\`, so that any component started without our
+environment still finds a working config. A clean exit removes both, and so
+does the next launch on that machine — but only if you answer **N** to
+cmd's `终止批处理操作吗(Y/N)?` after Ctrl+C. Answering **Y** ends the batch
+file at that prompt, so the cleanup it was about to run never happens, and
+closing the window with [X] skips it too. Either way the next launch on that
+machine clears it, and `Windows-Menu.bat` → `[8] 清理本机残留` does it on
+demand: it deletes exactly those two files and reports anything else it
+finds rather than assuming it is ours.
+
+**3. Package caches, on builds before this one.** npm and uv cache downloads
+under `%LOCALAPPDATA%` by default, so earlier versions left a few hundred MB
+on the host machine:
+
+```
+%LOCALAPPDATA%\npm-cache
+%LOCALAPPDATA%\uv\cache
+```
+
+Both are shared with any other Node or Python work on that machine, so
+nothing here deletes them for you. `npm cache clean --force` and
+`uv cache clean` are the safe way. Current builds point both caches at the
+stick instead, and drop the npm one as soon as the install finishes.
+
+Nothing is written to the registry, no service or scheduled task is created,
+and `PATH` is never modified — each launcher sets `PATH` for its own process
+only.
+
+
 
 ---
 
