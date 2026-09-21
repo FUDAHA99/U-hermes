@@ -27,6 +27,13 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+# provider_probe sits beside this file, but this file is also loaded by path
+# from the test suite, where scripts/ is not on sys.path.
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import provider_probe  # noqa: E402  (needs the path set above)
+
 # pythonw 下 stdout/stderr 为 None，print() 会崩溃，重定向到空设备
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
@@ -543,77 +550,15 @@ def write_atomic(path, text):
 def test_provider(base_url, api_key, model):
     """Make a minimal call and map failures to Chinese advice.
 
-    Talks whichever protocol the endpoint speaks: MiniMax's ``/anthropic``
-    surface and Kimi's ``/coding`` surface are Anthropic Messages, not
-    OpenAI, and probing them with /chat/completions returns a 404 that reads
-    to the user as "you typed the model name wrong".
+    The request and the whole HTTP table used to live here, and a
+    near-identical second copy lived in diagnose.py. The two drifted:
+    neither grew a 400 branch, and both discarded the provider's own
+    explanation of what it had refused. One copy now, in provider_probe.
     """
-    url = base_url.rstrip("/")
-    anthropic = (
-        "/anthropic" in url
-        or url.endswith("/coding")
-        or "api.anthropic.com" in url
-    )
-    if anthropic:
-        req_url = url + "/v1/messages"
-        payload = json.dumps({
-            "model": model,
-            "max_tokens": 8,
-            "messages": [{"role": "user", "content": "hi"}],
-        }).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        }
-        ok_field = "content"
-    else:
-        req_url = url if url.endswith("/chat/completions") else url + "/chat/completions"
-        payload = json.dumps({
-            "model": model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 5,
-        }).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + api_key,
-        }
-        ok_field = "choices"
-
-    req = urllib.request.Request(req_url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-            if isinstance(data, dict) and data.get(ok_field):
-                return {"ok": True, "message": "连接成功！模型响应正常，可以保存配置了。"}
-            return {"ok": False, "message": "服务已连通，但返回内容异常，请检查模型名称是否正确。"}
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return {"ok": False, "message": "API 密钥无效或无权限，请检查密钥是否填写正确。"}
-        if e.code == 402:
-            return {"ok": False, "message": "账户余额不足。密钥本身是有效的，请到服务商官网充值后再试。"}
-        if e.code == 404:
-            return {"ok": False, "message": "接口地址或模型名称不存在，请检查 API 地址和模型名称。"}
-        if e.code == 429:
-            return {"ok": False, "message": "请求过于频繁或账户额度不足，请稍后重试或检查余额。"}
-        if e.code >= 500:
-            return {"ok": False, "message": "服务商服务器错误（HTTP %d），请稍后重试。" % e.code}
-        return {"ok": False, "message": "请求被拒绝（HTTP %d），请检查配置。" % e.code}
-    except urllib.error.URLError as e:
-        reason = getattr(e, "reason", None)
-        if isinstance(reason, socket.gaierror):
-            return {"ok": False, "message": "无法解析域名，请检查 API 地址是否正确。"}
-        if isinstance(reason, (socket.timeout, TimeoutError)):
-            return {"ok": False, "message": "连接超时（20 秒无响应），请检查网络或换个 API 地址。"}
-        if isinstance(reason, ConnectionRefusedError):
-            return {"ok": False, "message": "连接被拒绝，请确认 API 地址和端口是否正确。"}
-        if isinstance(reason, ssl.SSLError):
-            return {"ok": False, "message": "SSL 证书错误，请确认 API 地址是否为有效的 https 地址。"}
-        return {"ok": False, "message": "网络连接失败，请检查网络后重试。"}
-    except (socket.timeout, TimeoutError):
-        return {"ok": False, "message": "连接超时（20 秒无响应），请检查网络或换个 API 地址。"}
-    except Exception as e:
-        return {"ok": False, "message": "测试失败：%s" % e.__class__.__name__}
+    result = provider_probe.probe(base_url, api_key, model)
+    if result.ok:
+        return {"ok": True, "message": "连接成功！模型响应正常，可以保存配置了。"}
+    return {"ok": False, "message": result.message}
 
 
 class ConfigHandler(http.server.BaseHTTPRequestHandler):

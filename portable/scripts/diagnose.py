@@ -15,6 +15,11 @@ import sys
 import urllib.error
 import urllib.request
 
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import provider_probe  # noqa: E402  (needs the path set above)
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -156,73 +161,12 @@ def check_port(port):
 def call_provider(base_url, api_key, model):
     """极简调用，返回 (ok, 中文消息)。
 
-    按地址判断协议：MiniMax 的 /anthropic、Kimi 的 /coding 说的是 Anthropic
-    Messages，用 /chat/completions 去探会拿到 404，显示成"模型名写错了"。
+    请求和 HTTP 映射表都在 provider_probe 里。这里原本是一份和
+    config-server.py 几乎逐字相同的拷贝，两份各自演化：谁都没有 400 分支，
+    也都把服务商自己写的报错内容丢掉了。
     """
-    url = base_url.rstrip("/")
-    anthropic = (
-        "/anthropic" in url
-        or url.endswith("/coding")
-        or "api.anthropic.com" in url
-    )
-    if anthropic:
-        req_url = url + "/v1/messages"
-        payload = json.dumps({
-            "model": model,
-            "max_tokens": 8,
-            "messages": [{"role": "user", "content": "hi"}],
-        }).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        }
-        ok_field = "content"
-    else:
-        req_url = url if url.endswith("/chat/completions") else url + "/chat/completions"
-        payload = json.dumps({
-            "model": model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 5,
-        }).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + api_key,
-        }
-        ok_field = "choices"
-
-    req = urllib.request.Request(req_url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-            if isinstance(data, dict) and data.get(ok_field):
-                return True, "连接成功，模型响应正常。"
-            return False, "服务已连通，但返回内容异常，请核对模型名称。"
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return False, "API 密钥无效或无权限（HTTP %d），请更新密钥。" % e.code
-        if e.code == 402:
-            # 这是最常见的一种"明明配好了却不回话"。密钥是对的，只是没钱了。
-            return False, "账户余额不足（HTTP 402）。密钥本身有效，请到服务商官网充值。"
-        if e.code == 404:
-            return False, "接口地址或模型名称不存在（HTTP 404）。"
-        if e.code == 429:
-            return False, "请求过于频繁或额度不足（HTTP 429）。"
-        return False, "服务商返回错误（HTTP %d），请稍后重试。" % e.code
-    except urllib.error.URLError as e:
-        reason = getattr(e, "reason", None)
-        if isinstance(reason, socket.gaierror):
-            return False, "无法解析域名，请检查 API 地址。"
-        if isinstance(reason, (socket.timeout, TimeoutError)):
-            return False, "连接超时（20 秒无响应）。"
-        if isinstance(reason, ssl.SSLError):
-            return False, "SSL 证书错误，请确认地址为有效 https。"
-        return False, "网络连接失败，请检查网络。"
-    except (socket.timeout, TimeoutError):
-        return False, "连接超时（20 秒无响应）。"
-    except Exception as e:
-        return False, "测试失败：%s" % e.__class__.__name__
-
+    result = provider_probe.probe(base_url, api_key, model)
+    return result.ok, result.message
 
 def resolve_provider(cfg, ref, env):
     """把 custom:<name> 解析成 (base_url, api_key, 名称)，解析不了返回 None。"""
