@@ -77,6 +77,42 @@ ERROR_CLASSES = [
     (r"(error_type=NotFoundError|HTTP 404|Error code: 404)",
      "所选的模型名称或接口地址在服务商那边找不到。",
      "去配置页核对模型名称和 API 地址是否正确。"),
+    (r"(database\.journal_mode=delete is configured but the on-disk database is already WAL"
+     r"|could not verify journal mode before applying configured journal_mode=delete)",
+     "聊天记录数据库还停在 WAL 日志模式。配置里要求用 delete 模式，但引擎不会在运行中切换"
+     "（有连接开着时切换会损坏数据库），所以每次启动都记一条。数据库本身读写正常。",
+     "先彻底退出 U-Hermes（任务管理器里别留下 python.exe / node.exe）。如果每次启动还报，"
+     "按「0-先看我-使用说明.txt」第八节最后一段做一次离线转换。转换完成之前，"
+     "拔 U 盘一定要先「安全弹出」，否则 -wal 文件里没写回的对话会丢。"),
+    (r"(Refusing to start: API_SERVER_KEY"
+     r"|API server rejected invalid API key"
+     r"|no profile-scoped API_SERVER_KEY is configured"
+     r"|No API key configured \(API_SERVER_KEY)",
+     "AI 引擎的本地接口密钥缺失、太短（少于 16 位）或和调用方对不上：引擎要么拒绝启动"
+     "（8642 端口起不来），要么把每个请求挡回 401。",
+     "重新运行 Windows-Start.bat，它会调用 scripts\\protect-config.ps1 在 data\\config.yaml 的 "
+     "platforms.api_server.extra.key 下补一个强密钥。不要手工改这一项。"),
+    # The same sentence prefix carries three different outcomes -- the engine
+    # appends one of _WAL_RESET_BUG_ACTIONS to it -- and only the first means
+    # "handled". Matching the prefix alone told the two populations that must
+    # act that there was nothing to do.
+    (r"vulnerable to the WAL-reset corruption bug.*"
+     r"using journal_mode=DELETE instead of enabling WAL",
+     "[这条不是故障] 引擎发现自带的 SQLite 版本有个已知缺陷，于是主动改用更保守的"
+     "日志模式来避开它——这正是我们想要的行为，U 盘被拔掉时也更不容易丢数据。",
+     "不用处理。等上游换成新版 SQLite 后这条会自己消失。"),
+    # The other two: the database is STILL in WAL, on a SQLite build the
+    # engine itself calls corruption-prone. This is the state 使用说明 第八节
+    # exists for, and it is what an upgraded install hits -- its preserved
+    # config.yaml has no database: block, so the delete-was-overridden entry
+    # above never fires and this line is the only warning the user gets.
+    (r"vulnerable to the WAL-reset corruption bug.*"
+     r"(is already in WAL mode|journal mode could not be verified)",
+     "数据库还在 WAL 日志模式，而自带的 SQLite 版本对这个模式有已知缺陷。引擎不敢在"
+     "运行中切换（有连接开着时切换会损坏数据库），所以保持原样。这种状态下拔 U 盘"
+     "丢数据的风险明显更高。",
+     "照「0-先看我-使用说明.txt」第八节最后一段做一次离线转换（先备份整个 data 文件夹）。"
+     "在转换完成之前，拔 U 盘务必先「安全弹出」。"),
 ]
 
 
@@ -204,11 +240,31 @@ def resolve_provider(cfg, ref, env):
     return None
 
 
+
+
+def release_version():
+    """The tag this package was cut from, or "" when running from a clone.
+
+    Written into the zip by .github/workflows/release.yml. Deliberately
+    absent from the repository: showing nothing beats showing a number that
+    might be wrong.
+    """
+    try:
+        with open(os.path.join(ROOT, "VERSION"), encoding="utf-8", errors="replace") as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
 def main():
     print()
     print("  ==============================================")
     print("    U-Hermes 一键诊断")
     print("  ==============================================")
+    # This output is what people paste into a bug report, so it has to say
+    # which build produced it.
+    version = release_version()
+    print("    版本: %s" % (version or "开发版（未打包）"))
 
     problems = []
 

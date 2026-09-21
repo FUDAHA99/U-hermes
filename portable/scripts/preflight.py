@@ -33,17 +33,32 @@ def read_env_file(path):
     return values
 
 
+NO_YAML = "no-yaml"
+
+
 def load_config(path):
+    """Return ``(config, problem)``.
+
+    ``problem`` is ``None`` on success, ``NO_YAML`` when this interpreter has
+    no PyYAML, and otherwise a short Chinese description of what is wrong
+    with the file.  The two used to collapse into one ``None``, so running
+    preflight under a plain python on PATH told the user their config was
+    corrupt and sent them to restore a backup of a file that was fine.
+    """
     try:
         import yaml
     except ImportError:
-        return None
+        return None, NO_YAML
     try:
         with io.open(path, encoding="utf-8", errors="replace") as f:
             data = yaml.safe_load(f)
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
+    except Exception as e:
+        return None, "格式有误（%s）" % e.__class__.__name__
+    if data is None:
+        return None, "文件是空的"
+    if not isinstance(data, dict):
+        return None, "最外层不是 key: value 的形式"
+    return data, None
 
 
 # Used when this runs outside the packaged engine (a plain python on PATH).
@@ -120,8 +135,8 @@ def print_workspace(data_dir):
     `hermes chat` -- one product with two working directories, and a
     settings box that shows only one of them.
     """
-    config = load_config(os.path.join(data_dir, "config.yaml")) or {}
-    terminal = config.get("terminal")
+    config, _problem = load_config(os.path.join(data_dir, "config.yaml"))
+    terminal = (config or {}).get("terminal")
     if not isinstance(terminal, dict):
         return 0
     if str(terminal.get("backend") or "local") != "local":
@@ -185,9 +200,16 @@ def main(argv):
         say("还没有配置文件，需要先选择 AI 模型。")
         return NEEDS_CONFIG
 
-    config = load_config(config_path)
+    config, problem = load_config(config_path)
+    if problem == NO_YAML:
+        # Nothing can be checked, so claim nothing -- and above all do not
+        # block a launch over it. The launcher always uses the packaged
+        # interpreter; reaching here means someone ran preflight by hand.
+        say("[i] 这个 Python 没有 PyYAML，跳过配置检查。",
+            "    用启动器运行（Windows-Start.bat）才会用到打包好的解释器。")
+        return 0
     if config is None:
-        say("config.yaml 读不出来（格式有误）。",
+        say("config.yaml 读不出来：%s。" % problem,
             "最近一次保存前的备份在 data\\backups\\ 里，可以复制回来。")
         return NEEDS_CONFIG
 
@@ -241,20 +263,37 @@ def main(argv):
             break
 
     if not found:
+        # key_vars_for returns () for anything it does not recognise, and the
+        # branch above is what keeps those from reaching here. Indexing it
+        # blind would raise IndexError into the catch-all at the bottom of
+        # this file, which turns any bug here into a silent "check skipped"
+        # -- a launch gate failing open without saying so.
+        where = candidates[0] if candidates else "对应的环境变量"
         auth_json = os.path.join(data_dir, "auth.json")
         has_stored_login = os.path.exists(auth_json) and os.path.getsize(auth_json) > 2
         if not has_stored_login:
             say("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model),
-                "密钥应该写在 data\\.env 的 %s 里。" % candidates[0])
+                "密钥应该写在 data\\.env 的 %s 里。" % where)
             return NEEDS_CONFIG
 
     # Not fatal: the launcher generates this before the gateway starts.
+    #
+    # The engine reads platforms.api_server.extra.key -- PlatformConfig has a
+    # fixed set of typed fields and sweeps everything else into `extra`, and
+    # the api_server platform looks the key up there. A bare `key:` at the top
+    # of the block is the older spelling and still resolves, so accept both;
+    # checking only the bare one made this line announce "no gateway key yet"
+    # on every launch of an install that had one.
     gateway_key = ""
     platforms = config.get("platforms")
     if isinstance(platforms, dict):
         api_server = platforms.get("api_server")
         if isinstance(api_server, dict):
-            gateway_key = str(api_server.get("key") or "")
+            extra = api_server.get("extra")
+            if isinstance(extra, dict):
+                gateway_key = str(extra.get("key") or "")
+            if not gateway_key:
+                gateway_key = str(api_server.get("key") or "")
     if len(gateway_key) < 32:
         say("[i] 网关还没有密钥，启动时会自动生成一个。")
 
