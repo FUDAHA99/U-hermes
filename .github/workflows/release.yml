@@ -217,7 +217,7 @@ jobs:
           Write-Host "sys.path is self-contained"
 
           Write-Host "=== [3/5] helper scripts compile ==="
-          & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
+          & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py scripts/provider_probe.py
           if ($LASTEXITCODE -ne 0) { Write-Error "helper script compile failed"; exit 1 }
 
           Write-Host "=== [4/5] regression tests ==="
@@ -238,6 +238,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "script hygiene test failed"; exit 1 }
           & $py scripts/tests/test_default_config.py
           if ($LASTEXITCODE -ne 0) { Write-Error "default config test failed"; exit 1 }
+          & $py scripts/tests/test_provider_probe.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "provider probe test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
 
@@ -303,6 +305,10 @@ jobs:
 
           # Somebody who never opens the repo has to find instructions inside
           # the zip: the repo README is not packaged and never has been.
+          $rescue = Get-ChildItem $work -Filter "*诊断*" -File
+          if (-not $rescue) { Write-Error "no diagnostic entry point in the zip"; exit 1 }
+          Write-Host "Diagnostic entry point shipped as: $($rescue.Name)"
+
           $guide = Get-ChildItem $work -Filter "*使用说明*" -File
           if (-not $guide) { Write-Error "no Chinese quick-start file in the zip"; exit 1 }
           Write-Host "Quick-start shipped as: $($guide.Name)"
@@ -310,7 +316,8 @@ jobs:
           foreach ($needed in @(
             "Windows-Start.bat", "Windows-Menu.bat", "Config.html",
             "scripts\preflight.py", "scripts\wait-for.py", "scripts\config-server.py",
-            "scripts\protect-config.ps1", "versions.env", "data\config.yaml.default",
+            "scripts\protect-config.ps1", "scripts\provider_probe.py",
+            "versions.env", "data\config.yaml.default",
             "VERSION"
           )) {
             if (-not (Test-Path (Join-Path $work $needed))) { Write-Error "missing from the zip: $needed"; exit 1 }
@@ -461,7 +468,7 @@ jobs:
           hermes/.venv/bin/hermes --help >/dev/null
 
           echo "=== [3/5] helper scripts compile ==="
-          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
+          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py scripts/provider_probe.py
 
           echo "=== [4/5] regression tests ==="
           "$PY" scripts/tests/test_config_merge.py
@@ -471,6 +478,7 @@ jobs:
           "$PY" scripts/tests/test_diagnose_rules.py
           "$PY" scripts/tests/test_script_hygiene.py
           "$PY" scripts/tests/test_default_config.py
+          "$PY" scripts/tests/test_provider_probe.py
 
           echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)

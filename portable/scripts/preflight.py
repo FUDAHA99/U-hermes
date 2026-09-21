@@ -11,10 +11,40 @@ Usage:  preflight.py <data-dir>
 Exit 0   ready to launch
 Exit 10  the user has to configure something; the reason is printed in Chinese
 """
+import hashlib
 import io
 import os
 import re
 import sys
+import time
+
+# Pinned up front, like diagnose.py / first-login.py / db-maintenance.py.
+# This was the one script of the four that took whatever the caller gave it,
+# and importing the engine below reconfigures stdout to UTF-8 as a side
+# effect -- so a single run could print its first half in the console's ANSI
+# codepage and its second half in UTF-8. Every shipped caller does
+# `chcp 65001` first, so UTF-8 is what they are all expecting to read; the
+# --print-workspace bytes in particular are captured by a `for /f` in
+# Windows-Start.bat, where a Chinese folder name in the wrong codepage means
+# the agent silently does not chdir into it.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import provider_probe  # noqa: E402  (needs the path set above)
+
+# Short on purpose: this sits between a double-click and the browser opening.
+PROBE_TIMEOUT = 10
+# One success is good for a week, or until the provider/model/key changes.
+# A real call on every launch would be a request to a third party every time
+# someone opens the program, for a question that almost never changes its
+# answer.
+PROBE_TTL = 7 * 24 * 3600
 
 NEEDS_CONFIG = 10
 
@@ -118,6 +148,111 @@ def key_vars_for(provider):
     if getattr(pconfig, "auth_type", "") != "api_key" or not pconfig.api_key_env_vars:
         return tuple(pconfig.api_key_env_vars), "elsewhere"
     return tuple(pconfig.api_key_env_vars), "api_key"
+
+
+def base_url_for(provider, config, env):
+    """The address the engine will actually call, or "" if we cannot tell.
+
+    Same shape as key_vars_for: ask the engine, fall back, never guess in a
+    way that could produce a confident wrong answer.
+    """
+    if provider.startswith("custom:"):
+        slug = provider.split(":", 1)[1]
+        for entry in config.get("custom_providers") or []:
+            if isinstance(entry, dict) and str(entry.get("name", "")) == slug:
+                return str(entry.get("base_url") or "")
+        return ""
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+    except ImportError:
+        return ""
+    resolved = provider
+    try:
+        from hermes_cli.auth import resolve_provider
+        resolved = resolve_provider(provider) or provider
+    except Exception:
+        pass
+    pconfig = PROVIDER_REGISTRY.get(resolved) or PROVIDER_REGISTRY.get(provider)
+    if pconfig is None:
+        return ""
+    # An override in .env wins, exactly as it will at runtime.
+    var = getattr(pconfig, "base_url_env_var", "") or ""
+    if var:
+        override = (env.get(var) or os.environ.get(var) or "").strip()
+        if override:
+            return override
+    return str(getattr(pconfig, "inference_base_url", "") or "")
+
+
+def _probe_fingerprint(provider, model, key):
+    raw = "|".join([provider, model, key]).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _probe_marker(data_dir):
+    return os.path.join(data_dir, ".probe-ok")
+
+
+def probe_already_passed(data_dir, fingerprint):
+    try:
+        with io.open(_probe_marker(data_dir), encoding="utf-8") as f:
+            stamp, seen = f.read().strip().split(None, 1)
+    except (OSError, ValueError):
+        return False
+    if seen != fingerprint:
+        return False
+    try:
+        return (time.time() - float(stamp)) < PROBE_TTL
+    except ValueError:
+        return False
+
+
+def remember_probe_passed(data_dir, fingerprint):
+    try:
+        with io.open(_probe_marker(data_dir), "w", encoding="utf-8") as f:
+            f.write("%d %s" % (int(time.time()), fingerprint))
+    except OSError:
+        pass  # a read-only stick is not a reason to fail a launch
+
+
+def run_launch_probe(data_dir, provider, model, base_url, key):
+    """Ask the provider one question before the user does.
+
+    Everything above this point is static: the file parses, a provider is
+    named, a key exists. None of that catches the case this exists for --
+    the key is expired, the balance is zero, the model was renamed -- and
+    the user finds out by typing a message into a chat window that never
+    answers, with no error anywhere they would look.
+
+    Returns an exit code. Only failures the config page can repair block a
+    launch; a rate limit or a flat network prints its reason and gets out
+    of the way.
+    """
+    if os.environ.get("U_HERMES_SKIP_PROBE"):
+        return 0
+    if not base_url or not key:
+        return 0  # nothing to ask, or nowhere to ask it
+
+    fingerprint = _probe_fingerprint(provider, model, key)
+    if probe_already_passed(data_dir, fingerprint):
+        return 0
+
+    result = provider_probe.probe(base_url, key, model, timeout=PROBE_TIMEOUT)
+    if result.ok:
+        remember_probe_passed(data_dir, fingerprint)
+        return 0
+
+    if result.kind in provider_probe.FIXABLE_IN_CONFIG:
+        say("模型服务商拒绝了这次调用，现在聊天也不会有回复：",
+            "  " + result.message,
+            "配置页马上打开，改完保存就行。")
+        return NEEDS_CONFIG
+
+    say("[!] 试着调用了一次模型，没有成功：",
+        "  " + result.message,
+        "    程序照常启动 —— 这类问题通常和配置无关。"
+        "如果聊天确实没有回复，双击「出问题点我-诊断.bat」。")
+    return 0
 
 
 def say(*lines):
@@ -275,6 +410,15 @@ def main(argv):
             say("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model),
                 "密钥应该写在 data\\.env 的 %s 里。" % where)
             return NEEDS_CONFIG
+
+    # Everything above is static. This is the only check that finds out
+    # whether the thing will actually answer.
+    probe_code = run_launch_probe(
+        data_dir, provider, model,
+        base_url_for(provider, config, env),
+        (env.get(found) or os.environ.get(found) or "") if found else "")
+    if probe_code != 0:
+        return probe_code
 
     # Not fatal: the launcher generates this before the gateway starts.
     #

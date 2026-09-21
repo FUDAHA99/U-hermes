@@ -8,11 +8,15 @@ those wrong at some point.
 
 Run:  python portable/scripts/tests/test_preflight.py
 """
+import http.server
+import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 
 # CI pipes this suite's stdout, and Python then encodes it with the machine's
 # ANSI codepage rather than UTF-8. On GitHub's en-US Windows runner that is
@@ -60,7 +64,7 @@ BLOCK_YAML = NL.join([
 ])
 
 
-def run(config=None, env_file=None, args=(), no_yaml=False):
+def run(config=None, env_file=None, args=(), no_yaml=False, probe=False):
     """Run preflight against a throwaway data dir; return (code, output)."""
     shutil.rmtree(SANDBOX, ignore_errors=True)
     data = os.path.join(SANDBOX, "data")
@@ -80,6 +84,14 @@ def run(config=None, env_file=None, args=(), no_yaml=False):
         if name.endswith("_API_KEY"):
             del environ[name]
     environ.pop("PYTHONPATH", None)
+    # Off unless a test asks for it. preflight now makes a REAL call to the
+    # configured provider, and under the packaged interpreter (the one CI
+    # runs) the engine is importable, so base_url_for resolves and these
+    # fixtures would fire requests at api.deepseek.com from every build.
+    if not probe:
+        environ["U_HERMES_SKIP_PROBE"] = "1"
+    else:
+        environ.pop("U_HERMES_SKIP_PROBE", None)
 
     argv = [sys.executable]
     argv += ["-c", BLOCK_YAML] if no_yaml else []
@@ -210,6 +222,167 @@ def test_the_gateway_key_is_looked_for_where_the_engine_reads_it():
           "no key at all is reported, but does not block the launch")
 
 
+# --- a provider that answers however a test needs, on loopback -------------
+
+class _Fake(http.server.BaseHTTPRequestHandler):
+    status = 200
+    body = b"{}"
+    hits = 0
+
+    def do_POST(self):
+        _Fake.hits += 1
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(_Fake.status)
+        self.send_header("Content-Length", str(len(_Fake.body)))
+        self.end_headers()
+        self.wfile.write(_Fake.body)
+
+    def log_message(self, fmt, *a):
+        pass
+
+
+def fake_provider(status, body):
+    _Fake.status = status
+    _Fake.body = json.dumps(body).encode("utf-8")
+    _Fake.hits = 0
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Fake)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d/v1" % srv.server_address[1]
+
+
+def local_config(base_url):
+    """A custom: provider, so the probe needs neither the engine nor a network."""
+    return ('model:' + NL + '  provider: "custom:local"' + NL +
+            '  default: "m"' + NL + 'custom_providers:' + NL +
+            '  - name: "local"' + NL + '    base_url: "' + base_url + '"' + NL +
+            '    key_env: "MY_KEY"' + NL)
+
+
+GOOD_REPLY = {"choices": [{"message": {"content": "hi"}}]}
+ENV = "MY_KEY=sk-test" + NL
+
+
+def test_the_launch_probe_asks_the_provider_before_the_user_does():
+    """Every other check here is static: the file parses, a provider is
+    named, a key exists. None of them catch an expired key, an empty
+    account or a renamed model -- the user finds those out by typing into
+    a chat window that never answers.
+    """
+    srv, url = fake_provider(200, GOOD_REPLY)
+    try:
+        code, out = run(config=local_config(url), env_file=ENV, probe=True)
+        check(code == 0, "a provider that answers lets the launch through")
+        check(_Fake.hits == 1, "...and it really was asked (one request)")
+    finally:
+        srv.shutdown()
+
+
+def test_only_config_fixable_failures_block_a_launch():
+    """A wrong block costs the whole install; a wrong pass costs one message."""
+    cases = [
+        (401, {"error": {"message": "key expired"}}, NEEDS_CONFIG, "key expired"),
+        (404, {"error": {"message": "no such model"}}, NEEDS_CONFIG, "no such model"),
+        (400, {"error": {"message": "bad param"}}, NEEDS_CONFIG, "bad param"),
+        (402, {"error": {"message": "balance is zero"}}, 0, "balance is zero"),
+        (429, {"error": {"message": "slow down"}}, 0, "slow down"),
+        (500, {"error": {"message": "we broke"}}, 0, "we broke"),
+    ]
+    for status, body, want, phrase in cases:
+        srv, url = fake_provider(status, body)
+        try:
+            code, out = run(config=local_config(url), env_file=ENV, probe=True)
+        finally:
+            srv.shutdown()
+        check(code == want, "HTTP %d -> exit %d" % (status, want))
+        check(phrase in out,
+              "...and the provider's own words reach the user (%s)" % phrase)
+
+
+def test_an_unreachable_provider_never_blocks():
+    """Offline is not a configuration error, and a stick gets carried onto
+    planes."""
+    srv, url = fake_provider(200, GOOD_REPLY)
+    srv.shutdown()  # nothing is listening there any more
+    code, out = run(config=local_config(url), env_file=ENV, probe=True)
+    check(code == 0, "a dead endpoint still launches")
+    check("诊断" in out, "...and points at the diagnostic for the real case")
+
+
+def test_a_success_is_remembered_so_launch_stays_fast():
+    srv, url = fake_provider(200, GOOD_REPLY)
+    try:
+        code, _ = run(config=local_config(url), env_file=ENV, probe=True)
+        check(code == 0 and _Fake.hits == 1, "first launch asks")
+        marker = os.path.join(SANDBOX, "data", ".probe-ok")
+        check(os.path.exists(marker), "...and remembers that it did")
+
+        # run() wipes the sandbox, so drive the helpers directly for the
+        # part that matters: the same key short-circuits, a new one does not.
+        spec = importlib.util.spec_from_file_location("pf", PREFLIGHT)
+        pf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pf)
+        data = os.path.dirname(marker)
+        fp = pf._probe_fingerprint("custom:local", "m", "sk-test")
+        pf.remember_probe_passed(data, fp)
+        check(pf.probe_already_passed(data, fp),
+              "the same provider/model/key is not asked again")
+        other = pf._probe_fingerprint("custom:local", "m", "sk-different")
+        check(not pf.probe_already_passed(data, other),
+              "changing the key makes it ask again")
+        other = pf._probe_fingerprint("custom:local", "m2", "sk-test")
+        check(not pf.probe_already_passed(data, other),
+              "changing the model makes it ask again")
+    finally:
+        srv.shutdown()
+
+
+def test_the_probe_can_be_turned_off():
+    srv, url = fake_provider(401, {"error": {"message": "no"}})
+    try:
+        code, _ = run(config=local_config(url), env_file=ENV, probe=False)
+        check(code == 0, "U_HERMES_SKIP_PROBE lets a launch through untested")
+        check(_Fake.hits == 0, "...and makes no request at all")
+    finally:
+        srv.shutdown()
+
+
+def test_output_is_utf8_whatever_the_caller_left_in_the_environment():
+    """Windows-Start.bat captures --print-workspace with a `for /f`.
+
+    The console is chcp 65001 by then, so the bytes have to be UTF-8. They
+    were whatever the ambient codepage happened to be -- GBK on a Chinese
+    Windows -- which turns a folder called 我的工作区 into mojibake, and
+    the `if exist` guard in the launcher then quietly declines to chdir
+    into it. Importing the engine also reconfigures stdout mid-run, so a
+    single run could even print in two encodings.
+    """
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+    data = os.path.join(SANDBOX, "data")
+    os.makedirs(data)
+    cfg = ('model:' + NL + '  provider: "deepseek"' + NL + 'terminal:' + NL +
+           '  backend: local' + NL + "  cwd: 'D:/我的工作区'" + NL)
+    with io.open(os.path.join(data, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(cfg)
+
+    environ = dict(os.environ)
+    for name in ("PYTHONIOENCODING", "PYTHONUTF8"):
+        environ.pop(name, None)
+    environ["U_HERMES_SKIP_PROBE"] = "1"
+    proc = subprocess.run(
+        [sys.executable, PREFLIGHT, "--print-workspace", data],
+        capture_output=True, env=environ)
+    check(proc.stdout == "D:/我的工作区".encode("utf-8"),
+          "the workspace path comes back as UTF-8 with no env help")
+    try:
+        proc.stdout.decode("utf-8")
+        ok = True
+    except UnicodeDecodeError:
+        ok = False
+    check(ok, "...and decodes cleanly, so the for/f capture is not mojibake")
+
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+
+
 def test_print_workspace():
     cfg = ('model:' + NL + '  provider: "deepseek"' + NL +
            'terminal:' + NL + '  backend: local' + NL +
@@ -233,6 +406,12 @@ if __name__ == "__main__":
                test_an_unknown_provider_is_never_a_reason_to_block,
                test_custom_providers,
                test_the_gateway_key_is_looked_for_where_the_engine_reads_it,
+               test_the_launch_probe_asks_the_provider_before_the_user_does,
+               test_only_config_fixable_failures_block_a_launch,
+               test_an_unreachable_provider_never_blocks,
+               test_a_success_is_remembered_so_launch_stays_fast,
+               test_the_probe_can_be_turned_off,
+               test_output_is_utf8_whatever_the_caller_left_in_the_environment,
                test_print_workspace):
         print(fn.__name__)
         fn()
