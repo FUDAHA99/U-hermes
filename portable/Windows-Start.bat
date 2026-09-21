@@ -15,6 +15,23 @@ set "RUNTIME_DIR=%SCRIPT_DIR%\runtime"
 set "HERMES_DIR=%SCRIPT_DIR%\hermes"
 set "DATA_DIR=%SCRIPT_DIR%\data"
 
+:: Release version, written into the package by the release workflow. A git
+:: clone has no VERSION file: show nothing rather than a number that might
+:: be wrong. The site made exactly that mistake once and advertised a
+:: delisted version for months.
+set "UH_VERSION="
+if exist "%SCRIPT_DIR%\VERSION" set /p UH_VERSION=<"%SCRIPT_DIR%\VERSION"
+
+:: npm and uv both cache downloads under %LOCALAPPDATA% by default, so a
+:: first run on someone else's laptop quietly leaves a few hundred MB of
+:: package cache behind -- on a product whose whole promise is that you pull
+:: the stick out and walk away, and which even has a menu entry for cleaning
+:: up after itself. Keep both caches on the stick instead. The npm one is
+:: deleted again the moment the install succeeds: it is one-shot garbage.
+set "UV_CACHE_DIR=%SCRIPT_DIR%\.uv-cache"
+set "NPM_CACHE_DIR=%RUNTIME_DIR%\.npm-cache"
+set "npm_config_cache=%NPM_CACHE_DIR%"
+
 :: Python path
 set "VENV_DIR=%HERMES_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
@@ -290,6 +307,9 @@ exit /b 1
 
 :webui_ok
 echo   [OK] Web 界面安装完成。
+:: The download cache has done its job. Keeping it would cost the user a few
+:: hundred MB of U disk for something that is never read again.
+if exist "%NPM_CACHE_DIR%" rd /s /q "%NPM_CACHE_DIR%" 2>nul
 echo.
 
 :webui_ready
@@ -299,8 +319,10 @@ echo.
 :: ============================================================================
 
 echo.
+set "UH_TITLE=U-Hermes - AI 智能体"
+if defined UH_VERSION set "UH_TITLE=U-Hermes %UH_VERSION% - AI 智能体"
 echo   ============================================
-echo     U-Hermes - AI 智能体
+echo     %UH_TITLE%
 echo   ============================================
 echo.
 
@@ -353,14 +375,22 @@ for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":8642.*LISTENING"') d
 :: Gateway is started automatically by the Web UI's GatewayManager.
 :: Do NOT start it here — dual gateways cause port conflicts.
 
+:: Where the agent will read and write files. It sits outside the install
+:: directory on purpose, so upgrading never touches it -- which also means
+:: there was no way to find out where it was without opening the config
+:: page, on the one path where the config page is not opened.
+set "AGENT_CWD="
+for /f "usebackq delims=" %%W in (`""%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\preflight.py" --print-workspace "%DATA_DIR%""`) do set "AGENT_CWD=%%W"
+
 echo   [1/2] 正在启动 Web 界面（含 AI 引擎）...
 echo   [2/2] 界面就绪后会自动打开浏览器...
 echo.
 echo   -----------------------------------------------
 echo     浏览器地址: http://127.0.0.1:8648
-echo     停止服务: 按 Ctrl+C，看到提示时选 Y
-echo     （点 X 关窗口也能停掉服务，但本机上的配置副本
-echo       来不及清理，下次启动或用菜单 [8] 可以清掉）
+if defined AGENT_CWD echo     智能体工作区: !AGENT_CWD!
+echo     停止服务: 按 Ctrl+C，问「终止批处理操作吗」时选 N
+echo     （选 N 才会顺带清掉本机上的配置副本；选 Y 或直接点 X
+echo       也能停，只是清理要留到下次启动、或用菜单 [8]）
 echo   -----------------------------------------------
 echo.
 

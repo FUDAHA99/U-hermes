@@ -9,11 +9,20 @@ title U-Hermes - Menu
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
+:: Release version, written into the package by the release workflow. A git
+:: clone has no VERSION file: show nothing rather than a number that might
+:: be wrong. The site made exactly that mistake once and advertised a
+:: delisted version for months.
+set "UH_VERSION="
+if exist "%SCRIPT_DIR%\VERSION" set /p UH_VERSION=<"%SCRIPT_DIR%\VERSION"
+
 :MENU
 cls
 echo.
 echo   ============================================
-echo     U-Hermes - AI 智能体
+set "UH_TITLE=U-Hermes - AI 智能体"
+if defined UH_VERSION set "UH_TITLE=U-Hermes %UH_VERSION% - AI 智能体"
+echo     %UH_TITLE%
 echo     基于 Hermes Agent (Nous Research) 驱动
 echo   ============================================
 echo.
@@ -147,6 +156,12 @@ set "UV_EXE=%SCRIPT_DIR%\runtime\uv\uv.exe"
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "NODE_DIR=%SCRIPT_DIR%\runtime\node-win-x64"
 set "UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple"
+:: Same reason as in Windows-Start.bat: without these, "update" writes a few
+:: hundred MB of npm and uv cache into %LOCALAPPDATA% on whatever machine
+:: the stick happens to be plugged into.
+set "UV_CACHE_DIR=%SCRIPT_DIR%\.uv-cache"
+set "NPM_CACHE_DIR=%SCRIPT_DIR%\runtime\.npm-cache"
+set "npm_config_cache=%NPM_CACHE_DIR%"
 
 :: Pinned, not @latest. Upstream ships 2-4 releases a week, so "update" used
 :: to mean "replace a tested component with whatever landed this morning" --
@@ -175,6 +190,8 @@ set "HERMES_NIX_BUILD=1"
 
 :: 修补 exe 启动器中的 Python 路径
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\scripts\fix-portable-paths.ps1" -VenvDir "%SCRIPT_DIR%\hermes\.venv" -RuntimeDir "%SCRIPT_DIR%\runtime" -AgentDir "%SCRIPT_DIR%\hermes\hermes-agent" -UvExe "%UV_EXE%"
+
+if exist "%NPM_CACHE_DIR%" rd /s /q "%NPM_CACHE_DIR%" 2>nul
 
 echo.
 echo   更新完成。
