@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """首次启动时把网页界面的账号占下来，换成只有这份 U 盘知道的密码。
 
-hermes-web-ui 出厂时账号是「无主」的：users 表为空时，第一个用
-admin / 123456 调 /api/auth/login 的人，账号就归他（users-store.ts 的
-bootstrapDefaultSuperAdmin）。而登录页会用访问者自己的语言把这组默认
-凭据直接印在上面——登录之前就能看到。
+hermes-web-ui 出厂就带一个 admin / 123456 的超级管理员，而登录页会用
+访问者自己的语言把这组凭据直接印在上面——登录之前就能看到。在我们把它
+换掉之前，先摸到这个端口的人就是主人。
+
+判断依据是「默认密码还能不能登进去」，这一点很重要：这个脚本原来看的是
+/api/auth/status 的 hasUsers，因为 0.6.5 上账号要等第一次登录才建出来。
+打包版钉的是 0.7.22，它在启动时就把默认管理员建好了，于是 hasUsers 从
+第一秒就是 true，脚本每次都判定「已经有主」直接返回，账号一直用着出厂
+密码——这个功能在真正发出去的版本上等于没做。
 
 在我们占下它之前，先摸到这个端口的人就是主人。而那个账号背后能在这台
 电脑上开一个 PowerShell 终端。上游没有提供设置密码的环境变量，它自带的
@@ -65,12 +70,22 @@ def wait_for(url, limit):
 
 
 def claim(base):
-    """占下账号并返回新密码；已经有主则返回 None。"""
-    if call(base + "/api/auth/status").get("hasUsers"):
+    """占下账号并返回新密码；默认密码已经登不上去就返回 None。
+
+    唯一靠得住的信号就是「默认密码还能不能用」。问 hasUsers 只能知道
+    有没有账号存在，而出厂就带一个账号的版本上，那个答案永远是 true。
+    """
+    try:
+        token = call(base + "/api/auth/login",
+                     {"username": DEFAULT_USERNAME,
+                      "password": DEFAULT_PASSWORD}).get("token")
+    except urllib.error.HTTPError:
+        return None          # 登不上去，说明密码已经被改过了
+    except Exception:
+        return None          # 连不上就不猜，启动照常
+    if not token:
         return None
     password = "".join(secrets.choice(ALPHABET) for _ in range(PASSWORD_LENGTH))
-    token = call(base + "/api/auth/login",
-                 {"username": DEFAULT_USERNAME, "password": DEFAULT_PASSWORD})["token"]
     call(base + "/api/auth/change-password",
          {"currentPassword": DEFAULT_PASSWORD, "newPassword": password}, token=token)
     return password

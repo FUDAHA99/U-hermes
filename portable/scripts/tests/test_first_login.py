@@ -54,7 +54,14 @@ class FakeWebUI(http.server.BaseHTTPRequestHandler):
     needs the current one and a new one of at least 6 characters.
     """
 
-    users = {}          # username -> password
+    # Seeded, like hermes-web-ui 0.7.22 does at startup. This mock used to
+    # start empty, modelling 0.6.5 (the version that happened to be
+    # installed locally), where the account was created by the first login.
+    # On 0.7.22 /api/auth/status answers hasUsers=true immediately, so the
+    # old gate in first-login.py returned "already claimed" on a brand-new
+    # install and the factory password stayed live. The suite passed
+    # throughout, because the mock agreed with the wrong version.
+    users = {"admin": "123456"}   # username -> password
     tokens = {}         # token -> username
     calls = []
 
@@ -85,12 +92,7 @@ class FakeWebUI(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/api/auth/login":
             username, password = body.get("username"), body.get("password")
-            if not FakeWebUI.users:
-                if username != "admin" or password != "123456":
-                    self._json(401, {"error": "Invalid username or password"})
-                    return
-                FakeWebUI.users["admin"] = "123456"
-            elif FakeWebUI.users.get(username) != password:
+            if FakeWebUI.users.get(username) != password:
                 self._json(401, {"error": "Invalid username or password"})
                 return
             token = "tok-%d" % len(FakeWebUI.tokens)
@@ -131,9 +133,10 @@ def main():
     srv, base = serve()
     home = tempfile.mkdtemp(prefix="uh-firstlogin-")
     try:
-        FakeWebUI.users, FakeWebUI.tokens, FakeWebUI.calls = {}, {}, []
+        FakeWebUI.users = {"admin": "123456"}
+        FakeWebUI.tokens, FakeWebUI.calls = {}, []
 
-        print("a fresh install with an unclaimed account")
+        print("a fresh install, factory password still live")
         password = fl.claim(base)
         check(password is not None, "the account is claimed")
         check(len(password or "") >= 6, "the new password satisfies upstream's 6-char minimum")
@@ -160,11 +163,34 @@ def main():
         check(FakeWebUI.users["admin"] == "hunter2", "...and still works")
 
         print("the endpoints the script depends on")
-        FakeWebUI.users, FakeWebUI.tokens, FakeWebUI.calls = {}, {}, []
+        FakeWebUI.users = {"admin": "123456"}
+        FakeWebUI.tokens, FakeWebUI.calls = {}, []
         fl.claim(base)
         used = [p for _, p in FakeWebUI.calls]
-        for endpoint in ("/api/auth/status", "/api/auth/login", "/api/auth/change-password"):
+        for endpoint in ("/api/auth/login", "/api/auth/change-password"):
             check(endpoint in used, "uses %s" % endpoint)
+        check("/api/auth/status" not in used,
+              "does NOT decide on /api/auth/status -- hasUsers is true from "
+              "the first second on the version that ships")
+
+        print("the shape that made this a no-op in the shipped build")
+        # hermes-web-ui 0.7.22 seeds the default super admin at startup, so
+        # hasUsers answers true on a brand-new install. Gating on it meant
+        # the script decided "already claimed" every time and the factory
+        # password stayed live -- while the docs told users it had been
+        # replaced. Pin the behaviour, not the endpoint.
+        FakeWebUI.users = {"admin": "123456"}
+        FakeWebUI.tokens, FakeWebUI.calls = {}, []
+        import urllib.request as _u
+        with _u.urlopen(base + "/api/auth/status", timeout=5) as r:
+            status = json.loads(r.read().decode())
+        check(status.get("hasUsers") is True,
+              "the server reports hasUsers=true before anyone has claimed it")
+        fresh = fl.claim(base)
+        check(fresh is not None,
+              "...and the account is claimed anyway")
+        check(FakeWebUI.users["admin"] == fresh,
+              "...with the factory password actually replaced")
 
         print("the Web UI never coming up")
         check(fl.wait_for("http://127.0.0.1:9/health", 1.0) is False,
