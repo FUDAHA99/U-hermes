@@ -19,6 +19,14 @@ import os
 import re
 import sys
 
+# CI pipes this suite's stdout, and Python then encodes it with the machine's
+# ANSI codepage rather than UTF-8. On GitHub's en-US Windows runner that is
+# cp1252, which cannot encode a single Chinese character, so the first label
+# containing one killed the whole release job with a UnicodeEncodeError.
+# Unreproducible on a Chinese Windows box, where the codepage is GBK.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORTABLE = os.path.dirname(os.path.dirname(HERE))
 REPO = os.path.dirname(PORTABLE)
@@ -164,6 +172,23 @@ def main():
                 "default (page: %s, engine: %s)" % (name, shown, pconfig.inference_base_url),
             )
 
+    # Buttons deliberately left OUT of builtinProviders take the
+    # custom_providers path instead. That is upstream's own model for
+    # aggregators -- its test suite treats Volcengine ARK as `provider:
+    # custom` -- but it is only correct while the engine really has no native
+    # id for them. If upstream adds one, the custom path keeps writing
+    # OPENAI_API_KEY and the provider's own defaults never apply, which is
+    # invisible until someone's key stops working. Fail here instead.
+    for name, btn in sorted(buttons.items()):
+        if name in table or name == "custom":
+            continue
+        check(bool(btn["url"]) and bool(btn["model"]),
+              "%s takes the custom path, so it has to prefill an address and a model"
+              % name)
+        check(name not in PROVIDER_REGISTRY,
+              "%s still has no native provider in the engine -- the day it does, "
+              "move it into builtinProviders" % name)
+
     # The Kimi button switches to the mainland entry on a moonshot.cn
     # address.  That entry has no override variable, so the address on the
     # button has to be the mainland endpoint exactly.
@@ -241,12 +266,51 @@ def main():
         "terminal.cwd goes through that quoting rather than being interpolated raw",
     )
     check(
-        "workspaceKnown" in html and re.search(r"workspaceKnown\s*\?", html) is not None,
+        re.search(r"workspaceKnown\s*&&[^)]*\)\s*$", html, re.M) is not None
+        or re.search(r"workspaceKnown\s*\?", html) is not None,
         "no terminal: block is written until the current workspace has been read back",
+    )
+    # An empty box means "the default", and the page has to say which folder
+    # that is. It used to send the empty string: the service wrote it through,
+    # the engine treated "" as set-but-blank, and resolve_agent_cwd() fell
+    # back to the launcher's own directory -- so the agent spent the session
+    # writing into the install folder, the one place the workspace exists to
+    # keep files out of.
+    check(
+        re.search(r"value\.trim\(\)\s*\|\|\s*\w+\.placeholder", html) is not None,
+        "an empty workspace box falls back to the default, not to an empty string",
     )
     check(
         re.search(r'id="workspaceDir"[^>]*\bdisabled\b', html) is not None,
         "the workspace box starts disabled, so a failed read cannot blank the setting",
+    )
+
+    # Saving the key used to be fire-and-forget: a bare .catch(() => {})
+    # around the /save-env POST. On a write-protected U disk the key never
+    # landed, the page still went green, and the agent started with nothing
+    # to authenticate with -- a 401 on a key that had just passed the test.
+    check(
+        "envResp.ok" in html,
+        "the answer to /save-env is checked before the save is called a success",
+    )
+    check(
+        "}).catch(() => {});" not in html,
+        "...and its failure is no longer swallowed by a bare .catch()",
+    )
+    # And the fallback screen is an error, not a success. It used to wear the
+    # green class while saying nothing had been saved, which at a glance reads
+    # as done -- so the page gets closed and the key is gone.
+    check(
+        "statusEl.className = 'status success'" not in html,
+        "the manual-save fallback does not use the success colour",
+    )
+    check(
+        "statusEl.className = 'status error'" in html,
+        "the manual-save fallback is shown as an error",
+    )
+    check(
+        "readonly>${esc(configContent)}" in html and "readonly>${esc(envContent)}" in html,
+        "the generated config and .env are escaped before going into the page",
     )
 
 

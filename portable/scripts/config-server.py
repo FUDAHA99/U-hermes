@@ -11,6 +11,7 @@ survive a save.  Earlier versions truncated the file, which wiped the
 gateway's api_server block and left the gateway unable to start.
 """
 import datetime
+import errno
 import glob
 import http.server
 import json
@@ -411,6 +412,46 @@ def merge_env(existing_text, incoming_text):
 CWD_PLACEHOLDERS = (".", "./", ".\\", "auto", "cwd")
 
 
+def resolve_blank_workspace(merged):
+    """Turn an empty terminal.cwd into the default, in the text itself.
+
+    The config page tells the user an empty box means "back to the default",
+    and it was the only thing that believed the service resolved it. It did
+    not: the empty string reached disk verbatim, the engine bridged
+    TERMINAL_CWD="" (an empty string is not one of the values it treats as
+    unset), resolve_agent_cwd() fell through to os.getcwd(), and for that
+    whole session the agent wrote its files into the install directory --
+    the one place the workspace exists to keep them out of, and the folder
+    the uninstall instructions tell people to delete.
+
+    protect-config.ps1 repairs the config on the NEXT launch, which is worse
+    than it sounds: the setting heals itself and the files stay orphaned.
+    """
+    config = parse_yaml_mapping(merged) or {}
+    terminal = config.get("terminal")
+    if not isinstance(terminal, dict) or "cwd" not in terminal:
+        return merged
+    if str(terminal.get("backend") or "local") != "local":
+        return merged  # a path inside a container or over ssh; not ours to pick
+    cwd = str(terminal.get("cwd") or "").strip()
+    if cwd and cwd not in CWD_PLACEHOLDERS:
+        return merged
+
+    quoted = "'" + default_workspace().replace("'", "''") + "'"
+    out, in_terminal, done = [], False, False
+    for line in merged.splitlines(keepends=True):
+        bare = line.rstrip(chr(13) + chr(10))
+        m = _KEY_RE.match(bare)
+        if m and not m.group(1):
+            in_terminal = m.group(2) == "terminal"
+        elif in_terminal and not done and m and m.group(2) == "cwd":
+            out.append("%scwd: %s%s" % (m.group(1), quoted, line[len(bare):]))
+            done = True
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 def settle_workspace(merged):
     """Make sure the chosen workspace exists. Returns an error message or None.
 
@@ -458,11 +499,45 @@ def backup(path):
             pass
 
 
+def release_version():
+    """The tag this package was cut from, or "" when running from a clone.
+
+    Written into the zip by .github/workflows/release.yml. Deliberately
+    absent from the repository: showing nothing beats showing a number that
+    might be wrong.
+    """
+    try:
+        with open(os.path.join(PORTABLE_DIR, "VERSION"), encoding="utf-8", errors="replace") as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
+def write_failure_message(path, err):
+    """Why a write failed, in terms the person holding the U disk can act on."""
+    code = getattr(err, "errno", None)
+    if code in (errno.EACCES, errno.EPERM, errno.EROFS):
+        return ("写不进 %s：U 盘或文件夹是只读的（有些 U 盘侧面有写保护小开关），"
+                "也可能是文件正被别的程序占用。" % path)
+    if code == errno.ENOSPC:
+        return "写不进 %s：磁盘已经满了，清理出一点空间再试。" % path
+    return "写不进 %s（%s）。" % (path, err.__class__.__name__)
+
+
 def write_atomic(path, text):
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        # Leaving a half-written .tmp next to the real file is how a later
+        # run ends up "restoring" a truncated config.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def test_provider(base_url, api_key, model):
@@ -604,7 +679,10 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
         route = self._route()
         # Readiness probe for the launcher. No state, no token.
         if route == "/ping":
-            self._json(200, {"ok": True})
+            # The page reads its own version from here rather than having it
+            # baked in, so a stale Config.html cannot claim a version it is
+            # not part of.
+            self._json(200, {"ok": True, "version": release_version()})
             return
         if route == "/workspace":
             if not self._request_ok(require_origin=False):
@@ -699,9 +777,20 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
 
         path = os.path.join(DATA_DIR, "config.yaml")
         existing = ""
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                existing = f.read()
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    existing = f.read()
+        except OSError as e:
+            # Reading is what fails when the file is locked by an editor or
+            # the media has gone away mid-session. Merging against "" would
+            # then write a config with the user's gateway block missing.
+            self._json(500, {
+                "ok": False,
+                "message": "读不出 %s（%s），配置未保存。" % (path, e.__class__.__name__),
+            })
+            print("  [!] could not read config.yaml: %r" % e)
+            return
 
         try:
             merged = merge_yaml(existing, body)
@@ -718,14 +807,26 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
             print("  [!] merged config does not parse; kept the original")
             return
 
+        merged = resolve_blank_workspace(merged)
         problem = settle_workspace(merged)
         if problem:
             self._json(400, {"ok": False, "message": problem + " 配置未保存。"})
             print("  [!] workspace refused: %s" % problem)
             return
 
-        backup(path)
-        write_atomic(path, merged)
+        # A read-only U disk used to raise straight out of the handler: the
+        # socket closed with no response at all, the page's fetch() rejected,
+        # and the only trace was a traceback in a window nobody reads.
+        try:
+            backup(path)
+            write_atomic(path, merged)
+        except OSError as e:
+            self._json(500, {
+                "ok": False,
+                "message": write_failure_message(path, e) + " 配置未保存。",
+            })
+            print("  [!] could not write config.yaml: %r" % e)
+            return
         self._json(200, {"ok": True})
         print("  [OK] config.yaml merged into %s" % path)
         # Auto-shutdown after saving config (give time for .env save)
@@ -734,11 +835,27 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
     def _save_env(self, body):
         path = os.path.join(DATA_DIR, ".env")
         existing = ""
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                existing = f.read()
-        backup(path)
-        write_atomic(path, merge_env(existing, body))
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    existing = f.read()
+        except OSError as e:
+            self._json(500, {
+                "ok": False,
+                "message": "读不出 %s（%s），API 密钥未保存。" % (path, e.__class__.__name__),
+            })
+            print("  [!] could not read .env: %r" % e)
+            return
+        try:
+            backup(path)
+            write_atomic(path, merge_env(existing, body))
+        except OSError as e:
+            self._json(500, {
+                "ok": False,
+                "message": write_failure_message(path, e) + " API 密钥未保存。",
+            })
+            print("  [!] could not write .env: %r" % e)
+            return
         self._json(200, {"ok": True})
         print("  [OK] .env merged into %s" % path)
 

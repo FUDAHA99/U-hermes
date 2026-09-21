@@ -13,6 +13,14 @@ import os
 import shutil
 import sys
 
+# CI pipes this suite's stdout, and Python then encodes it with the machine's
+# ANSI codepage rather than UTF-8. On GitHub's en-US Windows runner that is
+# cp1252, which cannot encode a single Chinese character, so the first label
+# containing one killed the whole release job with a UnicodeEncodeError.
+# Unreproducible on a Chinese Windows box, where the codepage is GBK.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
 
@@ -21,6 +29,9 @@ _spec = importlib.util.spec_from_file_location(
 )
 cs = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cs)
+
+NL = chr(10)
+CRLF = chr(13) + NL
 
 FAILURES = []
 
@@ -366,12 +377,185 @@ def test_env_merge():
     check("DEEPSEEK_BASE_URL=https://x/v1" in after, ".env gains the base url override")
 
 
+UNWRITABLE_CONFIG_BODY = """model:
+  provider: "deepseek"
+"""
+
+UNWRITABLE_ENV_BODY = """DEEPSEEK_API_KEY=sk-test
+"""
+
+
+def _fake_handler(calls):
+    """A ConfigHandler with no socket behind it, so _json is just a recorder."""
+    h = cs.ConfigHandler.__new__(cs.ConfigHandler)
+    h._json = lambda code, obj: calls.append((code, obj))
+    return h
+
+
+def test_a_write_that_cannot_land_is_reported():
+    """A save that never reached the disk must not answer 200.
+
+    On a write-protected U disk both handlers used to raise straight out of
+    do_POST: the socket closed with no response at all, the page's fetch()
+    rejected into a swallowed .catch(), and the user got a green
+    "配置已保存！" over a config.yaml that had not changed and a .env with no
+    key in it.  The agent then started and answered 401 on a key the user had
+    just watched pass the connection test.
+    """
+    root = os.path.join(HERE, "_tmp_unwritable")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+    cs.DATA_DIR = root
+    cs.BACKUP_DIR = os.path.join(root, "backups")
+
+    # write_atomic writes "<path>.tmp" and renames. A directory sitting on
+    # that name makes the write fail the same way read-only media does,
+    # without having to mount anything.
+    for name in ("config.yaml", ".env"):
+        os.makedirs(os.path.join(root, name + ".tmp"))
+
+    calls = []
+    _fake_handler(calls)._save_config(UNWRITABLE_CONFIG_BODY)
+    code, body = calls[-1]
+    check(code == 500, "a config write that fails answers 500, not 200")
+    check(body.get("ok") is False, "the failed config save reports ok=false")
+    check("未保存" in str(body.get("message", "")),
+          "the message says the config was not saved")
+
+    calls = []
+    _fake_handler(calls)._save_env(UNWRITABLE_ENV_BODY)
+    code, body = calls[-1]
+    check(code == 500, "an .env write that fails answers 500, not 200")
+    check("密钥未保存" in str(body.get("message", "")),
+          "the message says the key was not saved")
+
+    # And the happy path still answers 200 once the obstruction is gone.
+    for name in ("config.yaml", ".env"):
+        os.rmdir(os.path.join(root, name + ".tmp"))
+    calls = []
+    _fake_handler(calls)._save_env(UNWRITABLE_ENV_BODY)
+    check(calls[-1][0] == 200, "a writable .env still answers 200")
+    check(os.path.exists(os.path.join(root, ".env")), "and the key lands on disk")
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_failed_rename_leaves_nothing_behind():
+    """The half-written .tmp has to go, and the original has to survive.
+
+    write_atomic writes "<path>.tmp" and renames. The earlier test forces
+    the failure by putting a DIRECTORY on the .tmp name, so the open fails
+    before a byte is written and the cleanup this covers never runs at all
+    -- deleting the whole cleanup block left that suite green. Here the
+    temp file really is written and the rename is what fails, which is the
+    shape a locked destination or a disk that fills mid-write takes.
+
+    A .tmp left lying beside config.yaml is not inert: it is a truncated
+    config with a name a later repair step can mistake for a real one.
+    """
+    root = os.path.join(HERE, "_tmp_rename")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+    cs.DATA_DIR = root
+    cs.BACKUP_DIR = os.path.join(root, "backups")
+
+    original = "model:" + NL + "  provider: 'keep-me'" + NL
+    with open(os.path.join(root, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(original)
+
+    real_replace = os.replace
+
+    def refuse(src, dst):
+        raise OSError(13, "Permission denied")
+
+    os.replace = refuse
+    try:
+        calls = []
+        _fake_handler(calls)._save_config(UNWRITABLE_CONFIG_BODY)
+    finally:
+        os.replace = real_replace
+
+    check(calls[-1][0] == 500, "a rename that fails answers 500")
+    check(not os.path.exists(os.path.join(root, "config.yaml.tmp")),
+          "the half-written config.yaml.tmp is removed")
+    with open(os.path.join(root, "config.yaml"), encoding="utf-8") as f:
+        check(f.read() == original, "and the config already on disk is untouched")
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_blank_workspace_becomes_the_default():
+    """An empty terminal.cwd must never reach config.yaml.
+
+    The config page offers "leave it empty to go back to the default". It
+    used to send the empty string, and nothing downstream turned that back
+    into a folder: the engine treats "" as set-but-blank, bridges
+    TERMINAL_CWD="", and resolve_agent_cwd() falls through to os.getcwd() --
+    the launcher's own directory. The agent then spent the whole session
+    writing its files in among the program files, which is both what the
+    workspace exists to prevent and the folder the uninstall instructions
+    tell people to delete. protect-config.ps1 repairs the setting on the
+    next launch, so the config heals itself and the files stay orphaned.
+    """
+    default = cs.default_workspace()
+    for label, value in (("empty", "''"), ("a dot", "'.'"), ("auto", "'auto'")):
+        text = ("model:" + NL + "  provider: x" + NL + "terminal:" + NL +
+                "  backend: local" + NL + "  cwd: " + value + NL +
+                "memory:" + NL + "  enabled: true" + NL)
+        got = cs.resolve_blank_workspace(text)
+        check(default in got, "%s becomes the default workspace" % label)
+        check(got.count("cwd:") == 1, "...without leaving a second cwd behind")
+        check("enabled: true" in got and "provider: x" in got,
+              "...and nothing else in the file is touched")
+
+    real = ("terminal:" + NL + "  backend: local" + NL + "  cwd: 'D:/mine'" + NL)
+    check(cs.resolve_blank_workspace(real) == real, "a real path is left alone")
+
+    remote = ("terminal:" + NL + "  backend: docker" + NL + "  cwd: ''" + NL)
+    check(cs.resolve_blank_workspace(remote) == remote,
+          "a container or ssh path is not ours to fill in")
+
+    none = "model:" + NL + "  provider: x" + NL
+    check(cs.resolve_blank_workspace(none) == none,
+          "a config with no terminal: block gains nothing")
+
+    top = "cwd: ''" + NL + "terminal:" + NL + "  backend: local" + NL
+    check(cs.resolve_blank_workspace(top) == top,
+          "a top-level cwd: that is not the terminal one is not rewritten")
+
+    # protect-config.ps1 writes this file with a BOM and CRLF; the rewrite
+    # has to hand back exactly the encoding it was given.
+    fancy = ("﻿terminal:" + CRLF + "  backend: local" + CRLF +
+             "  cwd: ''" + CRLF)
+    got = cs.resolve_blank_workspace(fancy)
+    check(got.startswith("﻿"), "the BOM survives the rewrite")
+    check(got.count(CRLF) == 3 and got.count(NL) == 3, "and so do the CRLFs")
+
+
+def test_write_failures_are_explained_in_chinese():
+    import errno
+    for code, want in ((errno.EACCES, "只读"), (errno.EROFS, "只读"),
+                       (errno.ENOSPC, "满")):
+        err = OSError(code, "x")
+        err.errno = code
+        msg = cs.write_failure_message("D:/x/config.yaml", err)
+        check(want in msg, "errno %d is explained as %s" % (code, want))
+    other = OSError(999, "x")
+    other.errno = 999
+    check("config.yaml" in cs.write_failure_message("D:/x/config.yaml", other),
+          "an unrecognised errno still names the file")
+
+
 if __name__ == "__main__":
     for fn in (test_nothing_is_lost, test_shape, test_foreign_indentation,
                test_byte_order_mark,
                test_provider_switch_does_not_inherit_the_old_endpoint,
                test_workspace,
-               test_bad_bodies_are_refused, test_env_merge):
+               test_bad_bodies_are_refused, test_env_merge,
+               test_a_write_that_cannot_land_is_reported,
+               test_a_failed_rename_leaves_nothing_behind,
+               test_a_blank_workspace_becomes_the_default,
+               test_write_failures_are_explained_in_chinese):
         print(fn.__name__)
         fn()
     print()

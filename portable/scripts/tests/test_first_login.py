@@ -20,6 +20,14 @@ import sys
 import tempfile
 import threading
 
+# CI pipes this suite's stdout, and Python then encodes it with the machine's
+# ANSI codepage rather than UTF-8. On GitHub's en-US Windows runner that is
+# cp1252, which cannot encode a single Chinese character, so the first label
+# containing one killed the whole release job with a UnicodeEncodeError.
+# Unreproducible on a Chinese Windows box, where the codepage is GBK.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
 

@@ -215,7 +215,7 @@
     <div class="container">
         <div class="header">
             <h1>U-Hermes</h1>
-            <p>U盘AI智能体 - 基于 Hermes Agent 驱动</p>
+            <p>U盘AI智能体 - 基于 Hermes Agent 驱动<span id="verTag" style="opacity:.55"></span></p>
         </div>
 
         <!-- Step 1: Choose Provider -->
@@ -242,6 +242,9 @@
                 </div>
                 <div class="provider-btn" data-provider="openrouter" data-url="https://openrouter.ai/api/v1" data-model="anthropic/claude-sonnet-4">
                     OpenRouter
+                </div>
+                <div class="provider-btn" data-provider="siliconflow" data-url="https://api.siliconflow.cn/v1" data-model="deepseek-ai/DeepSeek-V3.2">
+                    硅基流动
                 </div>
                 <div class="provider-btn" data-provider="custom" data-url="" data-model="">
                     自定义
@@ -470,6 +473,7 @@
         minimax: '语音与多模态。获取密钥: platform.minimaxi.com',
         doubao: '火山引擎生态。获取密钥: console.volcengine.com',
         openrouter: '200+ 模型聚合，需翻墙。获取密钥: openrouter.ai',
+        siliconflow: '一个密钥调几十个开源模型，国内直连。获取密钥: cloud.siliconflow.cn（模型名到控制台复制）',
         custom: '任何兼容 OpenAI 的接口地址'
     };
 
@@ -531,6 +535,23 @@
     }
     document.addEventListener('DOMContentLoaded', loadWorkspace);
 
+    // The version comes from the service, never from this file. A Config.html
+    // left over from an older build, opened beside a newer one, would
+    // otherwise state a version it is not part of.
+    async function loadVersion() {
+        const url = apiUrl('/ping');
+        if (!url) return;
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) return;
+            const d = await resp.json();
+            if (d && d.version) {
+                document.getElementById('verTag').textContent = '　' + d.version;
+            }
+        } catch (e) { /* no version shown, which is the honest default */ }
+    }
+    document.addEventListener('DOMContentLoaded', loadVersion);
+
     // Save configuration
     function saveConfig() {
         const apiKey = document.getElementById('apiKey').value.trim();
@@ -585,14 +606,24 @@
         const platformsYaml = platformsToYaml(platforms);
 
         // Only when loadWorkspace() succeeded -- otherwise we would be writing
-        // over a path we never saw. An empty box then means "back to the
-        // default", which the config service resolves to the same folder
-        // protect-config.ps1 picks, so the two cannot disagree.
+        // over a path we never saw.
+        //
+        // An empty box means "back to the default", and the default is sent
+        // explicitly. It used to send the empty string on the belief that the
+        // service resolved it; the service did not, the empty string reached
+        // config.yaml, and the engine then fell back to the launcher's own
+        // directory -- so the agent spent that session writing its files in
+        // among the program files. The service resolves it now too, but the
+        // page holds the same default (loadWorkspace put it in the
+        // placeholder), so it says what it means instead of relying on that.
+        //
         // No backend: here on purpose. The merge is per-key, so writing
         // backend: local would silently revert anyone running docker or ssh.
-        const workspaceYaml = workspaceKnown
+        const wsBox = document.getElementById('workspaceDir');
+        const wsValue = wsBox.value.trim() || wsBox.placeholder.trim();
+        const workspaceYaml = (workspaceKnown && wsValue)
             ? `terminal:
-  cwd: ${yamlStr(document.getElementById('workspaceDir').value.trim())}
+  cwd: ${yamlStr(wsValue)}
 
 `
             : '';
@@ -656,12 +687,12 @@ cron:
         const testBtn = document.getElementById('testBtn');
         saveBtn.disabled = true;
         if (testBtn) testBtn.disabled = true;
-        tryLocalSave(configYaml, envContent).then(saved => {
-            if (saved) {
+        tryLocalSave(configYaml, envContent).then(problem => {
+            if (!problem) {
                 status.className = 'status success';
                 status.textContent = '配置已保存！现在可以关闭此页面，运行 Windows-Start.bat（或 Mac-Start.command）启动智能体。';
             } else {
-                showManualSave(configYaml, envContent, status);
+                showManualSave(configYaml, envContent, status, problem);
             }
         }).finally(() => {
             saveBtn.disabled = false;
@@ -669,27 +700,49 @@ cron:
         });
     }
 
+    const NO_SERVICE = '配置服务没有运行。';
+
+    // Returns '' when everything landed, otherwise a reason to show the user.
     async function tryLocalSave(configContent, envContent) {
         const saveConfig = apiUrl('/save-config');
-        if (!saveConfig) return false;
+        if (!saveConfig) return NO_SERVICE;
         try {
             // .env first: saving the config schedules the service to shut down.
+            //
+            // The answer IS checked now. It used to be `.catch(() => {})`, so
+            // a key that never reached the disk -- write-protected U disk,
+            // disk full, file locked -- still ended in a green "配置已保存！",
+            // and the agent then started with no key at all and returned 401
+            // on a key the user had just watched pass the connection test.
             if (envContent) {
-                await fetch(apiUrl('/save-env'), {
+                const envResp = await fetch(apiUrl('/save-env'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain' },
                     body: envContent
-                }).catch(() => {});
+                });
+                if (!envResp.ok) return await failureReason(envResp);
             }
             const resp = await fetch(saveConfig, {
                 method: 'POST',
                 headers: { 'Content-Type': 'text/plain' },
                 body: configContent
             });
-            return resp.ok;
+            if (!resp.ok) return await failureReason(resp);
+            return '';
         } catch (e) {
-            return false;
+            return NO_SERVICE;
         }
+    }
+
+    // The service answers every refusal with {ok:false, message:"..."} in
+    // Chinese -- it knows whether the disk was read-only, full, or the YAML
+    // was rejected, and the page does not.
+    async function failureReason(resp) {
+        try {
+            const j = await resp.json();
+            if (j && j.message) return String(j.message);
+        } catch (e) { /* not JSON */ }
+        return '配置服务返回了 HTTP ' + resp.status + '。';
     }
 
     async function testConnection() {
@@ -843,22 +896,28 @@ cron:
         return yaml;
     }
 
-    function showManualSave(configContent, envContent, statusEl) {
+    const esc = s => String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    function showManualSave(configContent, envContent, statusEl, reason) {
         const envNote = envContent ? `<p style="font-size:0.85em; color:#a0a0a0; margin-top:12px">
             同时把以下内容合并进 <code>data/.env</code>（同名变量替换，其它行保留）：
         </p>
-        <textarea style="width:100%;height:60px;margin-top:4px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${envContent}</textarea>` : '';
+        <textarea style="width:100%;height:60px;margin-top:4px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${esc(envContent)}</textarea>` : '';
 
-        statusEl.className = 'status success';
+        // Red, not green. This screen used to wear the success colour while
+        // telling the user nothing had been saved -- which reads, at a glance,
+        // as "done", and the page gets closed.
+        statusEl.className = 'status error';
         statusEl.innerHTML = `
-            <p style="margin-bottom:8px"><strong>配置服务未运行。</strong>请手动保存：</p>
+            <p style="margin-bottom:8px"><strong>${esc(reason || NO_SERVICE)}配置没有保存。</strong>请手动保存：</p>
             <p style="font-size:0.85em; color:#a0a0a0">
                 打开 U-Hermes 文件夹下的 <code>data/config.yaml</code>，把下面的内容<strong>合并</strong>进去：
                 同名段落（<code>model:</code> 等）整段替换，文件里其它段落
                 （<code>platforms:</code>、<code>database:</code>、<code>terminal:</code> 等）<strong>原样保留</strong>。
                 直接整个文件覆盖会删掉网关配置，智能体将无法启动。
             </p>
-            <textarea style="width:100%;height:200px;margin-top:10px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${configContent}</textarea>
+            <textarea style="width:100%;height:200px;margin-top:10px;background:#111;color:#0f0;border:1px solid #333;border-radius:4px;padding:8px;font-family:monospace;font-size:0.8em" readonly>${esc(configContent)}</textarea>
             ${envNote}
             <p style="margin-top:8px;font-size:0.85em">然后运行 <code>Windows-Start.bat</code> 或 <code>bash Mac-Start.command</code></p>
         `;
