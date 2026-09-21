@@ -217,8 +217,17 @@ jobs:
           Write-Host "sys.path is self-contained"
 
           Write-Host "=== [3/5] helper scripts compile ==="
-          & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py scripts/provider_probe.py
+          & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py scripts/provider_probe.py scripts/version_check.py
           if ($LASTEXITCODE -ne 0) { Write-Error "helper script compile failed"; exit 1 }
+
+          Write-Host "=== [3.5/5] the build matches versions.env ==="
+          # The teeth. Three separate bugs in this project came from
+          # verifying against a locally installed version nobody ships, and
+          # an earlier one from setup installing @latest instead of the pin.
+          # If a future change reintroduces either, this fails the build
+          # rather than shipping a package nobody has tested.
+          & $py scripts/version_check.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "the build does not match versions.env"; exit 1 }
 
           Write-Host "=== [4/5] regression tests ==="
           # Saving from the config page used to truncate config.yaml, and the
@@ -240,6 +249,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "default config test failed"; exit 1 }
           & $py scripts/tests/test_provider_probe.py
           if ($LASTEXITCODE -ne 0) { Write-Error "provider probe test failed"; exit 1 }
+          & $py scripts/tests/test_version_check.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "version check test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
 
@@ -317,6 +328,7 @@ jobs:
             "Windows-Start.bat", "Windows-Menu.bat", "Config.html",
             "scripts\preflight.py", "scripts\wait-for.py", "scripts\config-server.py",
             "scripts\protect-config.ps1", "scripts\provider_probe.py",
+            "scripts\version_check.py",
             "versions.env", "data\config.yaml.default",
             "VERSION"
           )) {
@@ -468,7 +480,10 @@ jobs:
           hermes/.venv/bin/hermes --help >/dev/null
 
           echo "=== [3/5] helper scripts compile ==="
-          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py scripts/provider_probe.py
+          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py scripts/provider_probe.py scripts/version_check.py
+
+          echo "=== [3.5/5] the build matches versions.env ==="
+          "$PY" scripts/version_check.py
 
           echo "=== [4/5] regression tests ==="
           "$PY" scripts/tests/test_config_merge.py
@@ -479,6 +494,7 @@ jobs:
           "$PY" scripts/tests/test_script_hygiene.py
           "$PY" scripts/tests/test_default_config.py
           "$PY" scripts/tests/test_provider_probe.py
+          "$PY" scripts/tests/test_version_check.py
 
           echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)
