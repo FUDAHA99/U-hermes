@@ -32,6 +32,7 @@ PREFLIGHT = os.path.join(SCRIPTS, "preflight.py")
 SANDBOX = os.path.join(HERE, "_tmp_preflight")
 
 NL = chr(10)
+BOM = bytes([0xEF, 0xBB, 0xBF])
 NEEDS_CONFIG = 10
 FAILURES = []
 
@@ -153,6 +154,63 @@ def test_a_python_without_pyyaml_does_not_accuse_the_config():
 
     code, out = run(config=DEEPSEEK, args=("--print-workspace",), no_yaml=True)
     check(code == 0, "--print-workspace survives a missing PyYAML")
+
+
+def test_a_bom_in_env_is_repaired_not_just_reported():
+    """A BOM makes the first variable's name unusable, to everyone.
+
+    "﻿OPENAI_API_KEY" is not OPENAI_API_KEY. python-dotenv -- which is
+    what the engine reads this file with -- keeps the BOM in the name too,
+    so the key is not missing, it is inert: nothing matches it and the agent
+    never answers. Notepad and PowerShell's `Set-Content -Encoding utf8`
+    both produce one, and the config page used to carry it through a save
+    rather than dropping it, so there was no way out from inside the
+    product.
+
+    Repaired rather than reported, because the damage is unambiguous, the
+    fix is three bytes, and the alternative is a user retyping a key that
+    was right all along.
+    """
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+    data = os.path.join(SANDBOX, "data")
+    os.makedirs(data)
+    with io.open(os.path.join(data, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(DEEPSEEK)
+    env_path = os.path.join(data, ".env")
+    with io.open(env_path, "w", encoding="utf-8-sig") as f:
+        f.write("DEEPSEEK_API_KEY=sk-present-all-along" + NL)
+
+    raw = io.open(env_path, "rb").read()
+    check(raw[:3] == BOM, "the fixture really does start with a BOM")
+
+    environ = dict(os.environ)
+    environ["U_HERMES_SKIP_PROBE"] = "1"
+    environ["PYTHONIOENCODING"] = "utf-8"
+    for name in list(environ):
+        if name.endswith("_API_KEY"):
+            del environ[name]
+    proc = subprocess.run([sys.executable, PREFLIGHT, data],
+                          capture_output=True, env=environ)
+    out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+
+    check(proc.returncode == 0,
+          "the launch is not blocked over a key that is present")
+    check("BOM" in out, "...and the user is told what was wrong")
+    check("没有找到 API 密钥" not in out,
+          "...not told the key is missing, which it never was")
+    check(io.open(env_path, "rb").read()[:3] != BOM,
+          "the BOM is gone from the file")
+    check("sk-present-all-along" in
+          io.open(env_path, encoding="utf-8").read(),
+          "...and the key itself is untouched")
+
+    # Second run: nothing left to repair, nothing said about it.
+    proc = subprocess.run([sys.executable, PREFLIGHT, data],
+                          capture_output=True, env=environ)
+    out2 = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+    check("BOM" not in out2, "a clean .env is not nagged about")
+
+    shutil.rmtree(SANDBOX, ignore_errors=True)
 
 
 def test_key_presence():
@@ -402,6 +460,7 @@ def test_print_workspace():
 if __name__ == "__main__":
     for fn in (test_unreadable_configs_are_named_precisely,
                test_a_python_without_pyyaml_does_not_accuse_the_config,
+               test_a_bom_in_env_is_repaired_not_just_reported,
                test_key_presence,
                test_an_unknown_provider_is_never_a_reason_to_block,
                test_custom_providers,

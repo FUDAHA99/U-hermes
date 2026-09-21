@@ -782,7 +782,11 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
         existing = ""
         try:
             if os.path.exists(path):
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                # utf-8-sig, so a BOM someone's editor left here is dropped
+                # rather than carried through the merge. It makes the first
+                # variable's name "﻿OPENAI_API_KEY", which nothing --
+                # not the engine, not python-dotenv -- will ever match.
+                with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
                     existing = f.read()
         except OSError as e:
             self._json(500, {

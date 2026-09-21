@@ -49,11 +49,42 @@ PROBE_TTL = 7 * 24 * 3600
 NEEDS_CONFIG = 10
 
 
+def repair_env_bom(path):
+    """Strip a leading BOM from .env, and say that it did.
+
+    A UTF-8 BOM in front of the first line makes that line's variable name
+    "﻿OPENAI_API_KEY". python-dotenv -- which is what the engine reads
+    this file with -- keeps the BOM in the name too, so the key is not
+    missing, it is unusable: nothing ever matches it and the agent never
+    answers. Notepad and PowerShell's `Set-Content -Encoding utf8` both
+    produce one.
+
+    Repairing it here rather than only reporting it, because the damage is
+    unambiguous, the fix is three bytes, and the alternative is a user
+    retyping a key that was correct all along. Saving from the config page
+    no longer reintroduces it either.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return False
+    if not raw.startswith(bytes([0xEF, 0xBB, 0xBF])):
+        return False
+    try:
+        with open(path, "wb") as f:
+            f.write(raw[3:])
+    except OSError:
+        return False
+    return True
+
+
 def read_env_file(path):
     values = {}
     if not os.path.exists(path):
         return values
-    with io.open(path, encoding="utf-8", errors="replace") as f:
+    # utf-8-sig: a BOM must never become part of the first variable's name.
+    with io.open(path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -366,7 +397,10 @@ def main(argv):
             # while letting it through costs them one clear error message.
             return 0
 
-    env = read_env_file(os.path.join(data_dir, ".env"))
+    env_path = os.path.join(data_dir, ".env")
+    if repair_env_bom(env_path):
+        say("[i] data\\.env 开头有一个 BOM 字符，引擎会因此读不到第一个变量。已经去掉了。")
+    env = read_env_file(env_path)
     found = ""
     for name in candidates:
         value = env.get(name) or os.environ.get(name) or ""
