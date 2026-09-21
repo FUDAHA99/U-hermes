@@ -1,6 +1,7 @@
-# ============================================================================
+﻿# ============================================================================
 # U-Hermes Portable Setup Script (Windows)
-# Downloads: Embedded Python 3.11 + uv + Hermes Agent + dependencies
+# Downloads the toolchain pinned in versions.env: embedded Python + uv +
+# Node + the pinned hermes-agent tag.
 # All downloads use China mirrors where possible.
 # ============================================================================
 
@@ -20,10 +21,41 @@ $uvCacheDir = Join-Path $scriptDir ".uv-cache"
 # Fix cross-drive cache issue (uv defaults to %LOCALAPPDATA% which may be on C:)
 $env:UV_CACHE_DIR = $uvCacheDir
 
-# Versions
-$pythonVersion = "3.11.9"
-$nodeVersion = "v22.22.1"
-$uvVersion = "0.7.12"
+# Versions -- read from versions.env, the single source of truth that
+# release.yml and setup.sh already use.
+#
+# This script used to carry its own copies (Python 3.11.9, Node v22.22.1,
+# uv 0.7.12) which had drifted away from the pins, so a Windows developer
+# running setup.ps1 built a toolchain no release has ever shipped. It also
+# cloned hermes-agent from main rather than HERMES_AGENT_REF, which is how
+# the local engine ended up four months behind the released one -- and how
+# a day of conclusions came to be checked against the wrong source.
+$versionsFile = Join-Path $scriptDir "versions.env"
+$V = @{}
+if (Test-Path $versionsFile) {
+    foreach ($line in Get-Content $versionsFile) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$') { $V[$Matches[1]] = $Matches[2] }
+    }
+} else {
+    Write-Host "  [!] versions.env not found beside this script; using fallbacks." -ForegroundColor Yellow
+}
+function Pin([string]$name, [string]$fallback) {
+    if ($V.ContainsKey($name) -and $V[$name]) { return $V[$name] }
+    return $fallback
+}
+
+$pythonVersion = Pin "PYTHON_EMBED_VERSION" "3.13.15"
+$nodeVersion   = Pin "NODE_VERSION"         "v24.21.0"
+$uvVersion     = Pin "UV_VERSION"           "0.12.16"
+$agentRef      = Pin "HERMES_AGENT_REF"     ""
+# Unpinned until now: setup.ps1 installed whatever hermes-web-ui was newest
+# that morning, while release.yml installed the pin. Two people running the
+# same commit got two different products.
+$webUiVersion  = Pin "HERMES_WEB_UI_VERSION" ""
+if ($env:CANARY -eq "true") {
+    $agentRef = ""
+    Write-Host "  [i] CANARY: building against hermes-agent HEAD" -ForegroundColor Cyan
+}
 
 # Mirrors (China-friendly)
 $pypiMirror = "https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -226,10 +258,15 @@ function Install-HermesSource {
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
     if ($gitCmd) {
         if (Test-Path $agentDir) { Remove-Item $agentDir -Recurse -Force }
-        & git clone --depth 1 https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+        if ($agentRef) {
+            & git clone --depth 1 --branch $agentRef https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+        } else {
+            & git clone --depth 1 https://github.com/NousResearch/hermes-agent.git $agentDir 2>&1 | Out-Null
+        }
     } else {
         # Download as zip
-        $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/main.zip"
+        $zipRef = if ($agentRef) { $agentRef } else { "main" }
+        $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/$(if ($agentRef) { 'tags' } else { 'heads' })/$zipRef.zip"
         $zipPath = Join-Path $hermesDir "hermes-agent.zip"
         Download-File -Url $zipUrl -Dest $zipPath -Desc "Hermes Agent (zip)"
         Expand-Archive -Path $zipPath -DestinationPath $hermesDir -Force
@@ -315,6 +352,15 @@ function Initialize-Data {
     $configFile = Join-Path $dataDir "config.yaml"
     if (-not (Test-Path $configFile)) {
         # Write default config with Chinese-friendly defaults
+        # Must match the default written by .github/workflows/release.yml and
+        # Windows-Start.bat. This copy had drifted into a third shape that the
+        # engine reads differently: a `providers:` block it does not read at
+        # all, `api_server:` at the TOP level instead of under `platforms:`
+        # (so the gateway got no port and no key), `skills.extra_dirs` instead
+        # of `external_dirs` (so the bundled Chinese skills never loaded), a
+        # `gateway.platforms` LIST that nothing reads, the dead
+        # api.minimax.chat endpoint, and no database.journal_mode at all.
+        # Anyone who built from source got that config.
         $defaultConfig = @"
 # U-Hermes Configuration
 # Docs: https://hermes-agent.nousresearch.com/docs/user-guide/configuration
@@ -322,50 +368,24 @@ function Initialize-Data {
 model:
   provider: ""
   model: ""
-  # Uncomment and fill in your preferred provider:
-  # provider: "deepseek"
-  # model: "deepseek-chat"
-
-providers:
-  deepseek:
-    api_key: ""
-    base_url: "https://api.deepseek.com/v1"
-  kimi:
-    api_key: ""
-    base_url: "https://api.moonshot.cn/v1"
-  qwen:
-    api_key: ""
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  glm:
-    api_key: ""
-    base_url: "https://open.bigmodel.cn/api/paas/v4"
-  minimax:
-    api_key: ""
-    base_url: "https://api.minimax.chat/v1"
-  doubao:
-    api_key: ""
-    base_url: "https://ark.cn-beijing.volces.com/api/v3"
-api_server:
-  extra:
-    port: 8642
-
-gateway:
-  platforms: []
-  # Example:
-  # platforms:
-  #   - type: telegram
-  #     token: "YOUR_BOT_TOKEN"
-  #   - type: qqbot
-  #     app_id: "YOUR_APP_ID"
-  #     app_secret: "YOUR_SECRET"
-
+# Read by hermes_state_wal.resolve_journal_mode(). See the comment in
+# Windows-Start.bat for what actually decides the mode on this package.
+database:
+  journal_mode: "delete"
+# The gateway api server. Upstream reads this under platforms.*, and the key
+# specifically under platforms.api_server.extra.key; protect-config.ps1 fills
+# it in on first launch.
+platforms:
+  api_server:
+    enabled: true
+    extra:
+      port: 8642
+      host: 127.0.0.1
 skills:
-  extra_dirs:
+  external_dirs:
     - "../skills-cn"
-
 memory:
   enabled: true
-
 cron:
   enabled: true
 "@
@@ -403,12 +423,19 @@ if (-not (Test-Path $webuiServer)) {
     $npmCmd = Join-Path $nodeDir "npm.cmd"
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $npmCmd install -g hermes-web-ui --prefix $nodeDir 2>&1 | ForEach-Object {
+    $webUiSpec = if ($webUiVersion) { "hermes-web-ui@$webUiVersion" } else { "hermes-web-ui" }
+    if ($env:CANARY -eq "true") { $webUiSpec = "hermes-web-ui@latest" }
+    # Cache on the stick, not in %LOCALAPPDATA% on whoever's machine this is.
+    $env:npm_config_cache = Join-Path $runtimeDir ".npm-cache"
+    & $npmCmd install -g $webUiSpec --prefix $nodeDir 2>&1 | ForEach-Object {
         if ($_ -match "error|Error|ERROR") { Write-Host "    $_" -ForegroundColor Red }
     }
     $ErrorActionPreference = $prevEAP
+    if (Test-Path $env:npm_config_cache) {
+        Remove-Item $env:npm_config_cache -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if (Test-Path $webuiServer) {
-        Write-Step "OK" "Hermes Web UI installed." "Green"
+        Write-Step "OK" "Hermes Web UI installed ($webUiSpec)." "Green"
     } else {
         Write-Step "WARN" "Hermes Web UI install failed (will retry on first launch)." "Yellow"
     }

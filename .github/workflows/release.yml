@@ -26,6 +26,13 @@ permissions:
 jobs:
   # --- Build Portable Packages ---
   portable-windows:
+    # GitHub's Windows runner is en-US, so Python encodes a piped stdout as
+    # cp1252 and dies on the first Chinese character. That killed the whole
+    # release job -- no zip, no release -- and cannot be reproduced on a
+    # Chinese Windows machine, where the codepage is GBK and it just works.
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -150,15 +157,24 @@ jobs:
           # Initialize data
           New-Item -ItemType Directory -Path "data/memory","data/skills","data/sessions","data/cron" -Force
 
-          # Create default config.yaml
+          # Ship the default as config.yaml.default, NOT config.yaml. The launcher
+          # copies it on first run. Shipping config.yaml itself made
+          # extracting a new zip over an existing install destroy the user's
+          # configuration -- and the verify step below asserted the very file
+          # that made it destructive.
           @"
           model:
             provider: ""
             model: ""
-          # SQLite WAL is not crash-safe on the exFAT/FAT32 filesystems USB drives
-          # ship with, and unplugging the drive is how this product usually gets
-          # closed. Upstream's auto-fallback only triggers when SQLite itself
-          # reports WAL unsupported, which exFAT does not.
+          # Read by the engine: hermes_state_wal.resolve_journal_mode()
+          # consults database.journal_mode before issuing any pragma.
+          # On this package it is not what decides the outcome, though --
+          # the bundled interpreter links a SQLite the engine's own
+          # is_sqlite_wal_reset_vulnerable() flags for the WAL-reset bug, so
+          # a new database is forced to DELETE regardless. This line is what
+          # keeps DELETE once the bundled SQLite is new enough (3.50.7+ /
+          # 3.51.3+) for that gate to stop firing. It does NOT downgrade an
+          # existing WAL database; the engine refuses to do that in place.
           database:
             journal_mode: "delete"
           # Gateway API server. Upstream reads this under platforms.*, not at the
@@ -176,7 +192,7 @@ jobs:
             enabled: true
           cron:
             enabled: true
-          "@ | Set-Content "data/config.yaml" -Encoding utf8
+          "@ | Set-Content "data/config.yaml.default" -Encoding utf8
 
       - name: Smoke test
         shell: pwsh
@@ -184,11 +200,11 @@ jobs:
           cd portable
           $py = "hermes/.venv/Scripts/python.exe"
 
-          Write-Host "=== [1/4] Python package imports ==="
+          Write-Host "=== [1/5] Python package imports ==="
           & $py -c "import hermes_cli.main, agent, gateway; print('imports OK')"
           if ($LASTEXITCODE -ne 0) { Write-Error "package import failed"; exit 1 }
 
-          Write-Host "=== [2/4] CLI entry point (plugin + logging init) ==="
+          Write-Host "=== [2/5] CLI entry point (plugin + logging init) ==="
           # --help exits before plugin discovery, so it misses crashes in that path.
           # `profile list` loads plugins and the logging stack -- where a host-Python
           # leak showed up as an access violation that --help sailed past.
@@ -200,11 +216,32 @@ jobs:
           if ($leak) { Write-Error "sys.path escapes the package: $($leak -join ', ')"; exit 1 }
           Write-Host "sys.path is self-contained"
 
-          Write-Host "=== [3/4] helper scripts compile ==="
-          & $py -m py_compile scripts/config-server.py scripts/diagnose.py
+          Write-Host "=== [3/5] helper scripts compile ==="
+          & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
           if ($LASTEXITCODE -ne 0) { Write-Error "helper script compile failed"; exit 1 }
 
-          Write-Host "=== [4/4] Web UI server starts and answers HTTP ==="
+          Write-Host "=== [4/5] regression tests ==="
+          # Saving from the config page used to truncate config.yaml, and the
+          # provider table drifted out of step with the engine's registry.
+          # Both failures reached the user as a 401 or a silent chat box.
+          & $py scripts/tests/test_config_merge.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "config merge test failed"; exit 1 }
+          & $py scripts/tests/test_provider_table.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "provider table test failed"; exit 1 }
+          & $py scripts/tests/test_first_login.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "first-login test failed"; exit 1 }
+          & $py scripts/tests/test_preflight.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "preflight test failed"; exit 1 }
+          & $py scripts/tests/test_diagnose_rules.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "diagnose rules test failed"; exit 1 }
+          & $py scripts/tests/test_script_hygiene.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "script hygiene test failed"; exit 1 }
+          & $py scripts/tests/test_default_config.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "default config test failed"; exit 1 }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
+          if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
+
+          Write-Host "=== [5/5] Web UI server starts and answers HTTP ==="
           $env:PORT = "8648"
           $env:HERMES_BIN = (Resolve-Path "hermes/.venv/Scripts/hermes.exe").Path
           $node = (Resolve-Path "runtime/node-win-x64/node.exe").Path
@@ -226,17 +263,107 @@ jobs:
         shell: pwsh
         run: |
           $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart('v') } else { "0.0.0-ci" }
+          # The one place that knows what release this is. Written into the
+          # package, never checked in: a clone has no VERSION file, and the
+          # launcher shows nothing rather than a number that might be wrong.
+          # (The site already learned that lesson -- it hard-coded a version
+          # once and advertised a delisted one for months.)
+          # The tag as written, "v0.4.2" -- what the releases page, the zip
+          # name and the user's own bug report all say. $version above has the
+          # v stripped because it goes inside the filename.
+          $label = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "0.0.0-ci" }
+          Set-Content -Path "portable/VERSION" -Value $label -Encoding ascii
           $zipName = "u-hermes-portable-windows-v${version}.zip"
+          # Compress-Archive has no exclude list, so anything sitting in
+          # portable/ ships. The launchers now keep their npm and uv download
+          # caches there rather than in %LOCALAPPDATA% on the user's machine,
+          # which is right at runtime and several hundred MB of dead weight
+          # in a release.
+          foreach ($junk in @("portable/.uv-cache", "portable/runtime/.npm-cache")) {
+            Remove-Item -Recurse -Force $junk -ErrorAction SilentlyContinue
+          }
           Compress-Archive -Path "portable/*" -DestinationPath $zipName -Force
           echo "ARTIFACT=$zipName" >> $env:GITHUB_ENV
+
+      - name: Verify the packaged artifact
+        shell: pwsh
+        run: |
+          # The smoke test above runs against the build directory. Anything
+          # that goes wrong at packaging time -- a file that never made it
+          # into the zip, an interpreter that lives outside the folder being
+          # zipped -- is invisible to it. Check what the user downloads.
+          $work = Join-Path $env:RUNNER_TEMP "verify-win"
+          Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+          Expand-Archive -Path $env:ARTIFACT -DestinationPath $work -Force
+
+          $py = Join-Path $work "hermes\.venv\Scripts\python.exe"
+          if (-not (Test-Path $py)) { Write-Error "the download has no Python at hermes/.venv/Scripts/python.exe"; exit 1 }
+          & $py -c "import hermes_cli.main, agent, gateway; print('imports OK from the extracted download')"
+          if ($LASTEXITCODE -ne 0) { Write-Error "the extracted package cannot import the engine"; exit 1 }
+
+          # Somebody who never opens the repo has to find instructions inside
+          # the zip: the repo README is not packaged and never has been.
+          $guide = Get-ChildItem $work -Filter "*使用说明*" -File
+          if (-not $guide) { Write-Error "no Chinese quick-start file in the zip"; exit 1 }
+          Write-Host "Quick-start shipped as: $($guide.Name)"
+
+          foreach ($needed in @(
+            "Windows-Start.bat", "Windows-Menu.bat", "Config.html",
+            "scripts\preflight.py", "scripts\wait-for.py", "scripts\config-server.py",
+            "scripts\protect-config.ps1", "versions.env", "data\config.yaml.default",
+            "VERSION"
+          )) {
+            if (-not (Test-Path (Join-Path $work $needed))) { Write-Error "missing from the zip: $needed"; exit 1 }
+          }
+          Write-Host "Packaged artifact verified."
 
       - name: Upload to Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
+          generate_release_notes: true
           files: ${{ env.ARTIFACT }}
+          body: |
+            ## U-Hermes ${{ github.ref_name }}
+
+            U盘自进化 AI 智能体 - 基于 Hermes Agent (Nous Research) 驱动
+
+            ### 下载
+
+            | 平台 | 文件 | 说明 |
+            |------|------|------|
+            | Windows 便携版 | `u-hermes-portable-windows-*.zip` | 解压到U盘或文件夹，运行 `Windows-Start.bat` |
+
+            Mac 版暂时没有。v0.4.0 / v0.4.1 附的 mac 压缩包打不开——里面的 Python
+            解释器被打包成了一个指向构建机才有的框架的副本，到用户的 Mac 上一运行就
+            报动态库找不到，启动脚本也修不回来。现在构建流程会在打包校验这一步直接失败，
+            不会再发出这样的包；等 mac 版能自带一份可搬迁的 Python 之后再重新上架。
+
+            ### 国内加速下载（GitHub 直连慢时使用）
+
+            - [Windows 加速下载](https://ghfast.top/https://github.com/FUDAHA99/U-hermes/releases/download/${{ github.ref_name }}/u-hermes-portable-windows-${{ github.ref_name }}.zip)
+
+            加速链接由公共服务提供，如失效可在官方下载链接前加上 `https://ghfast.top/`。
+
+            ### 首次使用
+
+            你需要先有一个 AI 模型服务商的 API 密钥（DeepSeek / Kimi / 智谱 / 通义 等），
+            这些服务按用量收费，没有密钥 U-Hermes 无法回答任何问题。
+
+            1. 解压后双击 `Windows-Start.bat`
+            2. 配置页面自动打开：选服务商 → 粘贴密钥 → 「测试连接」→ 「保存配置」
+            3. 回到黑窗口按任意键，界面就绪后浏览器自动打开
+
+            解压后的 `0-先看我-使用说明.txt` 里有完整说明和排错步骤。
+
+            ### 更新日志
+
+            查看 commit 记录了解详情。
 
   portable-mac:
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
     runs-on: macos-14  # ARM64
     steps:
       - uses: actions/checkout@v7
@@ -285,15 +412,24 @@ jobs:
           # Initialize data
           mkdir -p data/memory data/skills data/sessions data/cron
 
-          # Create default config.yaml
-          cat > data/config.yaml << 'CFGEOF'
+          # Ship the default as config.yaml.default, NOT config.yaml. The launcher
+          # copies it on first run. Shipping config.yaml itself made
+          # extracting a new zip over an existing install destroy the user's
+          # configuration -- and the verify step below asserted the very file
+          # that made it destructive.
+          cat > data/config.yaml.default << 'CFGEOF'
           model:
             provider: ""
             model: ""
-          # SQLite WAL is not crash-safe on the exFAT/FAT32 filesystems USB drives
-          # ship with, and unplugging the drive is how this product usually gets
-          # closed. Upstream's auto-fallback only triggers when SQLite itself
-          # reports WAL unsupported, which exFAT does not.
+          # Read by the engine: hermes_state_wal.resolve_journal_mode()
+          # consults database.journal_mode before issuing any pragma.
+          # On this package it is not what decides the outcome, though --
+          # the bundled interpreter links a SQLite the engine's own
+          # is_sqlite_wal_reset_vulnerable() flags for the WAL-reset bug, so
+          # a new database is forced to DELETE regardless. This line is what
+          # keeps DELETE once the bundled SQLite is new enough (3.50.7+ /
+          # 3.51.3+) for that gate to stop firing. It does NOT downgrade an
+          # existing WAL database; the engine refuses to do that in place.
           database:
             journal_mode: "delete"
           # Gateway API server. Upstream reads this under platforms.*, not at the
@@ -318,16 +454,25 @@ jobs:
           cd portable
           PY=hermes/.venv/bin/python
 
-          echo "=== [1/4] Python package imports ==="
+          echo "=== [1/5] Python package imports ==="
           "$PY" -c "import hermes_cli.main, agent, gateway; print('imports OK')"
 
-          echo "=== [2/4] hermes CLI entry point ==="
+          echo "=== [2/5] hermes CLI entry point ==="
           hermes/.venv/bin/hermes --help >/dev/null
 
-          echo "=== [3/4] helper scripts compile ==="
-          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py
+          echo "=== [3/5] helper scripts compile ==="
+          "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
 
-          echo "=== [4/4] Web UI server starts and answers HTTP ==="
+          echo "=== [4/5] regression tests ==="
+          "$PY" scripts/tests/test_config_merge.py
+          "$PY" scripts/tests/test_provider_table.py
+          "$PY" scripts/tests/test_first_login.py
+          "$PY" scripts/tests/test_preflight.py
+          "$PY" scripts/tests/test_diagnose_rules.py
+          "$PY" scripts/tests/test_script_hygiene.py
+          "$PY" scripts/tests/test_default_config.py
+
+          echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)
           test -n "$SERVER"
           PORT=8648 HERMES_BIN="$PWD/hermes/.venv/bin/hermes" \
@@ -345,41 +490,51 @@ jobs:
       - name: Package
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0-ci"; fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then LABEL="${GITHUB_REF_NAME}"; else LABEL="0.0.0-ci"; fi
+          echo "$LABEL" > portable/VERSION
           ZIP_NAME="u-hermes-portable-mac-v${VERSION}.zip"
-          cd portable && zip -r "../${ZIP_NAME}" . -x "*.uv-cache*"
+          # -y stores symlinks as symlinks. Without it zip silently follows
+          # them, so a venv whose interpreter lives outside portable/ turned
+          # into a copy of a bare binary with no stdlib behind it -- which
+          # looks like a complete package right up until someone runs it.
+          cd portable && zip -ryq "../${ZIP_NAME}" . -x "*.uv-cache*" ".npm-cache/*" "*/.npm-cache/*" "*/__pycache__/*" "*.log"
           echo "ARTIFACT=${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: Verify the packaged artifact
+        run: |
+          # The smoke test above runs against the build directory, where the
+          # venv can reach a Python that uv installed under the runner's home
+          # directory. Whether the *download* contains a usable interpreter is
+          # decided here, at packaging time, and was never checked.
+          WORK="$RUNNER_TEMP/verify-mac"
+          rm -rf "$WORK"; mkdir -p "$WORK"
+          unzip -q "$ARTIFACT" -d "$WORK"
+
+          PY="$WORK/hermes/.venv/bin/python"
+          if [ ! -e "$PY" ]; then
+            echo "FAIL: the download has no working Python at hermes/.venv/bin/python."
+            echo "      The venv's interpreter is outside portable/, so it was not packaged."
+            ls -l "$WORK/hermes/.venv/bin/" || true
+            exit 1
+          fi
+          REAL=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$PY")
+          case "$REAL" in
+            "$WORK"/*) echo "interpreter resolves inside the package: $REAL" ;;
+            *) echo "FAIL: the packaged interpreter resolves to $REAL, which is not part of the download."; exit 1 ;;
+          esac
+
+          "$PY" -c "import hermes_cli.main, agent, gateway; print('imports OK from the extracted download')"
+
+          ls "$WORK" | grep -q "使用说明" || { echo "FAIL: no Chinese quick-start file in the zip"; exit 1; }
+          for f in Mac-Start.command Config.html scripts/preflight.py scripts/wait-for.py \
+                   scripts/config-server.py versions.env data/config.yaml.default \
+                   VERSION; do
+            test -e "$WORK/$f" || { echo "FAIL: missing from the zip: $f"; exit 1; }
+          done
+          echo "Packaged artifact verified."
 
       - name: Upload to Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
-          generate_release_notes: true
           files: ${{ env.ARTIFACT }}
-          body: |
-            ## U-Hermes ${{ github.ref_name }}
-
-            U盘自进化 AI 智能体 - 基于 Hermes Agent (Nous Research) 驱动
-
-            ### 下载
-
-            | 平台 | 文件 | 说明 |
-            |------|------|------|
-            | Windows 便携版 | `u-hermes-portable-windows-*.zip` | 解压到U盘或文件夹，运行 `Windows-Start.bat` |
-            | Mac 便携版 | `u-hermes-portable-mac-*.zip` | 解压后运行 `bash Mac-Start.command` |
-
-            ### 国内加速下载（GitHub 直连慢时使用）
-
-            - [Windows 加速下载](https://ghfast.top/https://github.com/FUDAHA99/U-hermes/releases/download/${{ github.ref_name }}/u-hermes-portable-windows-${{ github.ref_name }}.zip)
-            - [Mac 加速下载](https://ghfast.top/https://github.com/FUDAHA99/U-hermes/releases/download/${{ github.ref_name }}/u-hermes-portable-mac-${{ github.ref_name }}.zip)
-
-            加速链接由公共服务提供，如失效可在官方下载链接前加上 `https://ghfast.top/`。
-
-            ### 首次使用
-
-            1. 双击启动脚本
-            2. 自动打开配置页面
-            3. 选择模型 → 输入 API Key → 点"测试连接"验证 → 保存 → 完成！
-
-            ### 更新日志
-
-            查看 commit 记录了解详情。

@@ -10,3 +10,6 @@ data/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Written into the release zip by CI, never checked in.
+VERSION

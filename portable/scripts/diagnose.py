@@ -4,6 +4,7 @@ U-Hermes 一键诊断
 检查运行环境、配置、服务端口、API 连通性和磁盘空间，
 并把最近的错误日志翻译成人话和解决建议。
 """
+import datetime
 import json
 import os
 import re
@@ -23,10 +24,29 @@ DATA_DIR = os.path.join(ROOT, "data")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.yaml")
 ENV_FILE = os.path.join(DATA_DIR, ".env")
 ERRORS_LOG = os.path.join(DATA_DIR, "logs", "errors.log")
+STATE_DB = os.path.join(DATA_DIR, "state.db")
+
+# 聊天记录超过这个大小就提示一句。U 盘常见 16-32 GB，几百 MB 的对话历史
+# 已经值得让人知道是什么占的地方了。
+STATE_DB_WARN_MB = 200
 
 OK = "[OK]"
 BAD = "[X] "
 WARN = "[!] "
+
+# 错误日志里多久以内算"最近"
+RECENT_DAYS = 7
+
+
+def line_time(line):
+    """日志行的时间戳，认不出来返回 None。"""
+    match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", line)
+    if not match:
+        return None
+    try:
+        return datetime.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
 
 # 错误日志分类表：正则 → (人话解释, 解决建议)
 ERROR_CLASSES = [
@@ -57,6 +77,42 @@ ERROR_CLASSES = [
     (r"(error_type=NotFoundError|HTTP 404|Error code: 404)",
      "所选的模型名称或接口地址在服务商那边找不到。",
      "去配置页核对模型名称和 API 地址是否正确。"),
+    (r"(database\.journal_mode=delete is configured but the on-disk database is already WAL"
+     r"|could not verify journal mode before applying configured journal_mode=delete)",
+     "聊天记录数据库还停在 WAL 日志模式。配置里要求用 delete 模式，但引擎不会在运行中切换"
+     "（有连接开着时切换会损坏数据库），所以每次启动都记一条。数据库本身读写正常。",
+     "先彻底退出 U-Hermes（任务管理器里别留下 python.exe / node.exe）。如果每次启动还报，"
+     "按「0-先看我-使用说明.txt」第八节最后一段做一次离线转换。转换完成之前，"
+     "拔 U 盘一定要先「安全弹出」，否则 -wal 文件里没写回的对话会丢。"),
+    (r"(Refusing to start: API_SERVER_KEY"
+     r"|API server rejected invalid API key"
+     r"|no profile-scoped API_SERVER_KEY is configured"
+     r"|No API key configured \(API_SERVER_KEY)",
+     "AI 引擎的本地接口密钥缺失、太短（少于 16 位）或和调用方对不上：引擎要么拒绝启动"
+     "（8642 端口起不来），要么把每个请求挡回 401。",
+     "重新运行 Windows-Start.bat，它会调用 scripts\\protect-config.ps1 在 data\\config.yaml 的 "
+     "platforms.api_server.extra.key 下补一个强密钥。不要手工改这一项。"),
+    # The same sentence prefix carries three different outcomes -- the engine
+    # appends one of _WAL_RESET_BUG_ACTIONS to it -- and only the first means
+    # "handled". Matching the prefix alone told the two populations that must
+    # act that there was nothing to do.
+    (r"vulnerable to the WAL-reset corruption bug.*"
+     r"using journal_mode=DELETE instead of enabling WAL",
+     "[这条不是故障] 引擎发现自带的 SQLite 版本有个已知缺陷，于是主动改用更保守的"
+     "日志模式来避开它——这正是我们想要的行为，U 盘被拔掉时也更不容易丢数据。",
+     "不用处理。等上游换成新版 SQLite 后这条会自己消失。"),
+    # The other two: the database is STILL in WAL, on a SQLite build the
+    # engine itself calls corruption-prone. This is the state 使用说明 第八节
+    # exists for, and it is what an upgraded install hits -- its preserved
+    # config.yaml has no database: block, so the delete-was-overridden entry
+    # above never fires and this line is the only warning the user gets.
+    (r"vulnerable to the WAL-reset corruption bug.*"
+     r"(is already in WAL mode|journal mode could not be verified)",
+     "数据库还在 WAL 日志模式，而自带的 SQLite 版本对这个模式有已知缺陷。引擎不敢在"
+     "运行中切换（有连接开着时切换会损坏数据库），所以保持原样。这种状态下拔 U 盘"
+     "丢数据的风险明显更高。",
+     "照「0-先看我-使用说明.txt」第八节最后一段做一次离线转换（先备份整个 data 文件夹）。"
+     "在转换完成之前，拔 U 盘务必先「安全弹出」。"),
 ]
 
 
@@ -98,28 +154,56 @@ def check_port(port):
 
 
 def call_provider(base_url, api_key, model):
-    """极简 chat/completions 调用，返回 (ok, 中文消息)。"""
+    """极简调用，返回 (ok, 中文消息)。
+
+    按地址判断协议：MiniMax 的 /anthropic、Kimi 的 /coding 说的是 Anthropic
+    Messages，用 /chat/completions 去探会拿到 404，显示成"模型名写错了"。
+    """
     url = base_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 5,
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + api_key,
-    }, method="POST")
+    anthropic = (
+        "/anthropic" in url
+        or url.endswith("/coding")
+        or "api.anthropic.com" in url
+    )
+    if anthropic:
+        req_url = url + "/v1/messages"
+        payload = json.dumps({
+            "model": model,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        ok_field = "content"
+    else:
+        req_url = url if url.endswith("/chat/completions") else url + "/chat/completions"
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 5,
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + api_key,
+        }
+        ok_field = "choices"
+
+    req = urllib.request.Request(req_url, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
-            if isinstance(data, dict) and data.get("choices"):
+            if isinstance(data, dict) and data.get(ok_field):
                 return True, "连接成功，模型响应正常。"
             return False, "服务已连通，但返回内容异常，请核对模型名称。"
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             return False, "API 密钥无效或无权限（HTTP %d），请更新密钥。" % e.code
+        if e.code == 402:
+            # 这是最常见的一种"明明配好了却不回话"。密钥是对的，只是没钱了。
+            return False, "账户余额不足（HTTP 402）。密钥本身有效，请到服务商官网充值。"
         if e.code == 404:
             return False, "接口地址或模型名称不存在（HTTP 404）。"
         if e.code == 429:
@@ -156,11 +240,31 @@ def resolve_provider(cfg, ref, env):
     return None
 
 
+
+
+def release_version():
+    """The tag this package was cut from, or "" when running from a clone.
+
+    Written into the zip by .github/workflows/release.yml. Deliberately
+    absent from the repository: showing nothing beats showing a number that
+    might be wrong.
+    """
+    try:
+        with open(os.path.join(ROOT, "VERSION"), encoding="utf-8", errors="replace") as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
 def main():
     print()
     print("  ==============================================")
     print("    U-Hermes 一键诊断")
     print("  ==============================================")
+    # This output is what people paste into a bug report, so it has to say
+    # which build produced it.
+    version = release_version()
+    print("    版本: %s" % (version or "开发版（未打包）"))
 
     problems = []
 
@@ -242,8 +346,10 @@ def main():
 
     # 5. 磁盘空间
     section("磁盘空间")
+    free_bytes = None
     try:
         usage = shutil.disk_usage(ROOT)
+        free_bytes = usage.free
         free_gb = usage.free / (1024 ** 3)
         if free_gb < 1:
             print("  %s 剩余空间仅 %.1f GB，可能影响运行" % (WARN, free_gb))
@@ -252,6 +358,34 @@ def main():
             print("  %s 剩余空间 %.1f GB" % (OK, free_gb))
     except OSError:
         print("  %s 无法读取磁盘信息" % WARN)
+
+    # 聊天记录只增不减，产品里以前没有任何清理入口 —— U 盘被自己的历史
+    # 记录塞满，而用户看不出是什么占的地方。
+    #
+    # 这里只看文件大小，不打开数据库：以只读方式连接一个 WAL 数据库，
+    # SQLite 仍然会在 data\ 下创建 -wal / -shm，写保护的 U 盘上会直接失败。
+    try:
+        db_bytes = os.path.getsize(STATE_DB)
+        for side in ("-wal", "-shm"):
+            if os.path.exists(STATE_DB + side):
+                db_bytes += os.path.getsize(STATE_DB + side)
+        db_mb = db_bytes / (1024 * 1024)
+        if db_mb < STATE_DB_WARN_MB:
+            print("  %s 聊天记录 %.0f MB" % (OK, db_mb))
+        else:
+            print("  %s 聊天记录已占 %.0f MB（只增不减）" % (WARN, db_mb))
+            print("       用 Windows-Menu.bat 的 [7] 清理聊天记录 可以释放。")
+            # 整理时要临时占用和数据库差不多大的空间，剩余空间不够的话
+            # 连清理都跑不动 —— 这种情况必须写进结论里。
+            if free_bytes is not None and free_bytes < db_bytes:
+                problems.append(
+                    "聊天记录已 %.0f MB，而剩余空间不足以整理它。请先把 "
+                    "data\\state.db 复制到别处备份，腾出至少 %.0f MB 再清理。"
+                    % (db_mb, db_mb))
+            elif db_mb >= 500:
+                problems.append("聊天记录已 %.0f MB，建议用菜单 [7] 清理。" % db_mb)
+    except OSError:
+        pass
 
     # 6. 最近错误分析
     section("最近错误分析")
@@ -262,10 +396,25 @@ def main():
                 f.seek(max(0, size - 64 * 1024))
                 tail = f.read().decode("utf-8", "replace")
             lines = tail.splitlines()[-200:]
-            found = []  # (最后出现行号, 次数, 解释, 建议)
+
+            # 只看最近这些天。以前没有这一步，几个月前的旧错误会被当成
+            # "最近"报出来，读的人以为刚刚又出事了。
+            cutoff = datetime.datetime.now() - datetime.timedelta(days=RECENT_DAYS)
+            recent, stale = set(), 0
+            for i, line in enumerate(lines):
+                stamp = line_time(line)
+                if stamp is None or stamp >= cutoff:
+                    recent.add(i)  # 没有时间戳就无法判断新旧，保留
+                else:
+                    stale += 1
+
+            found = []       # (最后出现行号, 次数, 时间, 解释, 建议)
+            matched = set()
             for pattern, meaning, advice in ERROR_CLASSES:
                 rx = re.compile(pattern)
                 hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+                matched.update(hits)
+                hits = [i for i in hits if i in recent]
                 if hits:
                     ts_match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", lines[hits[-1]])
                     ts = ts_match.group(1) if ts_match else "时间未知"
@@ -276,7 +425,19 @@ def main():
                     print("  %s %s（最近 %s，共 %d 次）" % (WARN, meaning, ts, count))
                     print("       建议: %s" % advice)
             else:
-                print("  %s 最近日志中没有已知类型的错误" % OK)
+                print("  %s 最近 %d 天没有已知类型的错误" % (OK, RECENT_DAYS))
+
+            # 不认识的错误以前是直接丢掉的，于是日志里明明有几十行报错，
+            # 诊断却说"一切正常"。认不出来也要让人看见原文。
+            unknown = [i for i in sorted(recent) if i not in matched and lines[i].strip()]
+            if unknown:
+                print("  %s 另有 %d 行错误不属于已知类型，最近 3 条原文：" % (WARN, len(unknown)))
+                for i in unknown[-3:]:
+                    print("       %s" % lines[i].strip()[:160])
+                print("       看不懂的话，把这几行连同 data\\logs\\errors.log")
+                print("       发到 https://github.com/FUDAHA99/U-hermes/issues")
+            if stale:
+                print("  %s 另有 %d 行 %d 天前的旧错误，已忽略。" % (OK, stale, RECENT_DAYS))
         except OSError:
             print("  %s 无法读取错误日志" % WARN)
     else:
