@@ -48,6 +48,10 @@ $pythonVersion = Pin "PYTHON_EMBED_VERSION" "3.13.15"
 $nodeVersion   = Pin "NODE_VERSION"         "v24.21.0"
 $uvVersion     = Pin "UV_VERSION"           "0.12.16"
 $agentRef      = Pin "HERMES_AGENT_REF"     ""
+# Unpinned until now: setup.ps1 installed whatever hermes-web-ui was newest
+# that morning, while release.yml installed the pin. Two people running the
+# same commit got two different products.
+$webUiVersion  = Pin "HERMES_WEB_UI_VERSION" ""
 if ($env:CANARY -eq "true") {
     $agentRef = ""
     Write-Host "  [i] CANARY: building against hermes-agent HEAD" -ForegroundColor Cyan
@@ -419,12 +423,19 @@ if (-not (Test-Path $webuiServer)) {
     $npmCmd = Join-Path $nodeDir "npm.cmd"
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $npmCmd install -g hermes-web-ui --prefix $nodeDir 2>&1 | ForEach-Object {
+    $webUiSpec = if ($webUiVersion) { "hermes-web-ui@$webUiVersion" } else { "hermes-web-ui" }
+    if ($env:CANARY -eq "true") { $webUiSpec = "hermes-web-ui@latest" }
+    # Cache on the stick, not in %LOCALAPPDATA% on whoever's machine this is.
+    $env:npm_config_cache = Join-Path $runtimeDir ".npm-cache"
+    & $npmCmd install -g $webUiSpec --prefix $nodeDir 2>&1 | ForEach-Object {
         if ($_ -match "error|Error|ERROR") { Write-Host "    $_" -ForegroundColor Red }
     }
     $ErrorActionPreference = $prevEAP
+    if (Test-Path $env:npm_config_cache) {
+        Remove-Item $env:npm_config_cache -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if (Test-Path $webuiServer) {
-        Write-Step "OK" "Hermes Web UI installed." "Green"
+        Write-Step "OK" "Hermes Web UI installed ($webUiSpec)." "Green"
     } else {
         Write-Step "WARN" "Hermes Web UI install failed (will retry on first launch)." "Yellow"
     }

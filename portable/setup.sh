@@ -1,7 +1,15 @@
 #!/bin/bash
 # ============================================================================
 # U-Hermes Portable Setup Script (Mac / Linux)
-# Downloads: Python 3.11 + uv + Hermes Agent + dependencies
+# Downloads: uv + Node + Hermes Agent + dependencies.
+#
+# NOT Python. There is no install_python step here and never has been: the
+# venv is built with `uv venv --python 3.11`, which uses whatever uv can
+# find or download on the machine. That interpreter lives OUTSIDE portable/,
+# which is why the packaged mac build is not self-contained and the macOS
+# download is currently delisted. The Windows job downloads an embeddable
+# interpreter into runtime/python-win-x64; this needs the same treatment
+# with a python-build-standalone tarball before mac can ship again.
 # All downloads use China mirrors where possible.
 # ============================================================================
 
@@ -21,9 +29,29 @@ PYPI_MIRROR="${PYPI_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 NODE_MIRROR="${NODE_MIRROR:-https://npmmirror.com/mirrors/node}"
 UV_MIRROR="${UV_MIRROR:-https://github.com/astral-sh/uv/releases/download}"
 
+# Keep uv's download cache on the stick. Its default is under the user's home
+# directory, so setting up on a borrowed machine left a few hundred MB there
+# -- on a product whose promise is that you pull the stick out and walk away.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$SCRIPT_DIR/.uv-cache}"
+
 # Detect platform
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+
+# Where Node lands. This used to be a `local node_dir` inside install_node(),
+# while the Web UI step at the bottom of the file read a global $NODE_DIR that
+# was never assigned -- so it looked for the server under /lib/node_modules,
+# never found it, looked for npm at /bin/npm, and skipped the install with
+# "npm not found" on every single run.
+if [ "$OS" = "Darwin" ]; then
+    if [ "$ARCH" = "arm64" ]; then
+        NODE_DIR="$RUNTIME_DIR/node-mac-arm64"
+    else
+        NODE_DIR="$RUNTIME_DIR/node-mac-x64"
+    fi
+else
+    NODE_DIR="$RUNTIME_DIR/node-linux-x64"
+fi
 
 # ============================================================================
 # Helpers
@@ -135,16 +163,7 @@ install_uv() {
 # ============================================================================
 
 install_node() {
-    local node_dir
-    if [ "$OS" = "Darwin" ]; then
-        if [ "$ARCH" = "arm64" ]; then
-            node_dir="$RUNTIME_DIR/node-mac-arm64"
-        else
-            node_dir="$RUNTIME_DIR/node-mac-x64"
-        fi
-    else
-        node_dir="$RUNTIME_DIR/node-linux-x64"
-    fi
+    local node_dir="$NODE_DIR"
 
     if [ -f "$node_dir/bin/node" ] && [ -z "$FORCE" ]; then
         ok "Node.js already installed."
@@ -233,16 +252,31 @@ install_dependencies() {
     local venv_dir="$HERMES_DIR/.venv"
     local venv_python="$venv_dir/bin/python"
 
-    if [ -f "$venv_python" ] && [ -z "$FORCE" ]; then
+    # "Exists" is not "works", and the whole point of the launcher calling
+    # us is that it already decided the interpreter does not run. Gating on
+    # [ -f ] here made Mac-Start.command's "rebuilding..." path a no-op: it
+    # printed the message, we said "already exists", and the launcher failed
+    # the same check again. Nothing in the tree ever sets FORCE, so that was
+    # a permanent dead end.
+    if [ -z "$FORCE" ] && [ -x "$venv_python" ]        && "$venv_python" -c "import sys" >/dev/null 2>&1; then
         ok "Virtual environment already exists."
         return
+    fi
+    if [ -e "$venv_dir" ]; then
+        warn "Rebuilding the virtual environment (the one present will not run)."
+        rm -rf "$venv_dir"
     fi
 
     info "[4/4] Installing dependencies (may take a few minutes)..."
 
     # Create venv with Python 3.11 (uv will download if needed)
     info "Creating virtual environment..."
-    "$uv_exe" venv "$venv_dir" --python 3.11 2>/dev/null || "$uv_exe" venv "$venv_dir"
+    # stderr kept: when the pinned interpreter cannot be had, the reason is
+    # the only thing that tells you whether the fallback venv is usable.
+    if ! "$uv_exe" venv "$venv_dir" --python 3.11; then
+        warn "No Python 3.11 available; falling back to whatever uv picks."
+        "$uv_exe" venv "$venv_dir"
+    fi
 
     # Install with China mirror
     info "Installing Hermes Agent packages (China mirror)..."
@@ -253,7 +287,14 @@ install_dependencies() {
     # since Jul 2026 their setup.py refuses to build a wheel without it.
     # Extras: `cli` was removed upstream; pty/cron are no-op aliases now.
     export HERMES_NIX_BUILD=1
-    "$uv_exe" pip install "$agent_dir[pty,mcp,cron,messaging]" --python "$venv_python" 2>&1 | tail -5
+    # No `| tail -5`: a pipeline reports the exit status of its LAST command,
+    # so `set -e` could not see a failed install and setup.sh went on to
+    # report success over a half-built venv.
+    if ! "$uv_exe" pip install "$agent_dir[pty,mcp,cron,messaging]" --python "$venv_python"; then
+        unset UV_INDEX_URL
+        err "Installing the Hermes Agent packages failed (output above)."
+        return 1
+    fi
 
     # Verify
     if "$venv_python" -c "import agent; print('ok')" 2>/dev/null | grep -q "ok"; then
@@ -276,53 +317,36 @@ initialize_data() {
     ensure_dir "$DATA_DIR/sessions"
     ensure_dir "$DATA_DIR/cron"
 
+    # One shape, in one place. This function used to carry a fourth
+    # variant of the default config -- a `providers:` block the engine does
+    # not read, `api_server:` at the top level so the gateway got no port or
+    # key, `skills.extra_dirs` instead of `external_dirs` so the bundled
+    # Chinese skills never loaded, a `gateway.platforms` list nothing reads,
+    # and the dead api.minimax.chat endpoint. Commit 1b16ad5 fixed exactly
+    # that text in setup.ps1 and missed this copy; worse, this one runs
+    # BEFORE Mac-Start.command's config.yaml.default copy, so it won.
     local config_file="$DATA_DIR/config.yaml"
+    if [ ! -f "$config_file" ] && [ -f "$DATA_DIR/config.yaml.default" ]; then
+        cp "$DATA_DIR/config.yaml.default" "$config_file"
+    fi
     if [ ! -f "$config_file" ]; then
         cat > "$config_file" << 'EOF'
-# U-Hermes Configuration
-# Docs: https://hermes-agent.nousresearch.com/docs/user-guide/configuration
-
 model:
   provider: ""
   model: ""
-  # Uncomment and fill in your preferred provider:
-  # provider: "deepseek"
-  # model: "deepseek-chat"
-
-providers:
-  deepseek:
-    api_key: ""
-    base_url: "https://api.deepseek.com/v1"
-  kimi:
-    api_key: ""
-    base_url: "https://api.moonshot.cn/v1"
-  qwen:
-    api_key: ""
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  glm:
-    api_key: ""
-    base_url: "https://open.bigmodel.cn/api/paas/v4"
-  minimax:
-    api_key: ""
-    base_url: "https://api.minimax.chat/v1"
-  doubao:
-    api_key: ""
-    base_url: "https://ark.cn-beijing.volces.com/api/v3"
-
-api_server:
-  extra:
-    port: 8642
-
-gateway:
-  platforms: []
-
+database:
+  journal_mode: "delete"
+platforms:
+  api_server:
+    enabled: true
+    extra:
+      port: 8642
+      host: 127.0.0.1
 skills:
-  extra_dirs:
+  external_dirs:
     - "../skills-cn"
-
 memory:
   enabled: true
-
 cron:
   enabled: true
 EOF
@@ -344,13 +368,29 @@ install_node
 install_hermes_source
 install_dependencies "$UV_EXE" "$AGENT_DIR"
 
+# Before the Web UI, not after: the agent is usable without a browser UI,
+# and an npm failure used to leave the user with no data directory at all.
+initialize_data
+
 # Install Hermes Web UI (npm package)
 WEBUI_SERVER="$NODE_DIR/lib/node_modules/hermes-web-ui/dist/server/index.js"
 if [ ! -f "$WEBUI_SERVER" ]; then
     info "Installing Hermes Web UI..."
     NPM_CMD="$NODE_DIR/bin/npm"
     if [ -x "$NPM_CMD" ]; then
-        "$NPM_CMD" install -g hermes-web-ui --prefix "$NODE_DIR" 2>/dev/null
+        # Pinned, and stderr left on screen. Unpinned meant every setup built
+        # a different product from the one release.yml packages; 2>/dev/null
+        # meant the most common failure (no network) printed nothing at all.
+        WEBUI_SPEC="hermes-web-ui"
+        [ -n "${HERMES_WEB_UI_VERSION:-}" ] && WEBUI_SPEC="hermes-web-ui@${HERMES_WEB_UI_VERSION}"
+        # `if` so set -e does not abort here. npm is the only download in
+        # this file with no China mirror behind it, so failing is the LIKELY
+        # case for this audience -- and an abort would skip the cache
+        # cleanup, the retry message, and initialize_data below it.
+        if npm_config_cache="$RUNTIME_DIR/.npm-cache"            "$NPM_CMD" install -g "$WEBUI_SPEC" --prefix "$NODE_DIR"; then
+            :
+        fi
+        rm -rf "$RUNTIME_DIR/.npm-cache"
         if [ -f "$WEBUI_SERVER" ]; then
             ok "Hermes Web UI installed."
         else
@@ -362,8 +402,6 @@ if [ ! -f "$WEBUI_SERVER" ]; then
 else
     ok "Hermes Web UI already installed."
 fi
-
-initialize_data
 
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
