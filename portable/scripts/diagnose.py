@@ -209,6 +209,17 @@ def main():
     # which build produced it.
     version = release_version()
     print("    版本: %s" % (version or "开发版（未打包）"))
+    # Right under the version, because the first question about any bug
+    # report is which build produced it -- and the second is whether that
+    # build is the one we ship.
+    try:
+        import version_check
+        for label, _k, pinned, installed, ok in version_check.survey():
+            if ok is False:
+                print("    [!] %s 装的是 %s，发布版钉的是 %s"
+                      % (label, installed, pinned))
+    except Exception:
+        pass
 
     problems = []
 

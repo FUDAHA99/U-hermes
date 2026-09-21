@@ -283,43 +283,20 @@ def print_workspace(data_dir):
 
 
 def warn_on_engine_drift():
-    """Say so when the installed engine is not the one the release pins.
+    """Say so when this install is not the one versions.env pins.
 
-    There was nothing anywhere that told a developer this. setup.ps1 cloned
-    hermes-agent from main while release.yml cloned HERMES_AGENT_REF, so the
-    local engine sat four months behind the shipped one and every conclusion
-    drawn by reading it described a product nobody receives. Cheap to check,
-    and silent whenever it cannot tell.
+    Was engine-only, which turned out to be a fifth of the problem: on the
+    machine this was rewritten on, all five pinned components had drifted
+    and nothing said so. The name is kept because the launcher calls it.
     """
-    here = os.path.dirname(os.path.abspath(__file__))
-    portable = os.path.dirname(here)
-    pin = ""
     try:
-        with io.open(os.path.join(portable, "versions.env"), encoding="utf-8") as f:
-            for line in f:
-                if line.strip().startswith("HERMES_AGENT_REF"):
-                    pin = line.split("=", 1)[1].strip()
-                    break
-    except OSError:
+        import version_check
+    except ImportError:
         return
-    if not pin:
-        return
-    agent_dir = os.path.join(portable, "hermes", "hermes-agent")
-    if not os.path.isdir(os.path.join(agent_dir, ".git")):
-        return  # a release zip may not carry .git; nothing to compare
     try:
-        import subprocess
-        actual = subprocess.run(
-            ["git", "-C", agent_dir, "describe", "--tags", "--always"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
+        version_check.report(version_check.survey(), say=say)
     except Exception:
-        return
-    if actual and actual != pin:
-        say("[!] 本机装的 AI 引擎是 %s，而发布版本钉的是 %s。" % (actual, pin),
-            "    两者行为可能不同，本地测出来的结论不代表用户拿到的版本。",
-            "    重新装成钉住的版本：portable\\setup.ps1 -Force")
-
+        return  # a version check is never a reason to fail a launch
 
 def main(argv):
     if "--print-workspace" in argv:
