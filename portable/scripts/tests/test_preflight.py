@@ -27,6 +27,7 @@ SCRIPTS = os.path.dirname(HERE)
 PREFLIGHT = os.path.join(SCRIPTS, "preflight.py")
 SANDBOX = os.path.join(HERE, "_tmp_preflight")
 
+NL = chr(10)
 NEEDS_CONFIG = 10
 FAILURES = []
 
@@ -37,7 +38,29 @@ def check(condition, label):
         FAILURES.append(label)
 
 
-def run(config=None, env_file=None, args=(), extra_path=None):
+# Blocking PyYAML by putting a raising yaml.py on PYTHONPATH worked on a
+# developer machine and did NOT work under the packaged interpreter in CI:
+# `import yaml` still succeeded, preflight took its ordinary path, and the
+# two checks that matter silently tested nothing. A meta_path hook does not
+# depend on sys.path order, on site-packages layout, or on whether something
+# imported yaml before us.
+BLOCK_YAML = NL.join([
+    "import sys, runpy",
+    "class _NoYaml:",
+    "    def find_spec(self, name, path=None, target=None):",
+    "        if name == 'yaml' or name.startswith('yaml.'):",
+    "            raise ImportError('no pyyaml in this interpreter')",
+    "        return None",
+    "for _m in [m for m in sys.modules if m == 'yaml' or m.startswith('yaml.')]:",
+    "    del sys.modules[_m]",
+    "sys.meta_path.insert(0, _NoYaml())",
+    "sys.argv = sys.argv[1:]",
+    "runpy.run_path(sys.argv[0], run_name='__main__')",
+    "",
+])
+
+
+def run(config=None, env_file=None, args=(), no_yaml=False):
     """Run preflight against a throwaway data dir; return (code, output)."""
     shutil.rmtree(SANDBOX, ignore_errors=True)
     data = os.path.join(SANDBOX, "data")
@@ -56,15 +79,12 @@ def run(config=None, env_file=None, args=(), extra_path=None):
     for name in list(environ):
         if name.endswith("_API_KEY"):
             del environ[name]
-    if extra_path:
-        environ["PYTHONPATH"] = extra_path
-    else:
-        environ.pop("PYTHONPATH", None)
+    environ.pop("PYTHONPATH", None)
 
-    proc = subprocess.run(
-        [sys.executable, PREFLIGHT] + list(args) + [data],
-        capture_output=True, env=environ,
-    )
+    argv = [sys.executable]
+    argv += ["-c", BLOCK_YAML] if no_yaml else []
+    argv += [PREFLIGHT] + list(args) + [data]
+    proc = subprocess.run(argv, capture_output=True, env=environ)
     out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
     # preflight ends in a blanket `except Exception -> exit 0`, so a crash
     # anywhere in it looks exactly like a clean pass. Nothing this suite
@@ -73,8 +93,6 @@ def run(config=None, env_file=None, args=(), extra_path=None):
         raise AssertionError("preflight crashed and failed open:" + chr(10) + out)
     return proc.returncode, out
 
-
-NL = chr(10)
 
 DEEPSEEK = 'model:' + NL + '  provider: "deepseek"' + NL + '  default: "deepseek-chat"' + NL
 
@@ -104,22 +122,25 @@ def test_a_python_without_pyyaml_does_not_accuse_the_config():
     packaged one reported a corrupt config and blocked the launch over a
     file that was perfectly fine.
     """
-    blocker = os.path.join(HERE, "_tmp_noyaml")
-    shutil.rmtree(blocker, ignore_errors=True)
-    os.makedirs(blocker)
-    with io.open(os.path.join(blocker, "yaml.py"), "w", encoding="utf-8") as f:
-        f.write('raise ImportError("no pyyaml in this interpreter")' + NL)
+    # Prove the block actually takes effect before asserting anything about
+    # what preflight does under it -- the previous technique did not, and
+    # these two checks passed for the wrong reason for one CI run.
+    proof = subprocess.run(
+        [sys.executable, "-c", BLOCK_YAML.replace(
+            "runpy.run_path(sys.argv[0], run_name='__main__')",
+            "import yaml")],
+        capture_output=True)
+    check(proof.returncode != 0 and b"ImportError" in proof.stderr,
+          "the PyYAML block is actually in force")
 
-    code, out = run(config=DEEPSEEK, extra_path=blocker)
+    code, out = run(config=DEEPSEEK, no_yaml=True)
     check(code == 0, "a missing PyYAML does not block the launch")
     check("PyYAML" in out, "...it says which piece is missing")
     check("格式有误" not in out and "备份" not in out,
           "...and it does not claim the config is broken")
 
-    code, out = run(config=DEEPSEEK, args=("--print-workspace",), extra_path=blocker)
+    code, out = run(config=DEEPSEEK, args=("--print-workspace",), no_yaml=True)
     check(code == 0, "--print-workspace survives a missing PyYAML")
-
-    shutil.rmtree(blocker, ignore_errors=True)
 
 
 def test_key_presence():
