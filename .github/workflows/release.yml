@@ -26,6 +26,13 @@ permissions:
 jobs:
   # --- Build Portable Packages ---
   portable-windows:
+    # GitHub's Windows runner is en-US, so Python encodes a piped stdout as
+    # cp1252 and dies on the first Chinese character. That killed the whole
+    # release job -- no zip, no release -- and cannot be reproduced on a
+    # Chinese Windows machine, where the codepage is GBK and it just works.
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -213,7 +220,7 @@ jobs:
           & $py -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
           if ($LASTEXITCODE -ne 0) { Write-Error "helper script compile failed"; exit 1 }
 
-          Write-Host "=== [4/5] config page regression tests ==="
+          Write-Host "=== [4/5] regression tests ==="
           # Saving from the config page used to truncate config.yaml, and the
           # provider table drifted out of step with the engine's registry.
           # Both failures reached the user as a 401 or a silent chat box.
@@ -223,6 +230,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "provider table test failed"; exit 1 }
           & $py scripts/tests/test_first_login.py
           if ($LASTEXITCODE -ne 0) { Write-Error "first-login test failed"; exit 1 }
+          & $py scripts/tests/test_preflight.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "preflight test failed"; exit 1 }
+          & $py scripts/tests/test_diagnose_rules.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "diagnose rules test failed"; exit 1 }
+          & $py scripts/tests/test_script_hygiene.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "script hygiene test failed"; exit 1 }
+          & $py scripts/tests/test_default_config.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "default config test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
 
@@ -248,7 +263,25 @@ jobs:
         shell: pwsh
         run: |
           $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart('v') } else { "0.0.0-ci" }
+          # The one place that knows what release this is. Written into the
+          # package, never checked in: a clone has no VERSION file, and the
+          # launcher shows nothing rather than a number that might be wrong.
+          # (The site already learned that lesson -- it hard-coded a version
+          # once and advertised a delisted one for months.)
+          # The tag as written, "v0.4.2" -- what the releases page, the zip
+          # name and the user's own bug report all say. $version above has the
+          # v stripped because it goes inside the filename.
+          $label = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "0.0.0-ci" }
+          Set-Content -Path "portable/VERSION" -Value $label -Encoding ascii
           $zipName = "u-hermes-portable-windows-v${version}.zip"
+          # Compress-Archive has no exclude list, so anything sitting in
+          # portable/ ships. The launchers now keep their npm and uv download
+          # caches there rather than in %LOCALAPPDATA% on the user's machine,
+          # which is right at runtime and several hundred MB of dead weight
+          # in a release.
+          foreach ($junk in @("portable/.uv-cache", "portable/runtime/.npm-cache")) {
+            Remove-Item -Recurse -Force $junk -ErrorAction SilentlyContinue
+          }
           Compress-Archive -Path "portable/*" -DestinationPath $zipName -Force
           echo "ARTIFACT=$zipName" >> $env:GITHUB_ENV
 
@@ -277,7 +310,8 @@ jobs:
           foreach ($needed in @(
             "Windows-Start.bat", "Windows-Menu.bat", "Config.html",
             "scripts\preflight.py", "scripts\wait-for.py", "scripts\config-server.py",
-            "scripts\protect-config.ps1", "versions.env", "data\config.yaml.default"
+            "scripts\protect-config.ps1", "versions.env", "data\config.yaml.default",
+            "VERSION"
           )) {
             if (-not (Test-Path (Join-Path $work $needed))) { Write-Error "missing from the zip: $needed"; exit 1 }
           }
@@ -299,7 +333,11 @@ jobs:
             | 平台 | 文件 | 说明 |
             |------|------|------|
             | Windows 便携版 | `u-hermes-portable-windows-*.zip` | 解压到U盘或文件夹，运行 `Windows-Start.bat` |
-            | Mac 便携版（实验性） | `u-hermes-portable-mac-*.zip` | 解压后运行 `bash Mac-Start.command`。构建校验未通过时不会附上这个文件。 |
+
+            Mac 版暂时没有。v0.4.0 / v0.4.1 附的 mac 压缩包打不开——里面的 Python
+            解释器被打包成了一个指向构建机才有的框架的副本，到用户的 Mac 上一运行就
+            报动态库找不到，启动脚本也修不回来。现在构建流程会在打包校验这一步直接失败，
+            不会再发出这样的包；等 mac 版能自带一份可搬迁的 Python 之后再重新上架。
 
             ### 国内加速下载（GitHub 直连慢时使用）
 
@@ -323,6 +361,9 @@ jobs:
             查看 commit 记录了解详情。
 
   portable-mac:
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
     runs-on: macos-14  # ARM64
     steps:
       - uses: actions/checkout@v7
@@ -422,10 +463,14 @@ jobs:
           echo "=== [3/5] helper scripts compile ==="
           "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py
 
-          echo "=== [4/5] config page regression tests ==="
+          echo "=== [4/5] regression tests ==="
           "$PY" scripts/tests/test_config_merge.py
           "$PY" scripts/tests/test_provider_table.py
           "$PY" scripts/tests/test_first_login.py
+          "$PY" scripts/tests/test_preflight.py
+          "$PY" scripts/tests/test_diagnose_rules.py
+          "$PY" scripts/tests/test_script_hygiene.py
+          "$PY" scripts/tests/test_default_config.py
 
           echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)
@@ -445,12 +490,14 @@ jobs:
       - name: Package
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0-ci"; fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then LABEL="${GITHUB_REF_NAME}"; else LABEL="0.0.0-ci"; fi
+          echo "$LABEL" > portable/VERSION
           ZIP_NAME="u-hermes-portable-mac-v${VERSION}.zip"
           # -y stores symlinks as symlinks. Without it zip silently follows
           # them, so a venv whose interpreter lives outside portable/ turned
           # into a copy of a bare binary with no stdlib behind it -- which
           # looks like a complete package right up until someone runs it.
-          cd portable && zip -ryq "../${ZIP_NAME}" . -x "*.uv-cache*" "*/__pycache__/*" "*.log"
+          cd portable && zip -ryq "../${ZIP_NAME}" . -x "*.uv-cache*" ".npm-cache/*" "*/.npm-cache/*" "*/__pycache__/*" "*.log"
           echo "ARTIFACT=${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Verify the packaged artifact
@@ -480,7 +527,8 @@ jobs:
 
           ls "$WORK" | grep -q "使用说明" || { echo "FAIL: no Chinese quick-start file in the zip"; exit 1; }
           for f in Mac-Start.command Config.html scripts/preflight.py scripts/wait-for.py \
-                   scripts/config-server.py versions.env data/config.yaml.default; do
+                   scripts/config-server.py versions.env data/config.yaml.default \
+                   VERSION; do
             test -e "$WORK/$f" || { echo "FAIL: missing from the zip: $f"; exit 1; }
           done
           echo "Packaged artifact verified."
