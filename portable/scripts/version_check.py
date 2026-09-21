@@ -123,6 +123,25 @@ def node_version(portable=PORTABLE):
 
 
 def python_version(portable=PORTABLE):
+    """The venv's interpreter -- but only where the pin governs it.
+
+    PYTHON_EMBED_VERSION is, by its own comment in versions.env, the Windows
+    *embeddable* interpreter. setup.sh downloads no Python at all: it runs
+    `uv venv --python 3.11` and takes whatever the machine or uv provides.
+    Comparing that against this pin reports drift the pin never claimed to
+    govern, and a check that fails for a reason nobody intends to fix is a
+    check that gets deleted. Where there is no bundled interpreter, say so
+    and compare nothing.
+
+    (The mac build genuinely has no pinned Python. That is tracked with the
+    rest of the macOS packaging problem, which already blocks its release.)
+    """
+    bundled = any(
+        os.path.isdir(os.path.join(portable, "runtime", d))
+        for d in ("python-win-x64", "python-mac-arm64", "python-mac-x64",
+                  "python-linux-x64"))
+    if not bundled:
+        return UNKNOWN
     for exe in (os.path.join("Scripts", "python.exe"),
                 os.path.join("bin", "python")):
         path = os.path.join(portable, "hermes", ".venv", exe)

@@ -172,6 +172,37 @@ def test_everything_matching_says_nothing():
         vc.COMPONENTS = original
 
 
+def test_the_python_pin_only_applies_where_a_python_is_bundled():
+    """PYTHON_EMBED_VERSION is the Windows *embeddable* interpreter.
+
+    setup.sh downloads no Python at all -- it runs `uv venv --python 3.11`
+    and takes what it gets. Comparing that against this pin made the macOS
+    CI job fail on drift the pin never claimed to govern. A check that
+    fails for a reason nobody intends to fix is a check that gets deleted,
+    so where nothing is bundled it compares nothing and says so.
+    """
+    root = os.path.join(HERE, "_tmp_nopy")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "runtime"))
+    check(vc.python_version(root) is vc.UNKNOWN,
+          "no bundled interpreter -> nothing to compare")
+
+    # ...and it is not silently skipped forever: the moment a build does
+    # bundle one, the pin is enforced again.
+    os.makedirs(os.path.join(root, "runtime", "python-win-x64"))
+    real_run = vc._run
+    try:
+        vc._run = lambda *a, **k: "3.13.15"
+        os.makedirs(os.path.join(root, "hermes", ".venv", "Scripts"))
+        io.open(os.path.join(root, "hermes", ".venv", "Scripts", "python.exe"),
+                "w").close()
+        check(vc.python_version(root) == "3.13.15",
+              "a bundled interpreter is read and compared")
+    finally:
+        vc._run = real_run
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_every_pinned_key_is_actually_checked():
     """A pin nothing reads is a pin nothing enforces."""
     pins = set(vc.read_pins())
@@ -189,6 +220,7 @@ if __name__ == "__main__":
                test_a_bare_sha_means_cannot_tell,
                test_drift_is_reported_and_named,
                test_everything_matching_says_nothing,
+               test_the_python_pin_only_applies_where_a_python_is_bundled,
                test_every_pinned_key_is_actually_checked):
         print(fn.__name__)
         fn()
