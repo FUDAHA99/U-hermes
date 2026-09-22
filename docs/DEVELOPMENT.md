@@ -78,6 +78,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\sync-to-instance.ps1 -
 | `test_default_config` | 六处写「第一份 config.yaml」的地方互相漂移。曾经有三份不一致，其中一份让网关拿不到端口和密钥、中文技能永远加载不了 |
 | `test_diagnose_rules` | 永远不会触发的诊断规则。这条不变量一加上就抓出三条从没被验证过的旧规则 |
 | `test_provider_probe` | HTTP 映射表。曾经有两份几乎逐字相同的拷贝，都没有 400 分支，都把服务商自己的报错内容丢掉 |
+| `test_sync_excludes` | 把数据库同步到实测实例。网页账号库在 `portable\packages\` 下，第一版排除名单里没有它，一次同步就会盖掉 U 盘上的账号和网页登录密码 |
+| 「校验压缩包」里的 `*.db` 检查 | 把构建机的状态打进发布包。冒烟测试会在 `portable\` 里起网页界面，于是账号库和 `.ekko\` 就留在了待打包的目录里 |
 | 「校验压缩包」 | 解压之后跑不起来的包。Windows 会验证能 import 引擎、几个关键文件在不在；macOS 目前在这里失败 |
 
 ---
@@ -92,7 +94,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\sync-to-instance.ps1 -
 
 **别拿本机装的版本当发布版。** 见上面的版本检查。
 
-**Web UI 是 0.7.x 还是 0.6.x 行为不同。** `HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN` 只有 0.7 读；默认管理员在 0.7 是启动时就建好的，0.6 是第一次登录才建。
+**Web UI 是 0.7.x 还是 0.6.x 行为不同。** `HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN` 只有 0.7 读。
+
+**网页账号不在 `data\` 里。** hermes-web-ui 把 users 表放在
+`<启动目录>\packages\server\data\hermes-web-ui.db`——按 `process.cwd()` 解析，
+跟 `HERMES_WEB_UI_HOME` 无关，而 `Windows-Start.bat` 是在 `portable\` 里起的 node。
+于是网页登录密码落在 `portable\packages\` 下，`data\` 之外。同步脚本的第一版排除
+名单里没有它，照那份名单同步一次就会把开发机的账号库盖到 U 盘上；发布任务也会把
+构建机的那一份打进压缩包。两处都补了，各自有测试盯着。
+
+> 顺带更正一条旧结论：曾经写过「0.7.22 启动时就建好默认管理员，所以 hasUsers 一直
+> 是 true」。实测不是——干净起一个实例，`hasUsers` 始终是 false，`admin/123456`
+> 也确实能登进去（那是零账号时的引导通道）。hasUsers 之所以靠不住，是因为上面那个
+> 数据库谁都不清，跑过一次就一直在。`first-login.py` 改判「默认密码还能不能用」仍然
+> 是对的，只是原因记错了。
 
 **排查网关**：不监听 8642 时按端口找不到它，会留下孤儿进程占住锁，导致后续启动被静默跳过。要按命令行匹配实例路径清理。
 

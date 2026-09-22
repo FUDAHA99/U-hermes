@@ -38,14 +38,26 @@ if (-not (Test-Path $marker)) {
 }
 
 # 目标自己的东西，一律不动。
+#
+# packages\ 不是源码，是网页界面的账号库。hermes-web-ui 把
+# users 表放在 <工作目录>\packages\server\data\hermes-web-ui.db —— 跟
+# HERMES_WEB_UI_HOME 无关，只跟启动器在哪个目录起的 node 有关，而
+# Windows-Start.bat 是在 portable\ 里起的。所以网页登录密码就在这里面，
+# 不在 data\ 下。照着原来的名单同步一次，就会把这台机器的账号盖到 U 盘上。
 $excludeDirs = @("data", "runtime", "hermes", "backups", ".uv-cache",
-                 "__pycache__", ".git")
-$excludeFiles = @("*.log", "*.pyc", "VERSION")
+                 "__pycache__", ".git", "packages")
+
+# 名单是黑名单，已经漏过一次了。代码里不会有数据库，所以按类型再兜一层：
+# 漏掉一个目录名最多是少同步一个文件，漏掉一个数据库是把对面的账号和
+# 聊天记录覆盖掉。
+$excludeFiles = @("*.log", "*.pyc", "VERSION",
+                  "*.db", "*.db-wal", "*.db-shm", "*.sqlite", "*.sqlite3")
 
 Write-Host ""
 Write-Host "  源  ：$source"
 Write-Host "  目标：$Target"
 Write-Host "  不动：$($excludeDirs -join ', ')" -ForegroundColor DarkGray
+Write-Host "  　　  以及任何 *.db（网页账号库就在 packages\ 里）" -ForegroundColor DarkGray
 Write-Host ""
 
 $xd = @()

@@ -304,6 +304,63 @@ def test_byte_order_marks():
         "" if not missing else " (not found: " + ", ".join(sorted(missing)) + ")"))
 
 
+def powershell_files():
+    """Every .ps1 this repository owns, including the ones under tools/.
+
+    shipped_files() stops at what goes in the zip, and tools/ does not. But
+    a developer-only script is read by the same PowerShell 5.1, so it is
+    subject to exactly the same trap.
+    """
+    roots = [PORTABLE, os.path.join(REPO, "tools")]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            keep = []
+            for d in dirnames:
+                rel = os.path.relpath(
+                    os.path.join(dirpath, d), REPO).replace(os.sep, "/")
+                if d in SKIP_NAMES or rel in SKIP_PATHS:
+                    continue
+                keep.append(d)
+            dirnames[:] = keep
+            for name in filenames:
+                if name.lower().endswith(".ps1"):
+                    full = os.path.join(dirpath, name)
+                    yield os.path.relpath(full, REPO).replace(os.sep, "/"), full
+
+
+def test_every_chinese_powershell_script_has_a_bom():
+    """A .ps1 with Chinese in it and no BOM is read as the ANSI codepage.
+
+    MUST_HAVE_BOM above is a list, which only protects files somebody
+    remembered to add to it. This is the rule behind that list, so a new
+    script cannot be written without it.
+
+    Mojibake in the output is the mild version. The sharp one: read as GBK,
+    a trailing Chinese character pairs its lead byte with the newline that
+    follows it and swallows it. The next line then becomes part of the
+    comment above it. That is how this check came to exist -- a test script
+    lost its first statement to the comment line above, parsed cleanly, ran
+    cleanly, and did nothing, because the variable it was supposed to set
+    had been commented out by an encoding.
+    """
+    checked = 0
+    for rel, full in powershell_files():
+        raw = io.open(full, "rb").read()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            check(False, "%s is not valid UTF-8" % rel)
+            continue
+        if not any("一" <= ch <= "鿿" for ch in text):
+            continue
+        checked += 1
+        check(raw[:3] == BOM,
+              "%s has Chinese in it, so it needs a UTF-8 BOM" % rel)
+    check(checked > 0, "the walk found some Chinese PowerShell to check")
+
+
 if __name__ == "__main__":
     if not in_a_repo_checkout():
         print("SKIP: 这是一个安装好的实例，不是源码仓库 —— "
@@ -314,7 +371,8 @@ if __name__ == "__main__":
                test_gitattributes_still_pins_every_script_type,
                test_no_eaten_backslash_escapes_in_shell_scripts,
                test_the_escape_scanner_actually_works,
-               test_byte_order_marks):
+               test_byte_order_marks,
+               test_every_chinese_powershell_script_has_a_bom):
         print(fn.__name__)
         fn()
     print()

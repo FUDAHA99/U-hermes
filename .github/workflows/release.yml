@@ -253,6 +253,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "version check test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
+          # tools/ is not packaged, but this one guards the target of a sync,
+          # not the source: the Web UI account database sits in
+          # portable/packages, and the first exclusion list did not mention it.
+          powershell -NoProfile -ExecutionPolicy Bypass -File ../tools/tests/test_sync_excludes.ps1
+          if ($LASTEXITCODE -ne 0) { Write-Error "sync exclusion test failed"; exit 1 }
 
           Write-Host "=== [5/5] Web UI server starts and answers HTTP ==="
           $env:PORT = "8648"
@@ -292,7 +297,15 @@ jobs:
           # caches there rather than in %LOCALAPPDATA% on the user's machine,
           # which is right at runtime and several hundred MB of dead weight
           # in a release.
-          foreach ($junk in @("portable/.uv-cache", "portable/runtime/.npm-cache")) {
+          # portable/packages is not source. hermes-web-ui resolves its
+          # account database to <cwd>/packages/server/data/hermes-web-ui.db,
+          # and the smoke test above starts that server from portable/ --
+          # so the build leaves a users table sitting inside the folder
+          # about to be zipped. It is empty today only because nothing logs
+          # in during the smoke test.
+          foreach ($junk in @("portable/.uv-cache", "portable/runtime/.npm-cache",
+                              "portable/packages",
+                              "portable/runtime/node-win-x64/node_modules/hermes-web-ui/.ekko")) {
             Remove-Item -Recurse -Force $junk -ErrorAction SilentlyContinue
           }
           Compress-Archive -Path "portable/*" -DestinationPath $zipName -Force
@@ -334,6 +347,16 @@ jobs:
           )) {
             if (-not (Test-Path (Join-Path $work $needed))) { Write-Error "missing from the zip: $needed"; exit 1 }
           }
+          # A database in the zip means the build shipped somebody's state.
+          $dbs = Get-ChildItem $work -Recurse -Include *.db,*.sqlite,*.sqlite3 -File
+          if ($dbs) {
+            Write-Error ("the zip contains a database: " + ($dbs.FullName -join ", "))
+            exit 1
+          }
+          if (Test-Path (Join-Path $work "packages")) {
+            Write-Error "the zip contains packages/ -- that is the Web UI account store"; exit 1
+          }
+
           Write-Host "Packaged artifact verified."
 
       - name: Upload to Release
@@ -521,7 +544,9 @@ jobs:
           # them, so a venv whose interpreter lives outside portable/ turned
           # into a copy of a bare binary with no stdlib behind it -- which
           # looks like a complete package right up until someone runs it.
-          cd portable && zip -ryq "../${ZIP_NAME}" . -x "*.uv-cache*" ".npm-cache/*" "*/.npm-cache/*" "*/__pycache__/*" "*.log"
+          # packages/ is the Web UI account database, not source -- see the
+          # Windows job.
+          cd portable && zip -ryq "../${ZIP_NAME}" . -x "*.uv-cache*" ".npm-cache/*" "*/.npm-cache/*" "*/__pycache__/*" "*.log" "packages/*" "*/node_modules/hermes-web-ui/.ekko/*"
           echo "ARTIFACT=${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Verify the packaged artifact
