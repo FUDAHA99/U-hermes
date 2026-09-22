@@ -9,6 +9,8 @@ the gateway unable to start and was invisible until the user tried to chat.
 Run:  python portable/scripts/tests/test_config_merge.py
 """
 import importlib.util
+import io
+import json
 import os
 import shutil
 import sys
@@ -22,6 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+PORTABLE = os.path.dirname(os.path.dirname(HERE))
 SCRIPTS = os.path.dirname(HERE)
 
 _spec = importlib.util.spec_from_file_location(
@@ -613,6 +616,187 @@ custom_providers:
           "an unrelated entry is untouched (got %s)" % names)
 
 
+def test_the_page_can_read_settings_but_never_a_secret():
+    """The config page has to show what is currently set, or changing one
+    field means retyping every field -- provider, key, address, model. That
+    is what the launcher's own advice ("重新打开配置页面保存一次") asks for.
+
+    But _workspace_state was right when it refused to be a "GET the config":
+    these two files hold the provider key, the gateway key and every bot
+    token, and a settings page has no business reading those back, whatever
+    guards the endpoint.
+
+    Both hold only if the rule is an allowlist. This plants a distinct secret
+    in every place one can live and asserts that none of them appears in the
+    response, so a field added later to config.yaml cannot leak by default --
+    it has to be named to be shown.
+    """
+    root = os.path.join(HERE, "_tmp_state")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+    cs.DATA_DIR = root
+
+    secrets_planted = {
+        "inline provider key": "sk-inline-SECRET-1",
+        "key_env-named key": "sk-in-env-SECRET-2",
+        "gateway api_server key": "gw-SECRET-3",
+        "telegram bot token": "tg-SECRET-4",
+        "an unrelated key in .env": "sk-other-SECRET-5",
+        "a credential inside a URL": "urlpw-SECRET-6",
+    }
+    config = NL.join([
+        "model:",
+        '  provider: "custom:mine"',
+        '  default: "some-model"',
+        "custom_providers:",
+        '  - name: "Mine"',
+        '    base_url: "https://api.example.com/v1"',
+        '    api_key: "' + secrets_planted["inline provider key"] + '"',
+        "platforms:",
+        "  api_server:",
+        "    enabled: true",
+        "    extra:",
+        '      key: "' + secrets_planted["gateway api_server key"] + '"',
+        "  telegram:",
+        "    enabled: true",
+        '    token: "' + secrets_planted["telegram bot token"] + '"',
+        "  discord:",
+        "    enabled: false",
+        "",
+    ])
+    env = NL.join([
+        "DEEPSEEK_API_KEY=" + secrets_planted["key_env-named key"],
+        "OPENAI_API_KEY=" + secrets_planted["an unrelated key in .env"],
+        "DEEPSEEK_BASE_URL=https://api.deepseek.com/v1",
+        # *_BASE_URL is the one allowlisted field echoed back verbatim, so
+        # it is the one place a credential could ride out in plain sight.
+        # A URL with embedded basic-auth is a real shape, not a contrivance.
+        "OPENAI_BASE_URL=https://user:" + secrets_planted["a credential inside a URL"]
+        + "@proxy.example.com/v1",
+        "",
+    ])
+    with io.open(os.path.join(root, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(config)
+    with io.open(os.path.join(root, ".env"), "w", encoding="utf-8") as f:
+        f.write(env)
+
+    state = cs.config_state()
+    blob = json.dumps(state, ensure_ascii=False)
+
+    for label, value in sorted(secrets_planted.items()):
+        check(value not in blob, "the %s never leaves the file" % label)
+
+    # ...and it is still worth calling: everything the page needs to render
+    # the current settings has to be in there, or the user is back to
+    # retyping fields they cannot see.
+    check(state.get("provider") == "custom:mine", "the provider is reported")
+    check(state.get("model") == "some-model", "the model name is reported")
+    check(state.get("baseUrl") == "https://api.example.com/v1",
+          "the custom provider's address is reported")
+    check(state.get("urls", {}).get("DEEPSEEK_BASE_URL")
+          == "https://api.deepseek.com/v1",
+          "a built-in provider's saved address is reported")
+    check(sorted(state.get("keyVars") or []) == ["DEEPSEEK_API_KEY", "OPENAI_API_KEY"],
+          "which keys exist is reported -- as names, not values")
+    check("platforms" not in state,
+          "nothing about platforms comes back at all")
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_reading_settings_survives_a_file_that_is_not_there():
+    """A first run has neither file. Rendering the page must not depend on
+    them existing -- the old page had nothing to read and so could not fail
+    this way, which is exactly the regression to guard against.
+    """
+    root = os.path.join(HERE, "_tmp_state_empty")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+    cs.DATA_DIR = root
+
+    state = cs.config_state()
+    check(state.get("ok") is True, "a missing config is still a usable answer")
+    check(state.get("provider") == "" and state.get("model") == "",
+          "...with nothing claimed about what is configured")
+    check(state.get("keyVars") == [], "...and no key reported as present")
+
+    with io.open(os.path.join(root, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("this: [is not" + NL + "  valid yaml" + NL)
+    state = cs.config_state()
+    check(state.get("ok") is True, "a malformed config does not take the page down")
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_leaving_the_key_box_empty_keeps_the_key():
+    """Two halves, and both have to hold.
+
+    The page no longer demands a key on every save -- it is a secret the
+    user cannot see and pasted once, months ago, and requiring it turned
+    "change the model name" into "find your key again". So a blank box now
+    means "keep what is on file".
+
+    Server half: an incoming .env that does not mention the key variable
+    must leave that line exactly as it was. (test_env_merge covers the
+    replace case; this covers the omit case, which is the new one.)
+    """
+    before = ("DEEPSEEK_API_KEY=sk-live-key" + NL
+              + "DEEPSEEK_BASE_URL=https://old/v1" + NL)
+    after = cs.merge_env(before, "DEEPSEEK_BASE_URL=https://new/v1" + NL)
+    check("DEEPSEEK_API_KEY=sk-live-key" in after,
+          "a key the page did not send survives the save")
+    check("DEEPSEEK_BASE_URL=https://new/v1" in after,
+          "...while what it did send is applied")
+    check("DEEPSEEK_API_KEY=" + NL not in after and not after.rstrip().endswith("DEEPSEEK_API_KEY="),
+          "...and is never left assigned to nothing")
+
+
+def test_the_page_never_writes_an_empty_key_assignment():
+    """Page half of the rule above.
+
+    If Config.html emits `DEEPSEEK_API_KEY=` when the box is blank, the merge
+    does exactly as it is told and the user loses a working key because they
+    came to change the model name. The guard is a ternary on apiKey, and
+    this pins it: every line that assigns a key variable into envContent has
+    to be conditional on apiKey being non-empty.
+
+    A static check, so it proves the shape and not the behaviour -- the
+    behaviour was verified in a browser against a real config-server, which
+    is not something CI can repeat. It catches the regression that matters:
+    somebody simplifying the ternary away.
+    """
+    with io.open(os.path.join(PORTABLE, "Config.html"), encoding="utf-8") as f:
+        page = f.read()
+
+    # Matched on apiKey, not on a literal variable name: the built-in
+    # branch writes ${builtin.envVar}, so looking for API_KEY found only
+    # the custom one -- and left the common path unpinned.
+    emitting = [line.strip() for line in page.splitlines()
+                if "envContent" in line and "apiKey" in line]
+    check(len(emitting) >= 2,
+          "found both branches that write a key into .env (got %d)"
+          % len(emitting))
+    for line in emitting:
+        check("apiKey ?" in line,
+              "guarded by a blank-key check: %s" % line[:72])
+
+    # This used to match the literal `if (!apiKey && !keyOnFile)`, which is a
+    # statement about the source and not about the behaviour -- it would have
+    # gone on passing while the condition meant something else entirely.
+    # What matters is that ONE predicate decides both things: what the form
+    # tells the user about their key, and whether the save is allowed. When
+    # they were computed separately, the on-screen promise ("留空不会清掉它")
+    # outlived the provider switch that invalidated it.
+    check("if (!apiKey && !keyIsOnFileForForm())" in page,
+          "the save is refused on the same predicate the form displays")
+    check(page.count("keyIsOnFileForForm()") >= 2,
+          "...and that predicate is the one showKeyState asks too (%d uses)"
+          % page.count("keyIsOnFileForForm()"))
+    check("function keyIsOnFileForForm()" in page
+          and "showKeyState()" in page.split("function keyIsOnFileForForm()")[1],
+          "...defined once, and read by the display path")
+
+
 if __name__ == "__main__":
     for fn in (test_nothing_is_lost, test_shape, test_foreign_indentation,
                test_byte_order_mark,
@@ -623,7 +807,11 @@ if __name__ == "__main__":
                test_a_write_that_cannot_land_is_reported,
                test_a_failed_rename_leaves_nothing_behind,
                test_a_blank_workspace_becomes_the_default,
-               test_write_failures_are_explained_in_chinese):
+               test_write_failures_are_explained_in_chinese,
+               test_the_page_can_read_settings_but_never_a_secret,
+               test_reading_settings_survives_a_file_that_is_not_there,
+               test_leaving_the_key_box_empty_keeps_the_key,
+               test_the_page_never_writes_an_empty_key_assignment):
         print(fn.__name__)
         fn()
     print()

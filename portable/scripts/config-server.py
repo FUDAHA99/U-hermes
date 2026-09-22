@@ -14,6 +14,7 @@ import datetime
 import errno
 import glob
 import http.server
+import io
 import json
 import os
 import re
@@ -399,6 +400,97 @@ def parse_yaml_mapping(text):
     return data if isinstance(data, dict) else None
 
 
+# The page has to be able to show what is currently set, or changing one
+# field means retyping every field. But _workspace_state was right that a
+# settings page has no business reading the user's credentials back out
+# of these files. Both hold: this names what MAY leave, rather than
+# naming what may not and hoping the list stays complete.
+#
+# So: no api_key, no key_env value, no gateway key, no bot token. A
+# provider's address is not a credential and the user typed it into this
+# very page; whether a key exists is a boolean, not the key.
+SAFE_ENV_SUFFIX = "_BASE_URL"
+
+def config_state():
+    """What the page may show. Never a secret, by construction."""
+    state = {
+        "ok": True,
+        "provider": "",      # the engine's id, e.g. deepseek or custom:mine
+        "model": "",
+        "baseUrl": "",       # only for a custom provider; built-ins use urls
+        "urls": {},         # every *_BASE_URL in .env, so the page can pick its own
+        "keyVars": [],      # names of the *_API_KEY variables that have a value
+    }
+    path = os.path.join(DATA_DIR, "config.yaml")
+    config = None
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+                config = parse_yaml_mapping(f.read())
+    except OSError:
+        return state
+
+    model = (config or {}).get("model")
+    if isinstance(model, dict):
+        state["provider"] = str(model.get("provider") or "").strip()
+        state["model"] = str(
+            model.get("default") or model.get("model") or "").strip()
+
+    # A custom provider keeps its address in config.yaml. Same lookup the
+    # launcher and the diagnostic use, so the page shows the entry the
+    # engine will actually resolve -- not the first one with that name.
+    entry = provider_probe.find_custom_provider(config or {}, state["provider"])
+    if entry is not None:
+        state["baseUrl"] = provider_probe.custom_provider_base_url(entry)
+
+    for name, value in read_env_values().items():
+        if name.endswith(SAFE_ENV_SUFFIX):
+            state["urls"][name] = redact_url_credentials(value)
+        elif value and name.endswith("_API_KEY"):
+            state["keyVars"].append(name)
+
+    # Nothing about platforms. The page cannot round-trip a bot's settings
+    # -- it would tick the box and then save the form's own dropdown
+    # defaults over the user's protocol and framework -- so it does not ask,
+    # and this does not answer. Restoring that needs the non-secret platform
+    # fields returned as well, and loadConfig filling them in.
+    return state
+
+
+def redact_url_credentials(value):
+    """Take the userinfo out of a URL before it leaves the file.
+
+    A *_BASE_URL is an address, not a credential -- which is why it is on the
+    allowlist at all. But https://user:pw@gateway.example/v1 is a real shape
+    (corporate proxies, self-hosted relays), and that is a password sitting
+    in the one allowlisted field whose value is echoed back verbatim. The
+    host is what the page needs to show; the userinfo is not.
+
+    Bounded to the authority: the userinfo pattern cannot contain a slash, so
+    an @ later in the path is left alone.
+    """
+    return re.sub(r"(://)[^/@\s]*@", r"\1", str(value or ""), count=1)
+
+
+def read_env_values():
+    """data/.env as a mapping. utf-8-sig: a BOM must not become part of the
+    first variable's name -- see repair_env_bom in preflight.py.
+    """
+    values = {}
+    path = os.path.join(DATA_DIR, ".env")
+    try:
+        with io.open(path, encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                values[name.strip()] = value.strip().strip(chr(39)).strip(chr(34))
+    except OSError:
+        pass
+    return values
+
+
 def merge_env(existing_text, incoming_text):
     """Set the variables the page sends; leave every other line alone."""
     incoming = []
@@ -645,6 +737,12 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
                 self._json(403, {"ok": False})
                 return
             self._json(200, self._workspace_state())
+            return
+        if route == "/config":
+            if not self._request_ok(require_origin=False):
+                self._json(403, {"ok": False})
+                return
+            self._json(200, config_state())
             return
         if route in ("/", "/Config.html"):
             if not secrets.compare_digest(self._token(), TOKEN):

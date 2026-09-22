@@ -209,7 +209,17 @@ def main():
     # Every button either resolves through the table or falls through to the
     # custom_providers path, which needs an address to work with.
     custom_key_env = re.search(r'key_env:\s*"(\$\{[^"]*\}|[A-Z_]+)"', html)
-    custom_env_var = re.search(r'envContent = `(\$\{?[A-Z_]+\}?|[A-Z_]+)=\$\{apiKey\}', html)
+    # The optional `(apiKey ? ` prefix: a blank key box now means "keep the
+    # key already on file", so the assignment is emitted only when there is
+    # something to assign. Without allowing for that, this check went on
+    # running and silently matched nothing, reporting the variable as "?".
+    custom_env_var = re.search(
+        r'envContent = \(?(?:apiKey \? )?`(\$\{?[A-Z_]+\}?|[A-Z_]+)=\$\{apiKey\}',
+        html)
+    # What keyVarFor answers for a provider with no row in the table -- the
+    # third copy of "which variable holds this provider's key".
+    key_var_fallback = re.search(
+        r"return b \? b\.envVar : '([A-Z_]+)'", html)
     for name, btn in sorted(buttons.items()):
         if name in table or name == "custom":
             continue
@@ -227,6 +237,22 @@ def main():
             "variable written to .env (%s)"
             % (name,
                custom_key_env.group(1) if custom_key_env else "?",
+               custom_env_var.group(1) if custom_env_var else "?"),
+        )
+        # ...and keyVarFor has to give the SAME answer for that button, or
+        # "leave the key box blank to keep the key" is inert for it. It was:
+        # keyVarFor fell through to '' for doubao and siliconflow, the page
+        # then reported no key on file, and refused to save at all -- the
+        # exact failure the feature exists to remove, on 2 of the 9 buttons.
+        # A third copy of one lookup, drifted from the other two.
+        check(
+            key_var_fallback is not None
+            and custom_env_var is not None
+            and key_var_fallback.group(1) == custom_env_var.group(1),
+            "%s has no builtinProviders row, so keyVarFor's fallback (%s) must "
+            "be the variable the custom path writes (%s)"
+            % (name,
+               key_var_fallback.group(1) if key_var_fallback else "?",
                custom_env_var.group(1) if custom_env_var else "?"),
         )
 

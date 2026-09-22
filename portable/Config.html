@@ -259,7 +259,7 @@
             <div class="form-group">
                 <label>API 密钥</label>
                 <input type="password" id="apiKey" placeholder="sk-..." autocomplete="off">
-                <div class="hint">从模型提供商的控制台获取</div>
+                <div class="hint" id="apiKeyHint">从模型提供商的控制台获取</div>
             </div>
             <div class="form-group">
                 <label>API 地址</label>
@@ -489,7 +489,19 @@
             const info = document.getElementById('modelInfo');
             info.style.display = 'block';
             info.textContent = providerHints[selectedProvider] || '';
+
+            // Picking a different provider changes whether the key on file
+            // is this provider's key, so the box has to say so again.
+            if (typeof showKeyState === 'function') showKeyState();
         });
+    });
+
+    // Typing a different address does the same: for every provider without a
+    // table row the key lives in the shared OPENAI_API_KEY, so a new endpoint
+    // means the saved key is not the one this address needs.
+    document.addEventListener('DOMContentLoaded', () => {
+        const box = document.getElementById('baseUrl');
+        if (box) box.addEventListener('input', () => showKeyState());
     });
 
     // --- Agent workspace ---------------------------------------------------
@@ -552,6 +564,168 @@
     }
     document.addEventListener('DOMContentLoaded', loadVersion);
 
+    // What loadConfig put on the form, so saveConfig can tell "the user did
+    // not touch this" from "the user typed something else". Without it a
+    // blank key box cannot be read: keeping a key is right when the endpoint
+    // is the one that key was issued for, and wrong when it is not.
+    const loaded = { pageKey: '', baseUrl: '', slug: '' };
+
+    // Whether the key box may be left empty, and saying so on the form.
+    //
+    // Re-run on every provider click and every edit of the address, because
+    // the answer changes with both. Computed once at load, it went stale the
+    // moment the user picked a different provider -- and the stale answer was
+    // the dangerous direction: "留空不会清掉它" over a box whose blank value
+    // would hand the new endpoint the old endpoint's key.
+    function keyIsOnFileForForm() {
+        const providerName = selectedProvider || 'custom';
+        const baseUrl = document.getElementById('baseUrl').value.trim();
+        const wanted = keyVarFor(providerName, baseUrl);
+        if (!wanted || savedKeyVars.indexOf(wanted) === -1) return false;
+        // Every provider without a table row shares OPENAI_API_KEY, so the
+        // variable having a value does NOT mean it is this endpoint's key.
+        // Only the endpoint we actually read from disk can claim it.
+        if (!builtinProviders[builtinKeyFor(providerName, baseUrl)]) {
+            return !!loaded.baseUrl && baseUrl === loaded.baseUrl;
+        }
+        return true;
+    }
+
+    function showKeyState() {
+        const box = document.getElementById('apiKey');
+        const hint = document.getElementById('apiKeyHint');
+        if (keyIsOnFileForForm()) {
+            box.placeholder = '已保存（留空即不修改）';
+            if (hint) hint.textContent = '已经存过一个密钥。想换一个就粘新的，'
+                                       + '不改就留空——留空不会清掉它。';
+        } else {
+            box.placeholder = 'sk-...';
+            if (hint) hint.textContent = '从模型提供商的控制台获取';
+        }
+    }
+
+    // --- Show what is already configured -----------------------------------
+    // This page used to open blank every time, whatever was in config.yaml.
+    // Changing the model name meant retyping the provider, the address and
+    // the key -- and the key is the one thing nobody has to hand, because it
+    // lives in a file and was pasted once months ago. Several of the
+    // launcher's own error messages end in "重新打开配置页面保存一次", which
+    // was advice nobody could follow.
+    //
+    // The service answers with settings only: no key, no gateway key, no bot
+    // token. Which keys EXIST comes back as a list of variable names, which
+    // is what lets the box below mean "leave empty to keep it".
+    async function loadConfig() {
+        const url = apiUrl('/config');
+        if (!url) return;
+        let d;
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) return;
+            d = await resp.json();
+        } catch (e) { return; }      // a blank page is the old behaviour, not a new bug
+        if (!d || !d.ok) return;
+
+        savedKeyVars = Array.isArray(d.keyVars) ? d.keyVars : [];
+
+        const provider = String(d.provider || '');
+        let pageKey = '';
+        let tableKey = '';           // the builtinProviders row, which is not
+                                     // always the button: kimi vs kimi-cn
+        if (provider.startsWith('custom:')) {
+            // Providers the page offers but Hermes has no id for -- 豆包,
+            // 硅基流动 -- are written as custom:<their own slug>. Matching the
+            // slug against the buttons first keeps those on their own button
+            // instead of dropping everyone into 自定义.
+            const slug = provider.slice(7);
+            const known = [...providerBtns].some(b => b.dataset.provider === slug);
+            pageKey = known ? slug : 'custom';
+            // A custom provider this page has no button for still has a name,
+            // and it is the name the engine resolves. Saving would rebuild the
+            // slug from the button ("custom") and write custom:custom, leaving
+            // the user's real entry orphaned in the file.
+            loaded.slug = known ? '' : slug;
+        } else if (provider) {
+            tableKey = Object.keys(builtinProviders)
+                .find(k => builtinProviders[k].hermesName === provider) || '';
+            // kimi and kimi-cn share one button; the address tells them apart.
+            pageKey = (tableKey === 'kimi-cn') ? 'kimi' : tableKey;
+        }
+
+        const btn = [...providerBtns].find(b => b.dataset.provider === pageKey);
+        if (btn) btn.click();        // selection, hint and the button's defaults
+
+        // ...then the saved values over the top of those defaults. A custom
+        // provider keeps its address in config.yaml; a built-in one keeps it
+        // in the .env variable named by its own row.
+        //
+        // tableKey, not pageKey: a kimi-coding-cn install has no url variable
+        // of its own (urlVar is ''), so asking the button's row would hand it
+        // KIMI_BASE_URL -- the international endpoint -- and the next save
+        // would quietly move a mainland account onto it.
+        const urlBox = document.getElementById('baseUrl');
+        const row = builtinProviders[tableKey];
+        const saved = d.baseUrl
+            || (row && row.urlVar ? (d.urls || {})[row.urlVar] : '')
+            || '';
+        if (saved) urlBox.value = saved;
+        if (d.model) document.getElementById('modelName').value = d.model;
+
+        loaded.pageKey = pageKey;
+        loaded.baseUrl = urlBox.value.trim();
+        showKeyState();
+    }
+    document.addEventListener('DOMContentLoaded', loadConfig);
+
+    // Hermes built-in providers.  All three fields have to line up with
+    // what the agent reads: `hermesName` must be a provider id it knows,
+    // `envVar` one of the key variables that provider looks at, and
+    // `urlVar` its base-url override.  The override matters most -- the
+    // agent otherwise calls the provider's own default endpoint, which is
+    // not always the one shown in the address box above, and the user
+    // gets a 401 on a key they just watched pass the connection test.
+    //
+    // At this scope because loadConfig() reads it backwards: config.yaml
+    // holds the hermesName, and the page has to find which button that is.
+    // Keeping a second copy for that would be a third table to drift.
+    const builtinProviders = {
+        'deepseek':   { hermesName: 'deepseek',        envVar: 'DEEPSEEK_API_KEY',   urlVar: 'DEEPSEEK_BASE_URL' },
+        'kimi':       { hermesName: 'kimi-coding',     envVar: 'KIMI_API_KEY',       urlVar: 'KIMI_BASE_URL' },
+        'kimi-cn':    { hermesName: 'kimi-coding-cn',  envVar: 'KIMI_CN_API_KEY',    urlVar: '' },
+        'qwen':       { hermesName: 'alibaba',         envVar: 'DASHSCOPE_API_KEY',  urlVar: 'DASHSCOPE_BASE_URL' },
+        'glm':        { hermesName: 'zai',             envVar: 'GLM_API_KEY',        urlVar: 'GLM_BASE_URL' },
+        'minimax':    { hermesName: 'minimax-cn',      envVar: 'MINIMAX_CN_API_KEY', urlVar: 'MINIMAX_CN_BASE_URL' },
+        'openrouter': { hermesName: 'openrouter',      envVar: 'OPENROUTER_API_KEY', urlVar: '' },
+    };
+
+    // Which *_API_KEY variables data\.env already has a value for. Names
+    // only -- the service will not hand back a key, and should not.
+    let savedKeyVars = [];
+
+    // Kimi's mainland and international accounts are separate products with
+    // separate key namespaces, so the address decides which one. One copy of
+    // that rule, asked by everyone who needs it.
+    function builtinKeyFor(providerName, baseUrl) {
+        return (providerName === 'kimi' && /moonshot\.cn/.test(baseUrl))
+            ? 'kimi-cn'
+            : providerName;
+    }
+
+    // Which variable in data\.env holds this provider's key.
+    //
+    // The fallback is not '': saveConfig's own else-branch stores the key in
+    // OPENAI_API_KEY for every provider that has no row here -- 豆包 and
+    // 硅基流动 are buttons this page ships, deliberately absent from the table
+    // because Hermes has no id for them. Answering '' for those made the
+    // whole "leave it blank" rule inert on exactly two of the nine buttons,
+    // and the page then refused to save at all. Two copies of one lookup,
+    // drifted, which is how this repository has been bitten twice already;
+    // test_provider_table.py now ties them together.
+    function keyVarFor(providerName, baseUrl) {
+        const b = builtinProviders[builtinKeyFor(providerName, baseUrl)];
+        return b ? b.envVar : 'OPENAI_API_KEY';
+    }
+
     // Save configuration
     function saveConfig() {
         const apiKey = document.getElementById('apiKey').value.trim();
@@ -559,9 +733,27 @@
         const modelName = document.getElementById('modelName').value.trim();
         const status = document.getElementById('status');
 
-        if (!apiKey) {
+        const providerName = selectedProvider || 'custom';
+
+        // A key already on file means the box may be left empty: the user
+        // came to change the model or the address, not to retype a secret
+        // they cannot see. saveConfig then omits the variable and the merge
+        // keeps it. Demanding it every time is what made this page
+        // write-only, and the launcher's own advice -- "open the config page
+        // and save once" -- impossible to follow without the key to hand.
+        //
+        // The same question the form has been answering on screen, asked
+        // once here so the two can never disagree. It is deliberately
+        // stricter than "the variable has a value": every provider without a
+        // table row shares OPENAI_API_KEY, so a blank box on a NEW address
+        // would otherwise hand that endpoint the previous one's key and
+        // report 配置已保存 over a config that returns 401 forever.
+        if (!apiKey && !keyIsOnFileForForm()) {
             status.className = 'status error';
-            status.textContent = '请输入 API 密钥';
+            status.textContent = keyVarFor(providerName, baseUrl) === 'OPENAI_API_KEY'
+                && savedKeyVars.indexOf('OPENAI_API_KEY') !== -1
+                ? '换了接口地址，请填这个地址的 API 密钥'
+                : '请输入 API 密钥';
             return;
         }
         if (!baseUrl) {
@@ -575,31 +767,7 @@
             return;
         }
 
-        const providerName = selectedProvider || 'custom';
-
-        // Hermes built-in providers.  All three fields have to line up with
-        // what the agent reads: `hermesName` must be a provider id it knows,
-        // `envVar` one of the key variables that provider looks at, and
-        // `urlVar` its base-url override.  The override matters most -- the
-        // agent otherwise calls the provider's own default endpoint, which is
-        // not always the one shown in the address box above, and the user
-        // gets a 401 on a key they just watched pass the connection test.
-        const builtinProviders = {
-            'deepseek':   { hermesName: 'deepseek',        envVar: 'DEEPSEEK_API_KEY',   urlVar: 'DEEPSEEK_BASE_URL' },
-            'kimi':       { hermesName: 'kimi-coding',     envVar: 'KIMI_API_KEY',       urlVar: 'KIMI_BASE_URL' },
-            'kimi-cn':    { hermesName: 'kimi-coding-cn',  envVar: 'KIMI_CN_API_KEY',    urlVar: '' },
-            'qwen':       { hermesName: 'alibaba',         envVar: 'DASHSCOPE_API_KEY',  urlVar: 'DASHSCOPE_BASE_URL' },
-            'glm':        { hermesName: 'zai',             envVar: 'GLM_API_KEY',        urlVar: 'GLM_BASE_URL' },
-            'minimax':    { hermesName: 'minimax-cn',      envVar: 'MINIMAX_CN_API_KEY', urlVar: 'MINIMAX_CN_BASE_URL' },
-            'openrouter': { hermesName: 'openrouter',      envVar: 'OPENROUTER_API_KEY', urlVar: '' },
-        };
-
-        // Kimi's mainland and international accounts are separate products
-        // with separate key namespaces, so the address decides which one.
-        const builtinKey = (providerName === 'kimi' && /moonshot\.cn/.test(baseUrl))
-            ? 'kimi-cn'
-            : providerName;
-        const builtin = builtinProviders[builtinKey];
+        const builtin = builtinProviders[builtinKeyFor(providerName, baseUrl)];
         let configYaml, envContent;
 
         const platforms = getEnabledPlatforms();
@@ -648,11 +816,25 @@ memory:
 cron:
   enabled: true
 `;
-            envContent = `${builtin.envVar}=${apiKey}\n`;
+            // A blank key box means "keep the one already saved", so the
+            // variable is left out entirely and merge_env leaves that line
+            // alone. Writing `VAR=` would wipe a working key because the
+            // user came here to change the model name.
+            envContent = apiKey ? `${builtin.envVar}=${apiKey}\n` : '';
             if (builtin.urlVar) envContent += `${builtin.urlVar}=${baseUrl}\n`;
         } else {
             // Custom provider: use custom_providers list
-            const providerSlug = providerName.toLowerCase().replace(/\s+/g, '-');
+            //
+            // loaded.slug is the name already in config.yaml for a custom
+            // provider this page has no button for. Without it the slug is
+            // rebuilt from the button -- "custom" -- so reopening the page and
+            // pressing save renamed the user's entry to custom:custom and left
+            // the real one orphaned in the file, still holding their address.
+            // It only applies while the 自定义 button is still the selected
+            // one; picking a different provider means they meant to change it.
+            const providerSlug = (providerName === 'custom' && loaded.slug)
+                ? loaded.slug
+                : providerName.toLowerCase().replace(/\s+/g, '-');
             const hermesProvider = `custom:${providerSlug}`;
 
             configYaml = `# U-Hermes Configuration (auto-generated)
@@ -678,7 +860,9 @@ memory:
 cron:
   enabled: true
 `;
-            envContent = `OPENAI_API_KEY=${apiKey}\nOPENAI_BASE_URL=${baseUrl}\n`;
+            // Same rule as above: blank means keep, not clear.
+            envContent = (apiKey ? `OPENAI_API_KEY=${apiKey}\n` : '')
+                       + `OPENAI_BASE_URL=${baseUrl}\n`;
         }
 
         // Try to save via local config-server, or show manual instructions
@@ -875,6 +1059,25 @@ cron:
         qq: 'qqbot', wecom: 'wecom', dingtalk: 'dingtalk', feishu: 'feishu',
     };
     const PLATFORM_TOP_FIELDS = ['token', 'api_key'];
+
+    // The platform checkboxes are deliberately NOT restored from config.yaml.
+    //
+    // Ticking one is not free: getEnabledPlatforms pushes 微信 and QQ(onebot)
+    // unconditionally once their box is checked, so a ticked box makes the
+    // next save emit protocol / framework / ws_url read off the form's own
+    // dropdowns -- which nothing filled in, because /config returns only the
+    // enabled flag and never a bot's settings. merge_yaml then applies those
+    // defaults over the real ones: an official QQ bot becomes an onebot one
+    // pointing at ws://127.0.0.1:3001, and 微信 flips to wechaty. The user
+    // came to change the model name; their bots stop connecting and the page
+    // says 配置已保存.
+    //
+    // Showing the boxes ticked would be a lie in the other direction too:
+    // unticking one writes nothing, because the merge only ever adds.
+    // Restoring them needs config_state to return the non-secret platform
+    // fields and loadConfig to fill them in -- until then, not touching the
+    // platform section is the honest behaviour, and the one that cannot
+    // destroy a working bot.
 
     function platformsToYaml(platforms) {
         // Nothing enabled means nothing written: this section shares the
