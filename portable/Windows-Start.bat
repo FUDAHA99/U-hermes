@@ -406,10 +406,16 @@ echo.
 :: it used to append never worked: that file does not exist at that path,
 :: and the API rejects the token either way.
 ::
-:: The account matters because upstream ships it unclaimed: the first caller
-:: to post admin/123456 becomes super admin, and the login page prints those
-:: credentials to every visitor. Loopback-only (BIND_HOST above) keeps that
-:: off the network; this keeps it off a shared Windows PC too.
+:: This used to claim the super-admin account with a generated password.
+:: It no longer does, by decision: the login page prints
+:: 'admin / 123456' to every unauthenticated visitor, and the product keeps
+:: that sentence true rather than leaving a page that lies. BIND_HOST above
+:: is therefore the whole of the protection -- and data\.env can override it.
+::
+:: What is left here: wait for the server, open the browser, and on a machine
+:: upgraded from a version that DID rotate, print the password that actually
+:: works. Without that last part those users read 123456 off the login page,
+:: get refused, and have nowhere to look.
 start /B "" "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\first-login.py" http://127.0.0.1:8648 "%DATA_DIR%\webui" 90
 
 :: Run Web UI server in foreground (blocks until Ctrl+C or close)

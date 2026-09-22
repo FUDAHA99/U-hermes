@@ -1,18 +1,26 @@
-"""The Web UI account must never be left unclaimed, and never be clobbered.
+"""The launcher must not touch the Web UI password, and must not leave an
+upgraded machine unable to log in.
 
-hermes-web-ui hands its super-admin account to whoever first posts
-admin/123456, and prints those credentials on the login page. first-login.py
-claims it with a generated password instead.
+first-login.py used to claim the super-admin account with a generated
+password. That is gone by decision: the login page prints
+"默认登录名：admin，默认密码：123456" to every unauthenticated visitor, and
+the product now keeps that sentence true. What holds the risk down is
+BIND_HOST=127.0.0.1 in the launcher -- which data\\.env can override.
 
-That script talks to three upstream endpoints, and upstream ships several
-releases a week. This stands a fake Web UI in front of it that behaves the
-way the real one's controllers do, so an API change shows up here instead of
-as an install that is silently left open.
+Two things still have to be right, and both are asserted here:
+
+  * the script changes nothing. A silent POST to /api/auth/change-password
+    would put a machine in a state where the login page is wrong and nobody
+    knows the password.
+  * a machine upgraded from a version that DID rotate still has a rotated
+    password, so the login page is wrong for it. Its 登录密码.txt has to be
+    surfaced, or the user types 123456, gets refused, and has no next step.
 
 Run:  python portable/scripts/tests/test_first_login.py
 """
 import http.server
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -49,18 +57,11 @@ def check(condition, label):
 class FakeWebUI(http.server.BaseHTTPRequestHandler):
     """Mirrors packages/server/src/controllers/auth.ts closely enough to matter.
 
-    In particular: login only bootstraps when there are no users AND the
-    credentials are exactly the documented defaults, and change-password
-    needs the current one and a new one of at least 6 characters.
+    Kept even though nothing should call the auth endpoints any more: the
+    point of the first test below is that they are NOT called, and an
+    assertion about a route that does not exist proves nothing.
     """
 
-    # Seeded, like hermes-web-ui 0.7.22 does at startup. This mock used to
-    # start empty, modelling 0.6.5 (the version that happened to be
-    # installed locally), where the account was created by the first login.
-    # On 0.7.22 /api/auth/status answers hasUsers=true immediately, so the
-    # old gate in first-login.py returned "already claimed" on a brand-new
-    # install and the factory password stayed live. The suite passed
-    # throughout, because the mock agreed with the wrong version.
     users = {"admin": "123456"}   # username -> password
     tokens = {}         # token -> username
     calls = []
@@ -129,68 +130,90 @@ def serve():
     return srv, "http://127.0.0.1:%d" % srv.server_address[1]
 
 
+def run_script(base, home):
+    """Run main() the way the launcher does, and capture what the user sees.
+
+    webbrowser.open is stubbed rather than tolerated: on a CI runner it can
+    block, and on a developer machine it opens a real window every run.
+    """
+    opened = []
+    real_open = fl.webbrowser.open
+    fl.webbrowser.open = lambda url, *a, **k: opened.append(url) or True
+    buffer = io.StringIO()
+    real_stdout = sys.stdout
+    sys.stdout = buffer
+    try:
+        code = fl.main(["first-login.py", base, home, "10"])
+    finally:
+        sys.stdout = real_stdout
+        fl.webbrowser.open = real_open
+    return code, buffer.getvalue(), opened
+
+
+ROTATED_FILE = """U-Hermes 网页界面登录信息
+
+    用户名： admin
+    密　码： iavz2nvaxn
+
+这个密码是本份 U 盘专用的，换电脑登录也是这一个。
+"""
+
+
 def main():
     srv, base = serve()
     home = tempfile.mkdtemp(prefix="uh-firstlogin-")
     try:
+        print("a normal launch")
         FakeWebUI.users = {"admin": "123456"}
         FakeWebUI.tokens, FakeWebUI.calls = {}, []
+        code, out, opened = run_script(base, home)
 
-        print("a fresh install, factory password still live")
-        password = fl.claim(base)
-        check(password is not None, "the account is claimed")
-        check(len(password or "") >= 6, "the new password satisfies upstream's 6-char minimum")
-        check(FakeWebUI.users.get("admin") == password, "the server now holds the generated password")
-        check(FakeWebUI.users.get("admin") != "123456", "the default password no longer works")
-        check(set("0O1lI").isdisjoint(password or ""),
-              "the password avoids glyphs people mistype when retyping it")
+        check(code == 0, "the launch is not blocked")
+        check(FakeWebUI.users.get("admin") == "123456",
+              "the factory password is left exactly as it was")
+        posts = [p for method, p in FakeWebUI.calls if method == "POST"]
+        check(posts == [],
+              "nothing is posted at all (saw: %s)" % (posts or "nothing"))
+        check("/api/auth/change-password" not in [p for _, p in FakeWebUI.calls],
+              "...in particular the password is never changed")
+        check(opened and opened[0].startswith(base),
+              "the browser is still opened at the Web UI")
+        check("123456" not in out,
+              "and nothing is printed about a password on a normal launch")
 
-        path = fl.remember(home, password)
-        check(path is not None and os.path.exists(path), "the password is written to the stick")
-        if path:
-            raw = open(path, "rb").read()
-            check(raw[:3] == b"\xef\xbb\xbf", "the file has a BOM so 记事本 shows Chinese correctly")
-            check(password in raw.decode("utf-8-sig"), "the file actually contains the password")
-
-        print("running again against the same install")
-        again = fl.claim(base)
-        check(again is None, "an account that already exists is left alone")
-        check(FakeWebUI.users.get("admin") == password, "its password is unchanged")
-
-        print("an install somebody already set up by hand")
-        FakeWebUI.users, FakeWebUI.tokens = {"admin": "hunter2"}, {}
-        check(fl.claim(base) is None, "a user's own password is never overwritten")
-        check(FakeWebUI.users["admin"] == "hunter2", "...and still works")
-
-        print("the endpoints the script depends on")
-        FakeWebUI.users = {"admin": "123456"}
+        print("a machine upgraded from a version that rotated the password")
+        # Its password is NOT 123456, but the login page insists that it is.
+        # The only record is this file, four directories deep in data\\.
+        path = os.path.join(home, fl.PASSWORD_FILE)
+        with io.open(path, "w", encoding="utf-8-sig", newline="\r\n") as f:
+            f.write(ROTATED_FILE)
+        FakeWebUI.users = {"admin": "iavz2nvaxn"}
         FakeWebUI.tokens, FakeWebUI.calls = {}, []
-        fl.claim(base)
-        used = [p for _, p in FakeWebUI.calls]
-        for endpoint in ("/api/auth/login", "/api/auth/change-password"):
-            check(endpoint in used, "uses %s" % endpoint)
-        check("/api/auth/status" not in used,
-              "does NOT decide on /api/auth/status -- hasUsers is true from "
-              "the first second on the version that ships")
+        code, out, _ = run_script(base, home)
 
-        print("the shape that made this a no-op in the shipped build")
-        # hermes-web-ui 0.7.22 seeds the default super admin at startup, so
-        # hasUsers answers true on a brand-new install. Gating on it meant
-        # the script decided "already claimed" every time and the factory
-        # password stayed live -- while the docs told users it had been
-        # replaced. Pin the behaviour, not the endpoint.
-        FakeWebUI.users = {"admin": "123456"}
-        FakeWebUI.tokens, FakeWebUI.calls = {}, []
-        import urllib.request as _u
-        with _u.urlopen(base + "/api/auth/status", timeout=5) as r:
-            status = json.loads(r.read().decode())
-        check(status.get("hasUsers") is True,
-              "the server reports hasUsers=true before anyone has claimed it")
-        fresh = fl.claim(base)
-        check(fresh is not None,
-              "...and the account is claimed anyway")
-        check(FakeWebUI.users["admin"] == fresh,
-              "...with the factory password actually replaced")
+        check(code == 0, "still does not block the launch")
+        check("iavz2nvaxn" in out,
+              "the password that actually works is printed")
+        check(path in out, "...along with where it is stored")
+        check("123456" in out,
+              "...and it says the page's default does not apply here")
+        check(FakeWebUI.users.get("admin") == "iavz2nvaxn",
+              "that machine's password is not reset to the factory one")
+        check([p for method, p in FakeWebUI.calls if method == "POST"] == [],
+              "...and still nothing is posted")
+
+        print("a file that cannot be read")
+        # Surfacing the password is a convenience. Failing to do it must not
+        # cost the user their launch.
+        bad = tempfile.mkdtemp(prefix="uh-firstlogin-bad-")
+        os.mkdir(os.path.join(bad, fl.PASSWORD_FILE))   # a directory, not a file
+        try:
+            code, out, opened = run_script(base, bad)
+            check(code == 0, "a broken password file does not block the launch")
+            check(opened and opened[0].startswith(base),
+                  "...and the browser is still opened")
+        finally:
+            shutil.rmtree(bad, ignore_errors=True)
 
         print("the Web UI never coming up")
         check(fl.wait_for("http://127.0.0.1:9/health", 1.0) is False,
