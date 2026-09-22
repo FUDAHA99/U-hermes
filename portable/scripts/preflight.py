@@ -49,11 +49,42 @@ PROBE_TTL = 7 * 24 * 3600
 NEEDS_CONFIG = 10
 
 
+def repair_env_bom(path):
+    """Strip a leading BOM from .env, and say that it did.
+
+    A UTF-8 BOM in front of the first line makes that line's variable name
+    "﻿OPENAI_API_KEY". python-dotenv -- which is what the engine reads
+    this file with -- keeps the BOM in the name too, so the key is not
+    missing, it is unusable: nothing ever matches it and the agent never
+    answers. Notepad and PowerShell's `Set-Content -Encoding utf8` both
+    produce one.
+
+    Repairing it here rather than only reporting it, because the damage is
+    unambiguous, the fix is three bytes, and the alternative is a user
+    retyping a key that was correct all along. Saving from the config page
+    no longer reintroduces it either.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return False
+    if not raw.startswith(bytes([0xEF, 0xBB, 0xBF])):
+        return False
+    try:
+        with open(path, "wb") as f:
+            f.write(raw[3:])
+    except OSError:
+        return False
+    return True
+
+
 def read_env_file(path):
     values = {}
     if not os.path.exists(path):
         return values
-    with io.open(path, encoding="utf-8", errors="replace") as f:
+    # utf-8-sig: a BOM must never become part of the first variable's name.
+    with io.open(path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -150,6 +181,7 @@ def key_vars_for(provider):
     return tuple(pconfig.api_key_env_vars), "api_key"
 
 
+
 def base_url_for(provider, config, env):
     """The address the engine will actually call, or "" if we cannot tell.
 
@@ -157,11 +189,8 @@ def base_url_for(provider, config, env):
     way that could produce a confident wrong answer.
     """
     if provider.startswith("custom:"):
-        slug = provider.split(":", 1)[1]
-        for entry in config.get("custom_providers") or []:
-            if isinstance(entry, dict) and str(entry.get("name", "")) == slug:
-                return str(entry.get("base_url") or "")
-        return ""
+        entry = provider_probe.find_custom_provider(config, provider)
+        return provider_probe.custom_provider_base_url(entry) if entry else ""
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
     except ImportError:
@@ -343,19 +372,30 @@ def main(argv):
         say("选了模型服务商（%s），但没有填模型名称。" % provider)
         return NEEDS_CONFIG
 
-    # Which variable should hold the key.
+    # Which variable should hold the key -- or, for a custom provider, the
+    # key itself, which may be written straight into config.yaml.
+    inline_key = ""
+    no_key_hint = ()
     if provider.startswith("custom:"):
         slug = provider.split(":", 1)[1]
-        key_var = ""
-        for entry in config.get("custom_providers") or []:
-            if isinstance(entry, dict) and str(entry.get("name", "")) == slug:
-                key_var = str(entry.get("key_env") or "")
-                break
-        if not key_var:
+        entry = provider_probe.find_custom_provider(config, provider)
+        if entry is None:
             say("配置里写着自定义服务商 %s，但 custom_providers 里没有它的条目。" % slug,
                 "请重新打开配置页面保存一次。")
             return NEEDS_CONFIG
-        candidates = (key_var,)
+        inline_key = provider_probe.custom_provider_inline_key(entry)
+        key_var = provider_probe.custom_provider_key_var(entry)
+        if not inline_key and not key_var:
+            # Not a refusal on its own: the engine falls back to
+            # OPENAI_API_KEY, so such an entry can run. Only a hint, and
+            # only printed if nothing turns one up below -- the old code
+            # stopped here and called the entry missing, which it is not.
+            no_key_hint = (
+                "（custom_providers 里的 %s 既没写 api_key，也没写 key_env，" % slug
+                + "所以只能去找上面这个变量。）",)
+        # The engine's order, from runtime_provider._resolve_custom.
+        candidates = tuple(
+            n for n in (key_var,) + provider_probe.CUSTOM_KEY_FALLBACK_VARS if n)
     else:
         candidates, verdict = key_vars_for(provider)
         if verdict != "api_key":
@@ -366,7 +406,10 @@ def main(argv):
             # while letting it through costs them one clear error message.
             return 0
 
-    env = read_env_file(os.path.join(data_dir, ".env"))
+    env_path = os.path.join(data_dir, ".env")
+    if repair_env_bom(env_path):
+        say("[i] data\\.env 开头有一个 BOM 字符，引擎会因此读不到第一个变量。已经去掉了。")
+    env = read_env_file(env_path)
     found = ""
     for name in candidates:
         value = env.get(name) or os.environ.get(name) or ""
@@ -374,7 +417,7 @@ def main(argv):
             found = name
             break
 
-    if not found:
+    if not found and not inline_key:
         # key_vars_for returns () for anything it does not recognise, and the
         # branch above is what keeps those from reaching here. Indexing it
         # blind would raise IndexError into the catch-all at the bottom of
@@ -385,15 +428,16 @@ def main(argv):
         has_stored_login = os.path.exists(auth_json) and os.path.getsize(auth_json) > 2
         if not has_stored_login:
             say("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model),
-                "密钥应该写在 data\\.env 的 %s 里。" % where)
+                "密钥应该写在 data\\.env 的 %s 里。" % where, *no_key_hint)
             return NEEDS_CONFIG
 
     # Everything above is static. This is the only check that finds out
     # whether the thing will actually answer.
+    key_value = (env.get(found) or os.environ.get(found) or "") if found else ""
     probe_code = run_launch_probe(
         data_dir, provider, model,
         base_url_for(provider, config, env),
-        (env.get(found) or os.environ.get(found) or "") if found else "")
+        inline_key or key_value)
     if probe_code != 0:
         return probe_code
 

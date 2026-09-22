@@ -32,6 +32,7 @@ PREFLIGHT = os.path.join(SCRIPTS, "preflight.py")
 SANDBOX = os.path.join(HERE, "_tmp_preflight")
 
 NL = chr(10)
+BOM = bytes([0xEF, 0xBB, 0xBF])
 NEEDS_CONFIG = 10
 FAILURES = []
 
@@ -155,6 +156,63 @@ def test_a_python_without_pyyaml_does_not_accuse_the_config():
     check(code == 0, "--print-workspace survives a missing PyYAML")
 
 
+def test_a_bom_in_env_is_repaired_not_just_reported():
+    """A BOM makes the first variable's name unusable, to everyone.
+
+    "﻿OPENAI_API_KEY" is not OPENAI_API_KEY. python-dotenv -- which is
+    what the engine reads this file with -- keeps the BOM in the name too,
+    so the key is not missing, it is inert: nothing matches it and the agent
+    never answers. Notepad and PowerShell's `Set-Content -Encoding utf8`
+    both produce one, and the config page used to carry it through a save
+    rather than dropping it, so there was no way out from inside the
+    product.
+
+    Repaired rather than reported, because the damage is unambiguous, the
+    fix is three bytes, and the alternative is a user retyping a key that
+    was right all along.
+    """
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+    data = os.path.join(SANDBOX, "data")
+    os.makedirs(data)
+    with io.open(os.path.join(data, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(DEEPSEEK)
+    env_path = os.path.join(data, ".env")
+    with io.open(env_path, "w", encoding="utf-8-sig") as f:
+        f.write("DEEPSEEK_API_KEY=sk-present-all-along" + NL)
+
+    raw = io.open(env_path, "rb").read()
+    check(raw[:3] == BOM, "the fixture really does start with a BOM")
+
+    environ = dict(os.environ)
+    environ["U_HERMES_SKIP_PROBE"] = "1"
+    environ["PYTHONIOENCODING"] = "utf-8"
+    for name in list(environ):
+        if name.endswith("_API_KEY"):
+            del environ[name]
+    proc = subprocess.run([sys.executable, PREFLIGHT, data],
+                          capture_output=True, env=environ)
+    out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+
+    check(proc.returncode == 0,
+          "the launch is not blocked over a key that is present")
+    check("BOM" in out, "...and the user is told what was wrong")
+    check("没有找到 API 密钥" not in out,
+          "...not told the key is missing, which it never was")
+    check(io.open(env_path, "rb").read()[:3] != BOM,
+          "the BOM is gone from the file")
+    check("sk-present-all-along" in
+          io.open(env_path, encoding="utf-8").read(),
+          "...and the key itself is untouched")
+
+    # Second run: nothing left to repair, nothing said about it.
+    proc = subprocess.run([sys.executable, PREFLIGHT, data],
+                          capture_output=True, env=environ)
+    out2 = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+    check("BOM" not in out2, "a clean .env is not nagged about")
+
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+
+
 def test_key_presence():
     code, out = run(config=DEEPSEEK)
     check(code == NEEDS_CONFIG, "a provider with no key anywhere is blocked")
@@ -228,9 +286,11 @@ class _Fake(http.server.BaseHTTPRequestHandler):
     status = 200
     body = b"{}"
     hits = 0
+    last_auth = ""
 
     def do_POST(self):
         _Fake.hits += 1
+        _Fake.last_auth = self.headers.get("Authorization") or ""
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.send_response(_Fake.status)
         self.send_header("Content-Length", str(len(_Fake.body)))
@@ -245,6 +305,7 @@ def fake_provider(status, body):
     _Fake.status = status
     _Fake.body = json.dumps(body).encode("utf-8")
     _Fake.hits = 0
+    _Fake.last_auth = ""
     srv = http.server.HTTPServer(("127.0.0.1", 0), _Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, "http://127.0.0.1:%d/v1" % srv.server_address[1]
@@ -399,12 +460,146 @@ def test_print_workspace():
     check(out.strip() == "", "nothing is printed when no workspace is configured")
 
 
+def test_a_custom_provider_is_matched_the_way_the_engine_matches_it():
+    """preflight compared the entry name to the slug with ==; the engine
+    lowercases the request and hyphenates spaces (custom_provider_slug in
+    hermes_cli.providers) and accepts either the display name or the slug.
+
+    So every custom provider whose name carried a capital letter or a space --
+    "LongCat", "My Server", the ordinary way a person names one -- looked
+    missing to the launcher, which refused to start a config the engine runs
+    fine and told the user the entry was not there. The developer's own
+    machine was in exactly this state.
+    """
+    def cfg(entry_name, provider, extra):
+        return ('model:' + NL + '  provider: "' + provider + '"' + NL +
+                '  default: "x"' + NL + 'custom_providers:' + NL +
+                '  - name: "' + entry_name + '"' + NL +
+                '    base_url: "https://x/v1"' + NL + extra)
+
+    key_env = '    key_env: "MY_KEY"' + NL
+    has_key = "MY_KEY=abc" + NL
+
+    code, out = run(config=cfg("LongCat", "custom:longcat", key_env),
+                    env_file=has_key)
+    check(code == 0, "an entry named LongCat answers to custom:longcat")
+
+    code, out = run(config=cfg("My Server", "custom:my-server", key_env),
+                    env_file=has_key)
+    check(code == 0, "a space in the name becomes a hyphen in the slug")
+
+    # The engine reads base_url, url or api, in that order. Reading only
+    # the first left base_url empty for an entry spelled either other way,
+    # and run_launch_probe returns 0 when it has nowhere to ask -- so the
+    # gate went quiet instead of failing. Only a probe run proves this one:
+    # with the probe off, preflight never looks the address up at all.
+    srv, url = fake_provider(200, GOOD_REPLY)
+    try:
+        spelled_url = ('model:' + NL + '  provider: "custom:local"' + NL +
+                       '  default: "m"' + NL + 'custom_providers:' + NL +
+                       '  - name: "local"' + NL +
+                       '    url: "' + url + '"' + NL + key_env)
+        code, out = run(config=spelled_url, env_file=has_key, probe=True)
+        check(code == 0, "an entry that spells its address 'url' still resolves")
+        check(_Fake.hits == 1, "...and the probe really went there")
+    finally:
+        srv.shutdown()
+
+
+def test_a_key_written_into_the_config_counts_as_a_key():
+    """A custom_providers entry may carry its key inline as api_key rather
+    than naming an environment variable, and the engine accepts both (see
+    _normalize_custom_provider_entry). preflight demanded key_env, and when
+    it was absent announced that the entry itself was missing -- a statement
+    that was simply false, with a remedy ("open the config page and save
+    once") that changed nothing about it.
+
+    The same gap reached the launch probe: it was handed an empty key and
+    returned 0 without asking the provider anything, so the one check that
+    finds out whether the thing will answer never ran for these configs.
+    """
+    def cfg(extra):
+        return ('model:' + NL + '  provider: "custom:local"' + NL +
+                '  default: "x"' + NL + 'custom_providers:' + NL +
+                '  - name: "local"' + NL +
+                '    base_url: "https://x/v1"' + NL + extra)
+
+    code, out = run(config=cfg('    api_key: "sk-written-into-config"' + NL))
+    check(code == 0, "an inline api_key is a key, with no .env involved")
+
+    # Satisfying the check is not the point -- the key has to reach the
+    # provider. run_launch_probe was handed "" for every config of this
+    # shape and returned 0 without asking anyone anything.
+    srv, url = fake_provider(200, GOOD_REPLY)
+    try:
+        live = ('model:' + NL + '  provider: "custom:local"' + NL +
+                '  default: "m"' + NL + 'custom_providers:' + NL +
+                '  - name: "local"' + NL +
+                '    base_url: "' + url + '"' + NL +
+                '    api_key: "sk-inline-probe"' + NL)
+        code, out = run(config=live, probe=True)
+        check(code == 0, "...and a provider keyed that way launches once it answers")
+        check(_Fake.hits == 1, "...having actually been asked")
+        check("sk-inline-probe" in _Fake.last_auth,
+              "...and asked with the key from the config, not an empty string")
+    finally:
+        srv.shutdown()
+
+
+    code, out = run(config=cfg(""))
+    check(code == NEEDS_CONFIG, "an entry carrying no key at all is still blocked")
+    check("没有它的条目" not in out,
+          "...but is not called a missing entry, because it is right there")
+    check("api_key" in out and "key_env" in out,
+          "...and the message names both ways to supply one")
+
+    # ...and it is only a hint. runtime_provider falls back to OPENAI_API_KEY
+    # and then OPENROUTER_API_KEY before giving up, so an entry naming no key
+    # of its own still runs when one of those is set. Blocking it would cost
+    # the user the whole install to save them one error message.
+    code, out = run(config=cfg(""), env_file="OPENAI_API_KEY=sk-present" + NL)
+    check(code == 0, "...and such an entry launches when OPENAI_API_KEY is set")
+
+    code, out = run(config=cfg('    key_env: "MY_KEY"' + NL),
+                    env_file="OPENAI_API_KEY=sk-present" + NL)
+    check(code == 0, "a named variable that is unset falls back the way the engine does")
+
+    # Both spellings at once: the engine reads the inline key first
+    # (runtime_provider._resolve_custom), so that is what the probe must ask
+    # with, or it proves a credential the engine will not use.
+    srv, url = fake_provider(200, GOOD_REPLY)
+    try:
+        both = ('model:' + NL + '  provider: "custom:local"' + NL +
+                '  default: "m"' + NL + 'custom_providers:' + NL +
+                '  - name: "local"' + NL +
+                '    base_url: "' + url + '"' + NL +
+                '    api_key: "sk-inline-wins"' + NL +
+                '    key_env: "MY_KEY"' + NL)
+        code, out = run(config=both, env_file="MY_KEY=sk-from-env" + NL, probe=True)
+        check("sk-inline-wins" in _Fake.last_auth,
+              "an inline key outranks key_env, as it does at runtime")
+    finally:
+        srv.shutdown()
+
+    orphan = ('model:' + NL + '  provider: "custom:ghost"' + NL +
+              '  default: "x"' + NL + 'custom_providers:' + NL +
+              '  - name: "local"' + NL +
+              '    base_url: "https://x/v1"' + NL)
+    code, out = run(config=orphan)
+    check(code == NEEDS_CONFIG, "a genuinely absent entry is still blocked")
+    check("没有它的条目" in out,
+          "...and there the missing-entry wording is the true one")
+
+
 if __name__ == "__main__":
     for fn in (test_unreadable_configs_are_named_precisely,
                test_a_python_without_pyyaml_does_not_accuse_the_config,
+               test_a_bom_in_env_is_repaired_not_just_reported,
                test_key_presence,
                test_an_unknown_provider_is_never_a_reason_to_block,
                test_custom_providers,
+               test_a_custom_provider_is_matched_the_way_the_engine_matches_it,
+               test_a_key_written_into_the_config_counts_as_a_key,
                test_the_gateway_key_is_looked_for_where_the_engine_reads_it,
                test_the_launch_probe_asks_the_provider_before_the_user_does,
                test_only_config_fixable_failures_block_a_launch,

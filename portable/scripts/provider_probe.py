@@ -14,6 +14,7 @@ never fix itself, so the launcher sends the user to the config page. A rate
 limit or a flaky network will, so it prints the reason and gets out of the way.
 """
 import json
+import os
 import socket
 import ssl
 import urllib.error
@@ -239,3 +240,134 @@ def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
                       % e.__class__.__name__)
     except Exception as e:
         return Result(False, UNKNOWN, "测试失败：%s" % e.__class__.__name__)
+
+
+# --------------------------------------------------------------------------
+# Which entry does custom:<name> mean, and where is its key?
+#
+# preflight and diagnose each had their own answer and both were stricter
+# than the engine, in the same two ways: they compared the name with == when
+# hermes_cli.providers lowercases it and hyphenates its spaces, and preflight
+# accepted only key_env when an entry may carry the key inline. Between them
+# a provider named "LongCat" could neither launch nor be diagnosed, while
+# the engine ran it. One answer, next to the request it feeds.
+# --------------------------------------------------------------------------
+
+# The three spellings the engine reads an address under, in its order:
+# _normalize_custom_provider_entry tries base_url, then url, then api.
+def custom_provider_base_url(entry):
+    for field in ("base_url", "url", "api"):
+        value = entry.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+# A custom_providers entry may name an environment variable to read the key
+# from, or carry the key inline. The engine accepts both, plus the aliases
+# _normalize_custom_provider_entry folds onto them; refusing either half is
+# refusing a config that runs.
+KEY_VAR_FIELDS = ("key_env", "api_key_env", "keyEnv", "apiKeyEnv")
+INLINE_KEY_FIELDS = ("api_key", "apiKey")
+
+
+def _first_field(entry, fields):
+    for field in fields:
+        value = entry.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def custom_provider_slug(display_name):
+    """The engine's name-to-id rule, from hermes_cli.providers.
+
+    custom_provider_slug lowercases the display name and hyphenates its
+    spaces; resolve_custom_provider then accepts either that slug or the
+    plain lowercased name.
+    """
+    return str(display_name or "").strip().lower().replace(" ", "-")
+
+
+def find_custom_provider(config, provider):
+    """The custom_providers entry the engine will resolve, or None.
+
+    This was == against the raw entry name, which is stricter than the
+    engine in the one direction that costs the user their whole install:
+    an entry named "LongCat" or "My Server" -- the ordinary way a
+    person names one -- did not match custom:longcat or custom:my-server,
+    so the launcher refused to start a config the engine runs fine and
+    reported that the entry was not there.
+
+    Entries with no address are skipped the way resolve_custom_provider
+    skips them, but kept as a fallback, so a caller can still tell
+    "not there" from "there but unusable" and say whichever is true.
+    """
+    if not isinstance(config, dict) or not provider.startswith("custom:"):
+        # preflight swallows exceptions into a silent pass, so a shared
+        # helper handing it an AttributeError would turn the launch gate
+        # off without saying so.
+        return None
+    wanted = provider.split(":", 1)[1].strip().lower()
+    if not wanted:
+        return None
+    fallback = None
+    for entry in config.get("custom_providers") or []:
+        if not isinstance(entry, dict):
+            continue
+        display = str(entry.get("name") or "").strip()
+        if not display:
+            continue
+        if wanted not in (display.lower(), custom_provider_slug(display)):
+            continue
+        if custom_provider_base_url(entry):
+            return entry
+        if fallback is None:
+            fallback = entry
+    return fallback
+
+# When an entry resolves to no key of its own, runtime_provider still tries
+# these two before giving up, so an entry naming neither api_key nor key_env
+# can be perfectly runnable. A checker that stops short of them blocks a
+# config the engine starts.
+CUSTOM_KEY_FALLBACK_VARS = ("OPENAI_API_KEY", "OPENROUTER_API_KEY")
+
+
+def custom_provider_key_var(entry):
+    """The environment variable this entry says holds its key, or "".
+
+    key_env is the canonical spelling; the other three are aliases
+    _normalize_custom_provider_entry folds onto it, in its order.
+    """
+    return _first_field(entry, KEY_VAR_FIELDS)
+
+
+def custom_provider_inline_key(entry):
+    """The key written straight into config.yaml, or "".
+
+    Perfectly ordinary -- the engine takes api_key as a literal. A checker
+    that demands key_env instead calls such a config broken.
+    """
+    return _first_field(entry, INLINE_KEY_FIELDS)
+
+
+def custom_provider_credential(entry, env=None):
+    """(address, key) for an entry, reading .env where it names a variable.
+
+    env is a mapping of what data/.env holds; the process environment is
+    the fallback, exactly as at runtime.
+    """
+    env = env or {}
+    # runtime_provider._resolve_custom's order: the inline key first, then
+    # the variable the entry names, then the two blanket fallbacks.
+    key = custom_provider_inline_key(entry)
+    if not key:
+        names = (custom_provider_key_var(entry),) + CUSTOM_KEY_FALLBACK_VARS
+        for var in names:
+            if not var:
+                continue
+            key = (env.get(var) or os.environ.get(var) or "").strip()
+            if key:
+                break
+    return custom_provider_base_url(entry), key
+

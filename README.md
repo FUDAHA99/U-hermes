@@ -98,6 +98,10 @@ cd u-hermes/portable && bash setup.sh
 bash Mac-Start.command
 ```
 
+Working on the project itself — the sync-to-instance loop, what CI enforces
+and why, and the traps that have cost real time here — is in
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+
 ---
 
 ## Features

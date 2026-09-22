@@ -206,20 +206,31 @@ def _item_name(item_lines):
 
 
 def _merge_named_list(existing_body, incoming_body, indent):
-    """Merge two lists of ``- name: X`` entries, keyed on name.
+    """Merge two lists of ``- name: X`` entries, keyed on the engine's slug.
 
     Keeps providers the user added by hand that the page knows nothing about.
+
+    Keyed on the slug rather than the literal name because the two spellings
+    are the same provider: the page writes the name lowercased and
+    hyphenated, while an entry already in the file keeps whatever display
+    name it was given. Comparing them literally made "My Server" and
+    "my-server" look like different providers, so the page appended a
+    second entry that config.yaml then resolved to the same
+    custom:my-server -- and the engine takes the first, which is the one the
+    user did not just edit. Their new address and key sat in the file
+    underneath the old ones while every chat kept going to the old endpoint,
+    immediately after the connection test passed against the new one.
     """
     out = _split_list_items(existing_body, indent)
     names = {}
     for i, item in enumerate(out):
-        name = _item_name(item)
-        if name is not None:
-            names[name] = i
+        slug = provider_probe.custom_provider_slug(_item_name(item))
+        if slug:
+            names[slug] = i
     for item in _split_list_items(incoming_body, indent):
-        name = _item_name(item)
-        if name is not None and name in names:
-            out[names[name]] = item
+        slug = provider_probe.custom_provider_slug(_item_name(item))
+        if slug and slug in names:
+            out[names[slug]] = item
         else:
             out.append(item)
     return [line for item in out for line in item]
@@ -782,7 +793,11 @@ class ConfigHandler(http.server.BaseHTTPRequestHandler):
         existing = ""
         try:
             if os.path.exists(path):
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                # utf-8-sig, so a BOM someone's editor left here is dropped
+                # rather than carried through the merge. It makes the first
+                # variable's name "﻿OPENAI_API_KEY", which nothing --
+                # not the engine, not python-dotenv -- will ever match.
+                with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
                     existing = f.read()
         except OSError as e:
             self._json(500, {

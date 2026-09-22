@@ -546,10 +546,78 @@ def test_write_failures_are_explained_in_chinese():
           "an unrecognised errno still names the file")
 
 
+def test_a_custom_provider_is_replaced_not_duplicated():
+    """The page slugifies the name it writes; the merge keyed on the raw one.
+
+    A user who names their provider "My Server" ends up with two entries --
+    the one already in the file and the one the page just appended -- both of
+    which the engine resolves as custom:my-server. It takes the first, so the
+    entry the user just edited is the one it never reads: the new address and
+    the new key sit in the file underneath the old ones, the connection test
+    on the page passes (it calls the URL they typed, not the one in effect),
+    and every chat still goes to the dead endpoint.
+
+    Exactly the trap the model-block merge above exists to close, one layer
+    down. The developer's own config.yaml had the duplicate pair in it.
+    """
+    existing = """\
+model:
+  provider: "custom:my-server"
+  default: "m"
+
+custom_providers:
+  - name: "My Server"
+    base_url: "https://old.example/v1"
+    key_env: "OLD_KEY"
+"""
+    from_page = """\
+model:
+  provider: "custom:my-server"
+  default: "m"
+
+custom_providers:
+  - name: "my-server"
+    base_url: "https://new.example/v1"
+    key_env: "OPENAI_API_KEY"
+"""
+    data = cs.parse_yaml_mapping(cs.merge_yaml(existing, from_page))
+    check(data is not None, "the merged config still parses")
+    if data is None:
+        return
+    entries = data.get("custom_providers") or []
+    check(len(entries) == 1,
+          "the entry is replaced, not appended alongside itself (got %d)"
+          % len(entries))
+    if entries:
+        check(entries[0].get("base_url") == "https://new.example/v1",
+              "...and the address in effect is the one just saved")
+        check(entries[0].get("key_env") == "OPENAI_API_KEY",
+              "...as is the variable its key is read from")
+
+    # A provider the page knows nothing about still has to survive; that is
+    # the whole reason this merge exists.
+    kept = """\
+model:
+  provider: "custom:my-server"
+  default: "m"
+
+custom_providers:
+  - name: "My Server"
+    base_url: "https://old.example/v1"
+  - name: "Something Else"
+    base_url: "https://other.example/v1"
+"""
+    data = cs.parse_yaml_mapping(cs.merge_yaml(kept, from_page))
+    names = [e.get("name") for e in (data.get("custom_providers") or [])]
+    check(len(names) == 2 and "Something Else" in names,
+          "an unrelated entry is untouched (got %s)" % names)
+
+
 if __name__ == "__main__":
     for fn in (test_nothing_is_lost, test_shape, test_foreign_indentation,
                test_byte_order_mark,
                test_provider_switch_does_not_inherit_the_old_endpoint,
+               test_a_custom_provider_is_replaced_not_duplicated,
                test_workspace,
                test_bad_bodies_are_refused, test_env_merge,
                test_a_write_that_cannot_land_is_reported,

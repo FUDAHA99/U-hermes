@@ -130,7 +130,7 @@ def load_env():
     env = {}
     if os.path.exists(ENV_FILE):
         try:
-            with open(ENV_FILE, encoding="utf-8", errors="replace") as f:
+            with open(ENV_FILE, encoding="utf-8-sig", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
@@ -169,19 +169,18 @@ def call_provider(base_url, api_key, model):
     return result.ok, result.message
 
 def resolve_provider(cfg, ref, env):
-    """把 custom:<name> 解析成 (base_url, api_key, 名称)，解析不了返回 None。"""
-    if not ref.startswith("custom:"):
+    """把 custom:<name> 解析成 (base_url, api_key, 名称)，解析不了返回 None。
+
+    匹配交给 provider_probe，跟引擎同一套规则。这里原先用 == 比条目名，比
+    引擎严：引擎会把名字转小写、空格换连字符，于是一个叫 "LongCat" 的条目
+    在这里根本找不到，诊断就报 "使用内置服务商" 然后跳过唯一有用的那项
+    测试——而引擎跑这份配置毫无问题。
+    """
+    entry = provider_probe.find_custom_provider(cfg, ref)
+    if entry is None:
         return None
-    name = ref.split(":", 1)[1]
-    for entry in cfg.get("custom_providers") or []:
-        if isinstance(entry, dict) and entry.get("name") == name:
-            base_url = entry.get("base_url") or ""
-            api_key = entry.get("api_key") or ""
-            if not api_key:
-                key_env = entry.get("key_env") or entry.get("api_key_env") or ""
-                api_key = env.get(key_env) or os.environ.get(key_env, "")
-            return base_url, api_key, name
-    return None
+    base_url, api_key = provider_probe.custom_provider_credential(entry, env)
+    return base_url, api_key, str(entry.get("name") or "").strip()
 
 
 
@@ -287,6 +286,12 @@ def main():
             else:
                 print("  %s 主模型 %s 缺少地址或密钥" % (BAD, name))
                 problems.append("主模型配置不完整，请重新配置。")
+        elif provider.startswith("custom:"):
+            # Calling this a built-in provider was the opposite of true, and
+            # it skipped the only check on this page that reaches the network.
+            print("  %s 配置里写着 %s，但 custom_providers 里没有对应条目，无法测试"
+                  % (BAD, provider))
+            problems.append("自定义服务商 %s 在 custom_providers 里没有条目。" % provider)
         elif provider:
             print("  %s 使用内置服务商 (%s)，跳过直连测试" % (WARN, provider))
         for fb in (cfg.get("fallback_providers") or [])[:1]:
