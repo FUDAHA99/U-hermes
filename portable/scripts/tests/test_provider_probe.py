@@ -264,6 +264,130 @@ def test_there_is_only_one_copy_of_this_table():
           "only provider_probe.py maps HTTP codes (found: %s)" % ", ".join(owners))
 
 
+def test_which_entry_custom_means():
+    """The launcher and the diagnostic each had their own answer to this, and
+    both were stricter than the engine in the same two ways.
+
+    hermes_cli.providers.custom_provider_slug lowercases the entry name and
+    hyphenates its spaces, and resolve_custom_provider accepts either that or
+    the plain lowercased name.  Comparing with == instead meant an entry
+    called "LongCat" or "My Server" -- the ordinary way a person names one --
+    was invisible: the launcher refused to start, saying the entry was not in
+    custom_providers, and 一键诊断 called it a built-in provider and skipped
+    the only test on the page that reaches the network.  The engine ran that
+    config the whole time.
+    """
+    def cfg(*entries):
+        return {"custom_providers": list(entries)}
+
+    longcat = {"name": "LongCat", "base_url": "https://a/v1", "key_env": "MY_KEY"}
+    check(pp.find_custom_provider(cfg(longcat), "custom:longcat") is longcat,
+          "an entry named LongCat answers to custom:longcat")
+
+    spaced = {"name": "My Server", "base_url": "https://a/v1"}
+    check(pp.find_custom_provider(cfg(spaced), "custom:my-server") is spaced,
+          "a space in the name is a hyphen in the slug")
+
+    check(pp.find_custom_provider(cfg(longcat), "custom:ghost") is None,
+          "a name that matches nothing still resolves to nothing")
+    check(pp.find_custom_provider(cfg(longcat), "deepseek") is None,
+          "a built-in provider is not looked up here at all")
+
+    # resolve_custom_provider skips entries with no address and takes the
+    # first one that has it; matching that keeps this from naming an entry
+    # the engine would pass over.
+    addressless = {"name": "local"}
+    usable = {"name": "local", "base_url": "https://b/v1"}
+    check(pp.find_custom_provider(cfg(addressless, usable), "custom:local") is usable,
+          "an entry with no address loses to one that has it")
+    check(pp.find_custom_provider(cfg(addressless), "custom:local") is addressless,
+          "...but is still returned alone, so callers can say what is wrong")
+
+
+def test_where_a_custom_entry_keeps_its_key():
+    """An entry may name a variable or carry the key inline, under any of the
+    spellings _normalize_custom_provider_entry folds together.  preflight
+    accepted only key_env and reported everything else as a missing entry --
+    a statement that was false, with a remedy that rewrote the same file.
+    """
+    check(pp.custom_provider_key_var({"api_key_env": "A"}) == "A",
+          "api_key_env is key_env, as the engine documents it")
+    check(pp.custom_provider_key_var({"apiKeyEnv": "A"}) == "A",
+          "so is apiKeyEnv")
+    check(pp.custom_provider_key_var({"key_env": "A", "apiKeyEnv": "B"}) == "A",
+          "...and key_env wins when both are present, as it does there")
+    check(pp.custom_provider_inline_key({"apiKey": "sk-x"}) == "sk-x",
+          "apiKey is api_key")
+
+    check(pp.custom_provider_base_url({"url": "https://a/v1"}) == "https://a/v1",
+          "an address may be spelled url")
+    check(pp.custom_provider_base_url({"api": "https://a/v1"}) == "https://a/v1",
+          "...or api")
+    check(pp.custom_provider_base_url(
+        {"base_url": "https://a/v1", "url": "https://b/v1"}) == "https://a/v1",
+        "...with base_url first, as the engine reads them")
+
+
+def test_the_credential_order_is_the_engines():
+    """runtime_provider._resolve_custom tries the inline key, then the
+    variable the entry names, then OPENAI_API_KEY and OPENROUTER_API_KEY.
+    Getting this order wrong means probing with a credential the engine will
+    not use -- a green check over a chat window that never answers.
+    """
+    # These fall through to the process environment last, exactly as the
+    # engine does, so a key sitting in the ambient environment would make
+    # the final checks pass for the wrong reason -- or fail on a machine
+    # that happens to have one exported.
+    saved = {}
+    for name in pp.CUSTOM_KEY_FALLBACK_VARS:
+        if name in os.environ:
+            saved[name] = os.environ.pop(name)
+    try:
+        _credential_order_checks()
+    finally:
+        os.environ.update(saved)
+
+
+def _credential_order_checks():
+    entry = {"name": "l", "base_url": "https://a/v1",
+             "api_key": "sk-inline", "key_env": "MY_KEY"}
+    _, key = pp.custom_provider_credential(entry, {"MY_KEY": "sk-env"})
+    check(key == "sk-inline", "an inline key outranks the variable it also names")
+
+    entry = {"name": "l", "base_url": "https://a/v1", "key_env": "MY_KEY"}
+    _, key = pp.custom_provider_credential(entry, {"MY_KEY": "sk-env"})
+    check(key == "sk-env", "...and the variable is read when there is no inline key")
+
+    _, key = pp.custom_provider_credential(entry, {"OPENAI_API_KEY": "sk-blanket"})
+    check(key == "sk-blanket",
+          "an unset variable falls through to OPENAI_API_KEY, as it does there")
+
+    entry = {"name": "l", "base_url": "https://a/v1"}
+    _, key = pp.custom_provider_credential(entry, {"OPENROUTER_API_KEY": "sk-or"})
+    check(key == "sk-or", "an entry naming no key at all still has these two")
+
+    _, key = pp.custom_provider_credential(entry, {})
+    check(key == "", "and nothing at all is nothing, not a crash")
+
+
+def test_there_is_only_one_copy_of_this_lookup():
+    """Same reason as the table above: two copies drifted apart, and both
+    ended up stricter than the engine in the same two ways.
+    """
+    import re
+    owners = []
+    for name in sorted(os.listdir(SCRIPTS)):
+        if not name.endswith(".py"):
+            continue
+        with open(os.path.join(SCRIPTS, name), encoding="utf-8") as f:
+            text = f.read()
+        if re.search(r"get\(\s*[" + chr(34) + chr(39) + r"]custom_providers[" + chr(34) + chr(39) + r"]", text):
+            owners.append(name)
+    check(owners == ["provider_probe.py"],
+          "only provider_probe.py walks custom_providers (found: %s)"
+          % ", ".join(owners))
+
+
 if __name__ == "__main__":
     for fn in (test_a_working_provider,
                test_an_anthropic_surface_is_probed_differently,
@@ -273,7 +397,11 @@ if __name__ == "__main__":
                test_a_reply_that_is_not_a_reply,
                test_network_failures_are_not_config_failures,
                test_what_the_launcher_is_allowed_to_block_on,
-               test_there_is_only_one_copy_of_this_table):
+               test_there_is_only_one_copy_of_this_table,
+               test_which_entry_custom_means,
+               test_where_a_custom_entry_keeps_its_key,
+               test_the_credential_order_is_the_engines,
+               test_there_is_only_one_copy_of_this_lookup):
         print(fn.__name__)
         fn()
     print()
