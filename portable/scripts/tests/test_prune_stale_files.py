@@ -97,7 +97,8 @@ def test_what_v0_4_4_left_behind_is_removed():
         shared = SITE + "tools/registry.py"
         for rel in (old_meta, old_tool, old_plugin, new_meta, shared):
             put(root, rel)
-        old_record = record(root, old_dist, ["hermes_agent-0.21.3.dist-info/METADATA", "tools/setup_mcp_tool.py"])
+        old_record = record(root, old_dist, ["hermes_agent-0.21.3.dist-info/METADATA", "tools/setup_mcp_tool.py",
+                                             "plugins/model-providers/opencode-free/__init__.py"])
         manifest(root, "v0.4.3", [old_meta, old_record, old_tool, old_plugin, shared], legacy=True)
         manifest(root, "v0.4.5", [new_meta, shared])
 
@@ -160,23 +161,126 @@ def test_a_package_reinstalled_at_runtime_is_not_half_deleted():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_a_shipped_package_that_is_going_away_goes_whole():
-    print("...but a package only the older release had is removed, dist-info and all")
+def test_third_party_packages_are_left_alone():
+    print("review 2, F1: a runtime install depends on a package this release stopped shipping")
     root = install("v0.4.7")
     try:
-        mods = ["oldpkg/__init__.py", "oldpkg/core.py"]
+        # v0.4.6 shipped aiohttp (via the messaging extra); v0.4.7 does not.
+        # The engine lazily installed edge-tts, which imports aiohttp.
+        mods = ["aiohttp/__init__.py", "aiohttp/client.py"]
         for m in mods:
             put(root, SITE + m)
-        rec = record(root, "oldpkg-1.0.dist-info", mods)
-        meta = SITE + "oldpkg-1.0.dist-info/METADATA"
+        rec = record(root, "aiohttp-3.14.3.dist-info", mods)
+        meta = SITE + "aiohttp-3.14.3.dist-info/METADATA"
         put(root, meta)
+        put(root, SITE + "edge_tts/__init__.py", "import aiohttp")
+        record(root, "edge_tts-7.2.7.dist-info", ["edge_tts/__init__.py"])
         manifest(root, "v0.4.6", [SITE + m for m in mods] + [rec, meta])
         manifest(root, "v0.4.7", [])
-        deleted, _f, _ = ps.prune(root)
-        check(deleted == 4 and not exists(root, SITE + "oldpkg") and not exists(root, SITE + "oldpkg-1.0.dist-info"),
-              "its own RECORD does not protect it (%d deleted)" % deleted)
+        deleted, failed, _ = ps.prune(root)
+        check(deleted == 0 and all(exists(root, SITE + m) for m in mods) and exists(root, meta),
+              "aiohttp stays: only the old engine's own files are pruned in the venv (%d deleted)" % deleted)
+        check(not failed and not exists(root, ps.MANIFEST_DIR + "/files-v0.4.6.txt"),
+              "and that is not a failure: the older list is done with")
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_old_engine_bytecode_goes_with_its_source():
+    print("the old engine's __pycache__ entries are not in its RECORD")
+    root = install("v0.4.5")
+    try:
+        src = SITE + "tools/connections_tool.py"
+        pyc = SITE + "tools/__pycache__/connections_tool.cpython-313.pyc"
+        other_pyc = SITE + "tools/__pycache__/registry.cpython-313.pyc"
+        for rel in (src, pyc, other_pyc):
+            put(root, rel)
+        rec = record(root, "hermes_agent-0.21.3.dist-info", ["tools/connections_tool.py"])
+        manifest(root, "v0.4.4", [src, pyc, other_pyc, rec])
+        manifest(root, "v0.4.5", [])
+        ps.prune(root)
+        check(not exists(root, src) and not exists(root, pyc), "the stale module and its .pyc are both gone")
+        check(exists(root, other_pyc), "a .pyc whose source the old engine does not own stays")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_an_unreadable_engine_record_is_retried():
+    print("if the old engine's RECORD cannot be read, nothing of it is guessed at")
+    root = install("v0.4.5")
+    try:
+        mod = SITE + "tools/old.py"
+        put(root, mod)
+        rec = SITE + "hermes_agent-0.21.3.dist-info/RECORD"
+        put(root, rec)
+        with open(os.path.join(root, *rec.split("/")), "wb") as f:
+            f.write(bytes([0xFF, 0xFE, 0x00]) + b" not utf-8")
+        manifest(root, "v0.4.4", [mod, rec])
+        manifest(root, "v0.4.5", [])
+        deleted, failed, _ = ps.prune(root)
+        check(exists(root, mod) and bool(failed), "its files stay, and it counts as not done (%r)" % failed)
+        check(exists(root, ps.MANIFEST_DIR + "/files-v0.4.4.txt"), "the older list is kept for next start")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_stored_lists_get_one_turn_per_install():
+    print("review 2, F2: re-extracting the same release brings the stored lists back")
+    root = install("v0.5.0")
+    try:
+        # After the first start only files-v0.5.0.txt and the marker are left.
+        manifest(root, "v0.5.0", [])
+        ps.prune(root)
+        check(exists(root, ps.MANIFEST_DIR + "/" + ps.LEGACY_DONE), "the first start leaves the marker")
+        # The engine then lazily installed python-telegram-bot 22.8, the very
+        # version v0.4.4 shipped, so its dist-info name is in the stored list.
+        tg = SITE + "telegram/__init__.py"
+        put(root, tg)
+        rec = record(root, "python_telegram_bot-22.8.dist-info", ["telegram/__init__.py"])
+        # Outside the venv the engine-only rule does not apply, so only the
+        # marker stands between a re-applied list and, say, a package the
+        # user later installed with npm -g at a path v0.4.4 once shipped.
+        npm_global = "runtime/node-win-x64/node_modules/some-cli/index.js"
+        put(root, npm_global)
+        # The diagnose tool's advice, 请重新解压安装包: the same zip again.
+        manifest(root, "v0.4.4", [tg, rec, npm_global], legacy=True)
+        deleted, _f, _ = ps.prune(root)
+        check(deleted == 0 and exists(root, tg) and exists(root, rec) and exists(root, npm_global),
+              "nothing is deleted (%d)" % deleted)
+        check(not exists(root, ps.MANIFEST_DIR + "/legacy-files-v0.4.4.txt"), "the stored list is just cleared away")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_stored_and_real_lists_both_apply_on_the_first_start():
+    print("v0.4.5 extracted over v0.4.4 but never started, then v0.4.6 over that")
+    root = install("v0.4.6")
+    try:
+        from_043 = SITE + "tools/setup_mcp_tool.py"
+        from_045 = "hermes/hermes-agent/gone_in_046.py"
+        for rel in (from_043, from_045):
+            put(root, rel)
+        rec = record(root, "hermes_agent-0.21.3.dist-info", ["tools/setup_mcp_tool.py"])
+        manifest(root, "v0.4.3", [from_043, rec], legacy=True)
+        manifest(root, "v0.4.5", [from_045])
+        manifest(root, "v0.4.6", [])
+        ps.prune(root)
+        check(not exists(root, from_043) and not exists(root, from_045),
+              "no marker yet: the stored list applies alongside the real one")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_network_paths_use_the_unc_long_form():
+    print("review 2, F3: a share path needs the UNC long form")
+    if os.name != "nt":
+        print("  skip  Windows only")
+        return
+    b = chr(92)
+    unc = b * 2 + "server" + b + "share" + b + "U-Hermes"
+    check(ps._ext(unc) == b * 2 + "?" + b + "UNC" + b + "server" + b + "share" + b + "U-Hermes",
+          "the extended form of a share path")
+    check(ps._plain(ps._ext(unc)) == unc, "and back")
 
 
 def test_nothing_the_user_owns_is_touched():
@@ -455,7 +559,12 @@ if __name__ == "__main__":
     for fn in (test_what_v0_4_4_left_behind_is_removed,
                test_stored_lists_are_not_reapplied_after_every_upgrade,
                test_a_package_reinstalled_at_runtime_is_not_half_deleted,
-               test_a_shipped_package_that_is_going_away_goes_whole,
+               test_third_party_packages_are_left_alone,
+               test_old_engine_bytecode_goes_with_its_source,
+               test_an_unreadable_engine_record_is_retried,
+               test_stored_lists_get_one_turn_per_install,
+               test_stored_and_real_lists_both_apply_on_the_first_start,
+               test_network_paths_use_the_unc_long_form,
                test_nothing_the_user_owns_is_touched,
                test_a_case_only_rename_does_not_delete_the_new_file,
                test_a_hostile_or_broken_list_cannot_escape,

@@ -343,14 +343,30 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "the release file list does not match the zip"; exit 1 }
           # And run it the way the launcher does, with the bundled base Python,
           # on a fresh extraction: the stored older lists name nothing that is
-          # here, so not one program file may go.
+          # here, so not one program file may go -- and they must be used up.
+          # A manual or canary build is labelled 0.0.0-ci, which has no release
+          # order and makes prune a no-op; give this scratch copy a release
+          # number so every run, not only a tag, goes down the real path.
+          $pruneLabel = $label
+          if ($label -notmatch '^v\d+\.\d+\.\d+$') {
+            $pruneLabel = "v999.0.0"
+            Set-Content (Join-Path $work "VERSION") $pruneLabel -Encoding ascii
+            Rename-Item (Join-Path $work "hermes\manifests\files-$label.txt") "files-$pruneLabel.txt"
+          }
           $roots = @("hermes\.venv", "hermes\hermes-agent", "runtime") | ForEach-Object { Join-Path $work $_ }
           $before = @($roots | ForEach-Object { Get-ChildItem $_ -Recurse -File -Force }).Count
-          & (Join-Path $work "runtime\python-win-x64\python.exe") (Join-Path $work "scripts\prune-stale-files.py") "$work\."
-          if ($LASTEXITCODE -ne 0) { Write-Error "prune-stale-files.py failed on a fresh install"; exit 1 }
+          # The launcher swallows every error so housekeeping never blocks a
+          # start; here any "[!]" it prints is a failure.
+          $pruneOut = & (Join-Path $work "runtime\python-win-x64\python.exe") (Join-Path $work "scripts\prune-stale-files.py") "$work\." 2>&1 | Out-String
+          $pruneRc = $LASTEXITCODE
+          if ($pruneOut.Trim()) { Write-Host $pruneOut }
+          if ($pruneRc -ne 0 -or $pruneOut -match '\[!\]') { Write-Error "prune-stale-files.py reported a problem on a fresh install"; exit 1 }
           $after = @($roots | ForEach-Object { Get-ChildItem $_ -Recurse -File -Force }).Count
           if ($after -ne $before) { Write-Error "pruning a fresh install removed $($before - $after) program file(s)"; exit 1 }
-          Write-Host "prune on a fresh install: $before program files before and after"
+          $left = (@(Get-ChildItem (Join-Path $work "hermes\manifests") -Force | ForEach-Object { $_.Name }) | Sort-Object) -join ","
+          $want = (@(".legacy-applied", "files-$pruneLabel.txt") | Sort-Object) -join ","
+          if ($left -ne $want) { Write-Error "after a first start the lists left were [$left], expected [$want]"; exit 1 }
+          Write-Host "prune on a fresh install ($pruneLabel): $before program files before and after; left: $left"
 
           $py = Join-Path $work "hermes\.venv\Scripts\python.exe"
           if (-not (Test-Path $py)) { Write-Error "the download has no Python at hermes/.venv/Scripts/python.exe"; exit 1 }

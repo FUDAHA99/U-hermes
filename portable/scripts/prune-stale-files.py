@@ -22,11 +22,17 @@ to "keep":
 
   * only ROOTS, never data\\ or anything else, and only files some release
     listed: the user's own files are in no list;
-  * in site-packages, never a file claimed by the RECORD of a distribution
-    that is installed and not itself going away. The engine installs
-    optional packages into this venv at runtime; if one of them overwrote a
-    package an older release shipped, deleting the old paths would leave a
-    dist-info with no code, which the engine then believes is installed;
+  * inside the venv, only the OLD ENGINE's own files: those named by the
+    RECORD of a hermes_agent dist-info that is going away (plus their
+    __pycache__). The venv is shared -- the engine installs optional
+    packages into it at runtime, with dependencies on what we ship -- and
+    two rounds of review showed path-based pruning of third-party packages
+    breaking them (a dependency deleted under a runtime install; a runtime
+    install with a shipped name deleted outright), with the engine still
+    believing them installed. Stale third-party files are left, as they
+    always were: nothing imports them by scanning. Every stale file that
+    mattered in v0.4.3 -> v0.4.4 (28 of them) was the engine's own. A file
+    any other installed distribution claims is kept regardless;
   * letter case is ignored (Windows would delete this release's foo.py for
     a stale Foo.py), and a path whose real location differs from its name
     -- a junction on the way, an 8.3 alias -- is skipped;
@@ -36,8 +42,9 @@ to "keep":
   * a list is only trusted if its trailer count matches: a torn write reads
     as "unreadable", not as a short list;
   * lists stored for releases that shipped without one (legacy-files-*) are
-    used only when the install has no real older list, i.e. only when it
-    came from one of those releases;
+    applied at most once per install: the first run leaves a marker that no
+    zip contains, so re-extracting any later release cannot bring them back
+    into play;
   * anything that cannot be checked or deleted keeps the older list, so the
     next start retries.
 
@@ -65,6 +72,8 @@ MANIFEST_DIR = "hermes/manifests"
 HEADER = "# U-Hermes shipped files"
 TRAILER = "# end"
 LEGACY_PREFIX = "legacy-"
+LEGACY_DONE = ".legacy-applied"   # written by the first run; in no zip
+ENGINE_DIST = re.compile(r"^hermes_agent-[^/]+\.dist-info$", re.I)
 
 
 def manifest_name(version):
@@ -116,12 +125,16 @@ def read_manifest(path):
 def _ext(path):
     """Extended-length form on Windows, so >260-char paths are seen as they are."""
     path = os.path.abspath(path)
-    if os.name == "nt" and not path.startswith("\\\\?\\"):
-        return "\\\\?\\" + path
-    return path
+    if os.name != "nt" or path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):  # \\server\share -> \\?\UNC\server\share
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
 
 
 def _plain(path):
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[8:]
     return path[4:] if path.startswith("\\\\?\\") else path
 
 
@@ -148,35 +161,56 @@ def _resolves_to_itself(install_dir, base_real, rel):
 
 # --- what must survive ------------------------------------------------------
 
-def claimed_by_live_distributions(install_dir, going):
-    """Casefolded manifest paths that a distribution staying installed claims.
+def _record_paths(site, dist):
+    """Casefolded manifest paths a dist-info's RECORD names (raises on failure)."""
+    with io.open(_ext(os.path.join(site, dist, "RECORD")), encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    return {posixpath.normpath(SITE + row[0].replace("\\", "/")).casefold()
+            for row in rows if row and row[0]}
 
-    `going` is the casefolded stale set: a dist-info whose RECORD is in it is
-    one an older release shipped and this one does not, so its claims do not
-    protect anything. Every other dist-info on disk -- shipped by this
-    release, installed by the engine at runtime, or by the user -- does.
+
+def scan_distributions(install_dir, going):
+    """(engine_owned, protected, unreadable) for the venv.
+
+    engine_owned: what the RECORD of a going hermes_agent dist-info names --
+    the only venv files prune may delete. A dist-info is going when its
+    RECORD is in `going` (an older release shipped it, this one does not).
+    protected: what every other dist-info on disk claims -- this release's,
+    the engine's runtime installs, the user's -- which wins over the above.
+    unreadable: going engine dist-infos whose RECORD could not be read; their
+    files are kept and the older list with them, so the next start retries.
+    A site-packages that cannot be listed yields nothing to delete.
     """
     site = os.path.join(install_dir, *SITE.rstrip("/").split("/"))
-    claimed = set()
+    engine_owned, protected, unreadable = set(), set(), []
     try:
         names = os.listdir(_ext(site))
     except OSError:
-        return claimed
+        return engine_owned, protected, unreadable
     for d in names:
         if not d.endswith(".dist-info"):
             continue
-        record = SITE + d + "/RECORD"
-        if record.casefold() in going:
-            continue
+        is_going = (SITE + d + "/RECORD").casefold() in going
+        if is_going and not ENGINE_DIST.match(d):
+            continue  # a third-party package an older release shipped: left alone
         try:
-            with io.open(_ext(os.path.join(site, d, "RECORD")), encoding="utf-8", newline="") as f:
-                rows = list(csv.reader(f))
+            paths = _record_paths(site, d)
         except (OSError, UnicodeDecodeError, csv.Error):
+            if is_going:
+                unreadable.append(SITE + d)
             continue
-        for row in rows:
-            if row and row[0]:
-                claimed.add(posixpath.normpath(SITE + row[0].replace("\\", "/")).casefold())
-    return claimed
+        (engine_owned if is_going else protected).update(paths)
+    return engine_owned, protected, unreadable
+
+
+def _deletable_in_venv(rel_folded, engine_owned):
+    """An old-engine file, or the bytecode cache of one."""
+    if rel_folded in engine_owned:
+        return True
+    if "/__pycache__/" in rel_folded and rel_folded.endswith(".pyc"):
+        folder, name = rel_folded.rsplit("/__pycache__/", 1)
+        return (folder + "/" + name.split(".")[0] + ".py") in engine_owned
+    return False
 
 
 def _remove_empty_parents(install_dir, rel):
@@ -222,33 +256,42 @@ def prune(install_dir):
         if v is None or v >= current_v:
             continue  # newer: an interrupted extraction, or a downgrade -- never guess
         (legacy if m.group(1) else real).append(n)
-    # Legacy lists stand in for releases that shipped without one. They come
-    # back with every extraction, so apply them only to an install that has
-    # no real list of its own from before -- one that came from such a release.
-    applied = real or legacy
+    # Legacy lists stand in for releases that shipped without one. Every zip
+    # carries them, so they are applied at most once per install: the first
+    # run leaves a marker no zip contains, and after that they are only
+    # cleared away -- whether this is an upgrade, a re-extraction of the same
+    # release, or a downgrade.
+    marker = os.path.join(mdir, LEGACY_DONE)
+    legacy_done = os.path.exists(marker)
+    applied = real + ([] if legacy_done else legacy)
     if not applied:
-        return 0, [], None  # every start after the first: read nothing more
+        if legacy or not legacy_done:
+            _finish(mdir, legacy, marker)
+        return 0, [], None  # every later start: one listdir, one exists()
     keep = read_manifest(os.path.join(mdir, manifest_name(version)))
     if keep is None:
         return 0, [], "this release's list is unreadable"
 
     listed = set()
-    unreadable = []
+    unreadable_lists = []
     for n in applied:
         got = read_manifest(os.path.join(mdir, n))
         if got is None:
-            unreadable.append(n)
+            unreadable_lists.append(n)
         else:
             listed |= got
     keep_folded = {p.casefold() for p in keep}
     stale = {p for p in listed if p.casefold() not in keep_folded and _safe(p)}
     going = {p.casefold() for p in stale}
-    protected = claimed_by_live_distributions(install_dir, going)
+    engine_owned, protected, failed = scan_distributions(install_dir, going)
     base_real = _real(install_dir)
 
-    deleted, failed = 0, []
+    deleted = 0
     for rel in sorted(stale):
-        if rel.casefold() in protected:
+        folded = rel.casefold()
+        if folded in protected:
+            continue
+        if rel.startswith("hermes/.venv/") and not _deletable_in_venv(folded, engine_owned):
             continue
         path = os.path.join(install_dir, *rel.split("/"))
         try:
@@ -272,12 +315,22 @@ def prune(install_dir):
         _remove_empty_parents(install_dir, rel)
 
     if not failed:
-        for n in real + legacy + unreadable:
-            try:
-                os.remove(os.path.join(mdir, n))
-            except OSError:
-                pass
+        _finish(mdir, real + legacy + unreadable_lists, marker)
     return deleted, failed, None
+
+
+def _finish(mdir, lists, marker):
+    """Drop lists that are done with, and note that legacy lists have had their turn."""
+    for n in lists:
+        try:
+            os.remove(os.path.join(mdir, n))
+        except OSError:
+            pass
+    try:
+        with open(marker, "a"):
+            pass
+    except OSError:
+        pass
 
 
 # --- CI -----------------------------------------------------------------------
