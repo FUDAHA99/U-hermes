@@ -53,6 +53,13 @@ echo.
 echo   按 Ctrl+C 停止网关。
 echo.
 
+:: Remove what an older release shipped and this one does not before the
+:: engine loads (see Windows-Start.bat); this launcher is often the only one
+:: a bot-only user ever runs.
+if exist "%SCRIPT_DIR%\hermes\manifests" if exist "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" (
+    "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\prune-stale-files.py" "%SCRIPT_DIR%\."
+)
+
 "%VENV_PYTHON%" -m hermes_cli.main gateway start
 
 if errorlevel 1 (

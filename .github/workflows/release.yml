@@ -309,8 +309,11 @@ jobs:
           # so the build leaves a users table sitting inside the folder
           # about to be zipped. It is empty today only because nothing logs
           # in during the smoke test.
+          # hermes/hermes-agent/build is setuptools' scratch copy from installing
+          # the engine: 1875 files nothing runs. Shipped, it also meant Menu [9]'s
+          # reinstall could pick old modules back up from it after an upgrade.
           foreach ($junk in @("portable/.uv-cache", "portable/runtime/.npm-cache",
-                              "portable/packages",
+                              "portable/packages", "portable/hermes/hermes-agent/build",
                               "portable/runtime/node-win-x64/node_modules/hermes-web-ui/.ekko")) {
             Remove-Item -Recurse -Force $junk -ErrorAction SilentlyContinue
           }

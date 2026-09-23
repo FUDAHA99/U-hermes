@@ -252,6 +252,34 @@ def test_stored_lists_get_one_turn_per_install():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_the_marker_is_earned_not_assumed():
+    print("review 3, F1: an extraction cut off before the stored lists were written")
+    root = install("v0.4.5")
+    try:
+        leftover = SITE + "tools/setup_mcp_tool.py"
+        put(root, leftover)
+        rec = record(root, "hermes_agent-0.21.3.dist-info", ["tools/setup_mcp_tool.py"])
+        marker = ps.MANIFEST_DIR + "/" + ps.LEGACY_DONE
+        # The zip's own list is whole and says it carries two stored lists,
+        # but the extraction stopped before either was written.
+        manifest(root, "v0.4.5", None, text=ps.render_manifest("v0.4.5", [], ["v0.4.3", "v0.4.4"]))
+        ps.prune(root)
+        check(not exists(root, marker), "no marker while the stored lists it names are missing")
+        # A torn stored list is no better.
+        whole = ps.render_manifest("v0.4.3", [leftover, rec])
+        manifest(root, "v0.4.3", None, legacy=True, text=whole[: len(whole) // 2])
+        ps.prune(root)
+        check(not exists(root, marker) and exists(root, leftover), "nor after a torn one")
+        # Re-extracting writes them whole: now they apply, and only now the marker.
+        manifest(root, "v0.4.3", [leftover, rec], legacy=True)
+        manifest(root, "v0.4.4", [], legacy=True)
+        deleted, failed, _ = ps.prune(root)
+        check(not exists(root, leftover) and not failed, "the re-extraction's stored lists do their job")
+        check(exists(root, marker), "and the marker is written once all of them have")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_stored_and_real_lists_both_apply_on_the_first_start():
     print("v0.4.5 extracted over v0.4.4 but never started, then v0.4.6 over that")
     root = install("v0.4.6")
@@ -329,7 +357,8 @@ def test_a_hostile_or_broken_list_cannot_escape():
                "runtime\\..\\data\\keep.txt",
                "runtime//keep.txt",
                "runtime/foo.py.",
-               "runtime/foo.py "]
+               "runtime/foo.py ",
+               "runtime/node-win-x64/node_modules/hermes-web-ui/.ekko/ekko.db"]
         manifest(root, "v0.4.4", bad)
         manifest(root, "v0.4.5", [])
         ps.prune(root)
@@ -495,6 +524,9 @@ def test_the_list_is_built_from_the_zip_itself():
               "exactly the zip's files under the roots (%r)" % sorted(listed or []))
         check(count == 3, "the count it reports is the count it wrote")
         check(legacy == {SITE + "old.py"}, "a stored older list rides along as legacy-files-*")
+        with zipfile.ZipFile(zpath) as z:
+            first = z.read(ps.MANIFEST_DIR + "/files-v0.4.5.txt").decode("utf-8").splitlines()[0]
+        check(first.endswith(" legacy=v0.4.3"), "this release's list names the stored lists it shipped (%r)" % first)
         check(ps.MANIFEST_DIR + "/legacy-files-v0.4.5.txt" not in all_names,
               "a stored list with this release's name is not shipped")
         check(ps.check_zip(zpath, "v0.4.5") == [], "and the verify step's check agrees")
@@ -563,6 +595,7 @@ if __name__ == "__main__":
                test_old_engine_bytecode_goes_with_its_source,
                test_an_unreadable_engine_record_is_retried,
                test_stored_lists_get_one_turn_per_install,
+               test_the_marker_is_earned_not_assumed,
                test_stored_and_real_lists_both_apply_on_the_first_start,
                test_network_paths_use_the_unc_long_form,
                test_nothing_the_user_owns_is_touched,

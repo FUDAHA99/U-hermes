@@ -71,6 +71,7 @@ call "%SCRIPT_DIR%\Windows-Start.bat" chat
 goto MENU
 
 :START_GATEWAY
+call :PRUNE_STALE
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
 set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
@@ -110,6 +111,7 @@ start "" "%VENV_PYTHONW%" "%SCRIPT_DIR%\scripts\config-server.py"
 goto MENU
 
 :MODEL
+call :PRUNE_STALE
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
 set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
@@ -120,6 +122,7 @@ set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%\runtime\python-win-x64;
 goto MENU
 
 :DOCTOR
+call :PRUNE_STALE
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
 set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
@@ -133,6 +136,7 @@ pause
 goto MENU
 
 :PRUNE
+call :PRUNE_STALE
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
 set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
@@ -154,6 +158,7 @@ pause
 goto MENU
 
 :UPDATE
+call :PRUNE_STALE
 echo.
 echo   正在更新 U-Hermes 组件...
 set "UV_EXE=%SCRIPT_DIR%\runtime\uv\uv.exe"
@@ -243,6 +248,16 @@ if not "%_LEFT%"=="0" (
 echo.
 pause
 goto MENU
+
+:PRUNE_STALE
+:: Same as Windows-Start.bat: remove what an older release shipped and this
+:: one does not, before anything loads the engine -- and before [9]
+:: reinstalls it from hermes\hermes-agent, which would otherwise build the old
+:: modules still sitting there into the new install and its RECORD.
+if exist "%SCRIPT_DIR%\hermes\manifests" if exist "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" (
+    "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\prune-stale-files.py" "%SCRIPT_DIR%\."
+)
+exit /b 0
 
 :EXIT
 exit /b 0

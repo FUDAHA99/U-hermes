@@ -42,9 +42,11 @@ to "keep":
   * a list is only trusted if its trailer count matches: a torn write reads
     as "unreadable", not as a short list;
   * lists stored for releases that shipped without one (legacy-files-*) are
-    applied at most once per install: the first run leaves a marker that no
-    zip contains, so re-extracting any later release cannot bring them back
-    into play;
+    applied at most once per install: once every stored list the zip
+    carries (its own list's header names them) has been read whole and
+    applied, a marker no zip contains is left, so re-extracting cannot bring
+    them back into play -- and an extraction cut off before they were
+    written leaves no marker, so re-extracting still can;
   * anything that cannot be checked or deleted keeps the older list, so the
     next start retries.
 
@@ -92,12 +94,35 @@ def _safe(rel):
     parts = rel.split("/")
     if any(p in ("", ".", "..") or p.endswith((".", " ")) for p in parts):
         return False
+    # The Web UI keeps its own agent's data in runtime/.../hermes-web-ui/.ekko
+    # (NODE_ENV is not production). No list may ever name it.
+    if any(p.casefold() == ".ekko" for p in parts):
+        return False
     return rel.startswith(ROOTS)
 
 
-def render_manifest(version, paths):
+def render_manifest(version, paths, legacy=()):
+    """The list. Its header also names the stored lists shipped beside it, so a
+    start can tell "none shipped" from "cut off before they were written"."""
     paths = sorted(paths)
-    return "%s %s\n%s%s %d\n" % (HEADER, version, "".join(p + "\n" for p in paths), TRAILER, len(paths))
+    head = "%s %s" % (HEADER, version)
+    if legacy:
+        head += " legacy=" + ",".join(sorted(legacy))
+    return "%s\n%s%s %d\n" % (head, "".join(p + "\n" for p in paths), TRAILER, len(paths))
+
+
+def expected_legacy(path):
+    """Versions of the stored lists this release's zip carries, from its list's
+    first line; None if that line cannot be read."""
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            first = f.readline().rstrip("\r\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not first.startswith(HEADER):
+        return None
+    m = re.search(r" legacy=(\S+)$", first)
+    return set(m.group(1).split(",")) if m else set()
 
 
 def parse_manifest(text):
@@ -261,25 +286,38 @@ def prune(install_dir):
     # run leaves a marker no zip contains, and after that they are only
     # cleared away -- whether this is an upgrade, a re-extraction of the same
     # release, or a downgrade.
+    #
+    # The marker is only earned, never assumed: it is written once every
+    # stored list this release's zip carries (named in its list's header) has
+    # been read whole and applied. An extraction cut off before they were
+    # written, or a torn one, leaves no marker, so re-extracting brings them
+    # back into play. A release that carries none earns it at once.
     marker = os.path.join(mdir, LEGACY_DONE)
     legacy_done = os.path.exists(marker)
+    current_path = os.path.join(mdir, manifest_name(version))
     applied = real + ([] if legacy_done else legacy)
     if not applied:
-        if legacy or not legacy_done:
-            _finish(mdir, legacy, marker)
+        if legacy_done:
+            if legacy:
+                _drop(mdir, legacy)
+        elif expected_legacy(current_path) == set():
+            _mark(marker)
         return 0, [], None  # every later start: one listdir, one exists()
-    keep = read_manifest(os.path.join(mdir, manifest_name(version)))
+    keep = read_manifest(current_path)
     if keep is None:
         return 0, [], "this release's list is unreadable"
 
     listed = set()
     unreadable_lists = []
+    applied_legacy = set()
     for n in applied:
         got = read_manifest(os.path.join(mdir, n))
         if got is None:
             unreadable_lists.append(n)
         else:
             listed |= got
+            if n.startswith(LEGACY_PREFIX):
+                applied_legacy.add(n[len(LEGACY_PREFIX) + len("files-"):-len(".txt")])
     keep_folded = {p.casefold() for p in keep}
     stale = {p for p in listed if p.casefold() not in keep_folded and _safe(p)}
     going = {p.casefold() for p in stale}
@@ -315,17 +353,23 @@ def prune(install_dir):
         _remove_empty_parents(install_dir, rel)
 
     if not failed:
-        _finish(mdir, real + legacy + unreadable_lists, marker)
+        # A torn list is dropped too: a re-extraction brings a whole copy.
+        _drop(mdir, real + legacy + unreadable_lists)
+        expected = expected_legacy(current_path)
+        if not legacy_done and expected is not None and expected <= applied_legacy:
+            _mark(marker)
     return deleted, failed, None
 
 
-def _finish(mdir, lists, marker):
-    """Drop lists that are done with, and note that legacy lists have had their turn."""
+def _drop(mdir, lists):
     for n in lists:
         try:
             os.remove(os.path.join(mdir, n))
         except OSError:
             pass
+
+
+def _mark(marker):
     try:
         with open(marker, "a"):
             pass
@@ -352,7 +396,7 @@ def add_to_zip(zip_path, version, history_dir=None):
     bad = [p for p in ours if not _safe(p)]
     if bad:
         raise ValueError("zip entries a list must not carry: %s" % bad[:3])
-    added = {MANIFEST_DIR + "/" + manifest_name(version): render_manifest(version, ours)}
+    stored = {}
     if history_dir:
         for name in sorted(os.listdir(history_dir)):
             m = re.match(r"^files-(.+)\.txt\.gz$", name)
@@ -362,7 +406,11 @@ def add_to_zip(zip_path, version, history_dir=None):
                 text = gzip.decompress(f.read()).decode("utf-8")
             if parse_manifest(text) is None:
                 raise ValueError("%s is not a whole manifest" % name)
-            added[MANIFEST_DIR + "/" + LEGACY_PREFIX + name[:-3]] = text
+            stored[m.group(1)] = text
+    # This release's list first, naming the stored ones, then the stored ones.
+    added = {MANIFEST_DIR + "/" + manifest_name(version): render_manifest(version, ours, stored)}
+    for v, text in stored.items():
+        added[MANIFEST_DIR + "/" + LEGACY_PREFIX + manifest_name(v)] = text
     clash = [n for n in added if n in entries]
     if clash:
         raise ValueError("the zip already has %s" % clash)

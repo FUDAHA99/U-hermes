@@ -32,6 +32,12 @@ echo.
 echo --- end config ---
 echo.
 
+:: Remove what an older release shipped and this one does not (see
+:: Windows-Start.bat), so what is debugged below is what this release ships.
+if exist "%SCRIPT_DIR%\hermes\manifests" if exist "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" (
+    "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\prune-stale-files.py" "%SCRIPT_DIR%\."
+)
+
 echo [6] Testing Python...
 "%VENV_PYTHON%" -c "print('Python OK')" 2>&1
 echo.

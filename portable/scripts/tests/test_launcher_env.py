@@ -98,6 +98,46 @@ def test_every_launcher_that_runs_the_engine_sets_a_home():
         check(has_home, "%s runs the engine and sets HERMES_HOME" % name)
 
 
+# Loads or reinstalls the engine: a stale module there is imported, or built
+# into the new install's RECORD, where prune-stale-files.py may not touch it.
+ENGINE_CALL = re.compile(r"hermes_cli|pip install .*hermes-agent|%HERMES_BIN%|hermes\.cmd", re.I)
+PRUNE_CALL = re.compile(r"prune-stale-files\.py|call :PRUNE_STALE", re.I)
+
+
+def test_every_way_into_the_engine_prunes_first():
+    print("stale modules from an older release are removed before the engine loads")
+    for name in launchers():
+        if not name.endswith(".bat"):
+            continue  # macOS is not shipped; its launcher gets this when it is
+        lines = read_lines(name)
+        if name == "Windows-Menu.bat":
+            # One block per menu item: each must prune before it runs the engine.
+            blocks, label, start = [], None, 0
+            for i, line in enumerate(lines + [":END"]):
+                if line.startswith(":") and not line.startswith("::"):
+                    blocks.append((label, lines[start:i]))
+                    label, start = line, i + 1
+            for label, body in blocks:
+                if label == ":PRUNE_STALE":
+                    continue
+                calls = [i for i, l in enumerate(body) if ENGINE_CALL.search(l) and not l.lstrip().startswith("::")]
+                if not calls:
+                    continue
+                prunes = [i for i, l in enumerate(body) if PRUNE_CALL.search(l)]
+                check(bool(prunes) and prunes[0] < calls[0], "%s %s prunes before it runs the engine" % (name, label))
+            sub = dict(blocks).get(":PRUNE_STALE", [])
+            check(any('prune-stale-files.py" "%SCRIPT_DIR%\\."' in l for l in sub),
+                  "%s :PRUNE_STALE runs the script on \"%%SCRIPT_DIR%%\\.\"" % name)
+            continue
+        calls = [i for i, l in enumerate(lines) if ENGINE_CALL.search(l) and not l.lstrip().startswith("::")]
+        if not calls:
+            continue
+        prunes = [i for i, l in enumerate(lines) if PRUNE_CALL.search(l) and not l.lstrip().startswith("::")]
+        check(bool(prunes) and prunes[0] < calls[0],
+              "%s prunes (line %s) before the engine first loads (line %d)"
+              % (name, prunes[0] + 1 if prunes else "none", calls[0] + 1))
+
+
 def test_the_engine_reads_that_variable():
     print("the variable name is the engine's, not a guess")
     try:
@@ -128,6 +168,7 @@ def test_the_engine_reads_that_variable():
 if __name__ == "__main__":
     test_each_home_on_the_stick_keeps_its_locks_there_too()
     test_every_launcher_that_runs_the_engine_sets_a_home()
+    test_every_way_into_the_engine_prunes_first()
     test_the_engine_reads_that_variable()
     print("")
     if FAILURES:
