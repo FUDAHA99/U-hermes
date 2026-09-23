@@ -15,6 +15,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -328,24 +329,141 @@ def test_where_a_custom_entry_keeps_its_key():
         "...with base_url first, as the engine reads them")
 
 
-def test_the_credential_order_is_the_engines():
-    """runtime_provider._resolve_custom tries the inline key, then the
-    variable the entry names, then OPENAI_API_KEY and OPENROUTER_API_KEY.
-    Getting this order wrong means probing with a credential the engine will
-    not use -- a green check over a chat window that never answers.
+class _bare_environ(object):
+    """No *_API_KEY and no OPENAI_BASE_URL in os.environ, plus `values`.
+
+    Every lookup here falls through to the process environment last, as the
+    engine's does, so a key exported on the machine running this would make
+    a check pass for the wrong reason -- or fail on a machine that has one.
     """
-    # These fall through to the process environment last, exactly as the
-    # engine does, so a key sitting in the ambient environment would make
-    # the final checks pass for the wrong reason -- or fail on a machine
-    # that happens to have one exported.
-    saved = {}
-    for name in pp.CUSTOM_KEY_FALLBACK_VARS:
-        if name in os.environ:
-            saved[name] = os.environ.pop(name)
-    try:
+
+    def __init__(self, values=None):
+        self.values = values or {}
+
+    def __enter__(self):
+        self.saved = {name: value for name, value in os.environ.items()
+                      if name.endswith("_API_KEY") or name.endswith("_BASE_URL")}
+        for name in self.saved:
+            del os.environ[name]
+        os.environ.update(self.values)
+
+    def __exit__(self, *exc):
+        for name in self.values:
+            os.environ.pop(name, None)
+        os.environ.update(self.saved)
+
+
+# hermes-agent before and after the OPENAI_BASE_URL pairing.
+V0213 = (0, 21, 3)
+V0214 = (0, 21, 4)
+
+# (address, what runtime_provider._host_gated_env_key_candidates reads for
+# it, in its order). Nothing here depends on OPENAI_BASE_URL.
+HOST_GATE_TABLE = [
+    # The two blanket keys, at their own hosts only.
+    ("https://api.openai.com/v1", ("OPENAI_API_KEY",)),
+    ("https://OpenAI.com/v1/", ("OPENAI_API_KEY",)),
+    ("https://res.openai.azure.com/openai/v1", ("OPENAI_API_KEY", "AZURE_API_KEY")),
+    ("https://openrouter.ai/api/v1", ("OPENROUTER_API_KEY",)),
+    # A host is matched as a host, never as a substring.
+    ("https://api.openai.com.evil.test/v1", ("EVIL_API_KEY",)),
+    ("https://proxy.example/api.openai.com/v1", ("PROXY_API_KEY",)),
+    ("https://openrouter.ai.evil.test/api/v1", ("EVIL_API_KEY",)),
+    ("https://notopenrouter.ai/v1", ("NOTOPENROUTER_API_KEY",)),
+    # Everyone else: one variable, named after the host.
+    ("https://api.longcat.example/v1", ("LONGCAT_API_KEY",)),
+    ("https://api.deepseek.com/v1", ("DEEPSEEK_API_KEY",)),
+    ("https://API.DeepSeek.com/v1", ("DEEPSEEK_API_KEY",)),
+    ("https://dashscope.aliyuncs.com/compatible-mode/v1", ("ALIYUNCS_API_KEY",)),
+    ("https://www.api.foo-bar.com/v1", ("FOO_BAR_API_KEY",)),
+    ("https://api.xiaomimimo.com:8443/v1", ("XIAOMIMIMO_API_KEY",)),
+    ("https://api.x.ai/v1", ("X_API_KEY",)),
+    ("api.moonshot.cn/v1", ("MOONSHOT_API_KEY",)),
+    # And nothing at all, where the engine sends no-key-required.
+    ("https://ollama.com/v1", ()),
+    ("http://127.0.0.1:8000/v1", ()),
+    ("http://10.0.0.5:8000/v1", ()),
+    ("http://localhost:11434/v1", ()),
+    ("http://[::1]:8080/v1", ()),
+    ("http://gpu-box:8000/v1", ()),
+    ("https://x/v1", ()),
+    ("https://api.9router.example/v1", ()),
+    ("", ()),
+]
+
+LONGCAT_URL = "https://api.longcat.example/v1"
+
+# (address, OPENAI_BASE_URL, read by 0.21.4 and later, read by 0.21.3).
+PAIRING_TABLE = [
+    (LONGCAT_URL, LONGCAT_URL,
+     ("OPENAI_API_KEY", "LONGCAT_API_KEY"), ("LONGCAT_API_KEY",)),
+    (LONGCAT_URL + "/", LONGCAT_URL,
+     ("OPENAI_API_KEY", "LONGCAT_API_KEY"), ("LONGCAT_API_KEY",)),
+    (LONGCAT_URL, LONGCAT_URL + "/",
+     ("OPENAI_API_KEY", "LONGCAT_API_KEY"), ("LONGCAT_API_KEY",)),
+    # Another path is another address, and the comparison is exact.
+    (LONGCAT_URL, "https://api.longcat.example",
+     ("LONGCAT_API_KEY",), ("LONGCAT_API_KEY",)),
+    (LONGCAT_URL, "https://API.longcat.example/v1",
+     ("LONGCAT_API_KEY",), ("LONGCAT_API_KEY",)),
+    ("http://127.0.0.1:8000/v1", "http://127.0.0.1:8000/v1",
+     ("OPENAI_API_KEY",), ()),
+    ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1",
+     ("OPENAI_API_KEY", "OPENROUTER_API_KEY"), ("OPENROUTER_API_KEY",)),
+    # OpenAI's own host needs no pairing, and does not get the key twice.
+    ("https://api.openai.com/v1", "https://elsewhere.example/v1",
+     ("OPENAI_API_KEY",), ("OPENAI_API_KEY",)),
+]
+
+
+def test_which_variables_the_engine_reads_for_an_address():
+    """_host_gated_env_key_candidates hands OPENAI_API_KEY and
+    OPENROUTER_API_KEY only to their own hosts, and everything else one
+    variable named after the host. This was a blanket (OPENAI_API_KEY,
+    OPENROUTER_API_KEY) for every address, which the engine has never done.
+    """
+    with _bare_environ():
+        for url, expected in HOST_GATE_TABLE:
+            for version in (V0213, V0214):
+                got = pp.custom_key_fallback_vars(url, {}, version)
+                check(got == expected, "%r reads %s (%s)" % (
+                    url, " then ".join(expected) or "nothing",
+                    "got " + (", ".join(got) or "nothing")))
+
+        for url, paired, since, before in PAIRING_TABLE:
+            env = {"OPENAI_BASE_URL": paired}
+            got = pp.custom_key_fallback_vars(url, env, V0214)
+            check(got == since, "0.21.4, OPENAI_BASE_URL=%r: %r reads %s (got %s)" % (
+                paired, url, " then ".join(since) or "nothing",
+                ", ".join(got) or "nothing"))
+            got = pp.custom_key_fallback_vars(url, env, V0213)
+            check(got == before, "0.21.3, OPENAI_BASE_URL=%r: %r reads %s (got %s)" % (
+                paired, url, " then ".join(before) or "nothing",
+                ", ".join(got) or "nothing"))
+
+        check(pp.custom_key_fallback_vars(LONGCAT_URL, {}, (0, 22, 0))
+              == pp.custom_key_fallback_vars(LONGCAT_URL, {}, V0214),
+              "a later engine keeps the pairing")
+
+    with _bare_environ({"OPENAI_BASE_URL": LONGCAT_URL}):
+        check(pp.custom_key_fallback_vars(LONGCAT_URL, {}, V0214)[:1]
+              == ("OPENAI_API_KEY",),
+              "OPENAI_BASE_URL is read from the process environment too")
+
+    check(pp.parse_engine_version("0.21.4") == V0214, "0.21.4 parses")
+    check(pp.parse_engine_version("0.22.0rc1") == (0, 22, 0), "a pre-release parses")
+    check(pp.parse_engine_version("") is None, "no version is None, not a crash")
+
+
+def test_the_credential_order_is_the_engines():
+    """_resolve_named_custom_runtime (hermes_cli/runtime_provider_custom.py)
+    tries the inline key, then the variable the entry names, then only what
+    the host gate hands that address. Getting this wrong means probing with
+    a credential the engine will not use -- a green check over a chat window
+    that never answers, or a red one over a config that works.
+    """
+    with _bare_environ():
         _credential_order_checks()
-    finally:
-        os.environ.update(saved)
 
 
 def _credential_order_checks():
@@ -358,16 +476,106 @@ def _credential_order_checks():
     _, key = pp.custom_provider_credential(entry, {"MY_KEY": "sk-env"})
     check(key == "sk-env", "...and the variable is read when there is no inline key")
 
-    _, key = pp.custom_provider_credential(entry, {"OPENAI_API_KEY": "sk-blanket"})
-    check(key == "sk-blanket",
-          "an unset variable falls through to OPENAI_API_KEY, as it does there")
+    # The three ways the blanket fallback got a LongCat entry with no key of
+    # its own wrong, each confirmed against resolve_runtime_provider on 0.21.3
+    # and 0.21.4.
+    longcat = {"name": "longcat", "base_url": LONGCAT_URL}
+    for version in (V0213, V0214):
+        tag = " (%d.%d.%d)" % version
+        _, key = pp.custom_provider_credential(
+            longcat, {"OPENAI_API_KEY": "sk-openai"}, version)
+        check(key == "", "OPENAI_API_KEY is not sent to LongCat -- "
+              "the engine sends no-key-required there" + tag)
+        _, key = pp.custom_provider_credential(
+            longcat, {"OPENROUTER_API_KEY": "sk-or"}, version)
+        check(key == "", "nor is the OpenRouter key" + tag)
+        _, key = pp.custom_provider_credential(
+            longcat, {"LONGCAT_API_KEY": "sk-lc"}, version)
+        check(key == "sk-lc", "LONGCAT_API_KEY is, because the engine uses it" + tag)
 
-    entry = {"name": "l", "base_url": "https://a/v1"}
-    _, key = pp.custom_provider_credential(entry, {"OPENROUTER_API_KEY": "sk-or"})
-    check(key == "sk-or", "an entry naming no key at all still has these two")
+        named = dict(longcat, key_env="MY_KEY")
+        _, key = pp.custom_provider_credential(
+            named, {"OPENAI_API_KEY": "sk-openai"}, version)
+        check(key == "", "an unset key_env does not fall through to "
+              "OPENAI_API_KEY either" + tag)
+        _, key = pp.custom_provider_credential(
+            named, {"LONGCAT_API_KEY": "sk-lc"}, version)
+        check(key == "sk-lc", "...it falls through to the host's own variable" + tag)
 
-    _, key = pp.custom_provider_credential(entry, {})
+    # Only 0.21.4 pairs OPENAI_API_KEY with the address in OPENAI_BASE_URL --
+    # which is what Config.html writes beside it.
+    paired = {"OPENAI_API_KEY": "sk-openai", "OPENAI_BASE_URL": LONGCAT_URL,
+              "LONGCAT_API_KEY": "sk-lc"}
+    _, key = pp.custom_provider_credential(longcat, paired, V0214)
+    check(key == "sk-openai",
+          "0.21.4 sends OPENAI_API_KEY to the OPENAI_BASE_URL address, ahead of the host's own")
+    _, key = pp.custom_provider_credential(longcat, paired, V0213)
+    check(key == "sk-lc", "0.21.3 does not")
+
+    # The blanket keys still reach their own hosts.
+    _, key = pp.custom_provider_credential(
+        {"name": "o", "base_url": "https://openrouter.ai/api/v1"},
+        {"OPENROUTER_API_KEY": "sk-or"})
+    check(key == "sk-or", "OPENROUTER_API_KEY still reaches openrouter.ai")
+    _, key = pp.custom_provider_credential(
+        {"name": "o", "base_url": "https://api.openai.com/v1"},
+        {"OPENAI_API_KEY": "sk-openai"})
+    check(key == "sk-openai", "OPENAI_API_KEY still reaches api.openai.com")
+
+    _, key = pp.custom_provider_credential({"name": "l", "base_url": "https://a/v1"}, {})
     check(key == "", "and nothing at all is nothing, not a crash")
+
+
+def _names_worth_setting(url):
+    """Every variable the engine could conceivably read for this address.
+
+    The engine hands back values, so a variable it reads but we never set
+    looks exactly like one it never reads. Setting one per host label (and
+    the three it gates) is what makes "we say nothing, it says nothing" an
+    agreement rather than two silences.
+    """
+    names = {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "OLLAMA_API_KEY"}
+    for token in re.split(r"[./:@\[\]]+", url):
+        vendor = "".join(ch if ch.isalnum() else "_" for ch in token).upper()
+        if vendor:
+            names.add(vendor + "_API_KEY")
+    return names
+
+
+def test_the_host_gate_is_the_installed_engines():
+    """Run the engine's own _host_gated_env_key_candidates over both tables
+    and demand the same answer, in the same order.
+
+    The tables above are what the engine did when this was written. This is
+    what it does now -- against whichever engine this interpreter imports,
+    so the packaged one in CI, and upstream main in the weekly canary run.
+    """
+    try:
+        import hermes_cli
+        from hermes_cli import runtime_provider as rp
+        engine_gate = rp._host_gated_env_key_candidates
+    except Exception as exc:  # ImportError, or anything its imports raise
+        print("  skip  no hermes engine importable here (%s)" % exc.__class__.__name__)
+        return
+    version = pp.parse_engine_version(getattr(hermes_cli, "__version__", ""))
+    print("  validating against hermes-agent %s from %s"
+          % (getattr(hermes_cli, "__version__", "?"), os.path.dirname(hermes_cli.__file__)))
+    check(pp.installed_engine_version() == version,
+          "installed_engine_version() reads the engine this interpreter runs")
+
+    rows = [(url, "") for url, _ in HOST_GATE_TABLE]
+    rows += [(url, paired) for url, paired, _, _ in PAIRING_TABLE]
+    for url, paired in rows:
+        env = {name: "value-of-" + name for name in _names_worth_setting(url)}
+        if paired:
+            env["OPENAI_BASE_URL"] = paired
+        with _bare_environ(env):
+            engine = tuple(value[len("value-of-"):]
+                           for value in engine_gate(url, ollama=False) if value)
+            ours = pp.custom_key_fallback_vars(url, env, version)
+        check(ours == engine, "%r%s: engine reads %s, we say %s" % (
+            url, " with OPENAI_BASE_URL=%r" % paired if paired else "",
+            ", ".join(engine) or "nothing", ", ".join(ours) or "nothing"))
 
 
 def test_there_is_only_one_copy_of_this_lookup():
@@ -400,7 +608,9 @@ if __name__ == "__main__":
                test_there_is_only_one_copy_of_this_table,
                test_which_entry_custom_means,
                test_where_a_custom_entry_keeps_its_key,
+               test_which_variables_the_engine_reads_for_an_address,
                test_the_credential_order_is_the_engines,
+               test_the_host_gate_is_the_installed_engines,
                test_there_is_only_one_copy_of_this_lookup):
         print(fn.__name__)
         fn()
