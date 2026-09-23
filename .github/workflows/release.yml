@@ -251,6 +251,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "provider probe test failed"; exit 1 }
           & $py scripts/tests/test_version_check.py
           if ($LASTEXITCODE -ne 0) { Write-Error "version check test failed"; exit 1 }
+          & $py scripts/tests/test_upstream_tweaks.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "upstream tweaks test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
           # tools/ is not packaged, but this one guards the target of a sync,
@@ -518,6 +520,7 @@ jobs:
           "$PY" scripts/tests/test_default_config.py
           "$PY" scripts/tests/test_provider_probe.py
           "$PY" scripts/tests/test_version_check.py
+          "$PY" scripts/tests/test_upstream_tweaks.py
 
           echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)
