@@ -36,8 +36,8 @@ Download the latest release from [**Releases**](https://github.com/FUDAHA99/U-he
 |----------|------|--------------|
 | Windows | `u-hermes-portable-windows-v*.zip` | Unzip, double-click `Windows-Start.bat` |
 
-**macOS is not shipping right now.** The mac zips attached to v0.4.0 and
-v0.4.1 do not run: `zip` was invoked without `-y`, so the venv's interpreter
+**macOS is not shipping right now.** The mac zips once attached to v0.4.0
+and v0.4.1 (since removed from those releases) did not run: `zip` was invoked without `-y`, so the venv's interpreter
 was dereferenced into a *copy* of the runner's python.org framework stub,
 which loads `/Library/Frameworks/Python.framework/Versions/3.11/Python` — a
 path that does not exist on a normal Mac. `Mac-Start.command` as shipped in those
@@ -212,7 +212,7 @@ claim a 350 MB download — all three were wrong by the time anyone read them.
 | Embedded Python + uv | ~72 MB |
 | Node.js + hermes-web-ui | ~274 MB |
 | Hermes Agent + venv | ~548 MB |
-| **Download (zip)** | **457 MB** — measured on the v0.4.1 Windows asset (the 537 MB macOS asset of the same tag is the withdrawn build) |
+| **Download (zip)** | **457 MB** — measured on the v0.4.1 Windows asset (the 537 MB macOS asset of the same tag was the withdrawn build, since removed) |
 | **Unpacked** | **~1.3 GB** |
 | **Recommended USB** | **8 GB+** — the chat database grows with use; see `Windows-Menu.bat` → `[7] 清理聊天记录` |
 
