@@ -376,7 +376,7 @@ def main(argv):
     # Which variable should hold the key -- or, for a custom provider, the
     # key itself, which may be written straight into config.yaml.
     inline_key = ""
-    no_key_hint = ()
+    entry = None
     if provider.startswith("custom:"):
         slug = provider.split(":", 1)[1]
         entry = provider_probe.find_custom_provider(config, provider)
@@ -385,18 +385,6 @@ def main(argv):
                 "请重新打开配置页面保存一次。")
             return NEEDS_CONFIG
         inline_key = provider_probe.custom_provider_inline_key(entry)
-        key_var = provider_probe.custom_provider_key_var(entry)
-        if not inline_key and not key_var:
-            # Not a refusal on its own: the engine falls back to
-            # OPENAI_API_KEY, so such an entry can run. Only a hint, and
-            # only printed if nothing turns one up below -- the old code
-            # stopped here and called the entry missing, which it is not.
-            no_key_hint = (
-                "（custom_providers 里的 %s 既没写 api_key，也没写 key_env，" % slug
-                + "所以只能去找上面这个变量。）",)
-        # The engine's order, from runtime_provider._resolve_custom.
-        candidates = tuple(
-            n for n in (key_var,) + provider_probe.CUSTOM_KEY_FALLBACK_VARS if n)
     else:
         candidates, verdict = key_vars_for(provider)
         if verdict != "api_key":
@@ -411,6 +399,34 @@ def main(argv):
     if repair_env_bom(env_path):
         say("[i] data\\.env 开头有一个 BOM 字符，引擎会因此读不到第一个变量。已经去掉了。")
     env = read_env_file(env_path)
+
+    no_key_hint = ()
+    if entry is not None:
+        # _resolve_named_custom_runtime's order after the inline key: the
+        # variable the entry names, then only what the engine's host gate
+        # hands this address -- not whatever OPENAI_API_KEY is lying around,
+        # which the gate keeps away from third-party hosts.
+        key_var = provider_probe.custom_provider_key_var(entry)
+        base_url = provider_probe.custom_provider_base_url(entry)
+        fallbacks = provider_probe.custom_key_fallback_vars(base_url, env)
+        candidates = tuple(n for n in (key_var,) + fallbacks if n)
+        if not inline_key and not key_var:
+            # Not a refusal on its own: a variable the gate hands this
+            # address counts, so such an entry can run. Only a hint, and only
+            # printed if nothing turns one up below -- the old code stopped
+            # here and called the entry missing, which it is not.
+            lead = "custom_providers 里的 %s 既没写 api_key，也没写 key_env，" % slug
+            if fallbacks:
+                no_key_hint = ("（" + lead + "引擎按它的地址只会去读 %s。）"
+                               % "、".join(fallbacks),)
+            elif base_url:
+                no_key_hint = (
+                    lead + "而引擎不会为 %s 这个地址去读任何环境变量。" % base_url,
+                    "在条目里写上 api_key，或者写 key_env 并把密钥放进 data\\.env 的那个变量。")
+            else:
+                no_key_hint = (lead + "连 base_url 也没写。",
+                               "请重新打开配置页面保存一次。")
+
     found = ""
     for name in candidates:
         value = env.get(name) or os.environ.get(name) or ""
@@ -419,17 +435,21 @@ def main(argv):
             break
 
     if not found and not inline_key:
-        # key_vars_for returns () for anything it does not recognise, and the
-        # branch above is what keeps those from reaching here. Indexing it
-        # blind would raise IndexError into the catch-all at the bottom of
-        # this file, which turns any bug here into a silent "check skipped"
-        # -- a launch gate failing open without saying so.
-        where = candidates[0] if candidates else "对应的环境变量"
+        # candidates is () for a custom entry with no key_env at an address
+        # the engine reads no variable for (an IP, localhost, a single-label
+        # host), and for any provider key_vars_for does not recognise -- the
+        # branch above keeps those from reaching here. Indexing it blind
+        # would raise IndexError into the catch-all at the bottom of this
+        # file, which turns any bug here into a silent "check skipped" -- a
+        # launch gate failing open without saying so.
+        if candidates:
+            where = ("密钥应该写在 data\\.env 的 %s 里。" % candidates[0],) + no_key_hint
+        else:
+            where = no_key_hint or ("密钥应该写在 data\\.env 对应的环境变量里。",)
         auth_json = os.path.join(data_dir, "auth.json")
         has_stored_login = os.path.exists(auth_json) and os.path.getsize(auth_json) > 2
         if not has_stored_login:
-            say("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model),
-                "密钥应该写在 data\\.env 的 %s 里。" % where, *no_key_hint)
+            say("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model), *where)
             return NEEDS_CONFIG
 
     # Everything above is static. This is the only check that finds out

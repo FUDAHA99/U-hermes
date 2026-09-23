@@ -15,9 +15,11 @@ limit or a flaky network will, so it prints the reason and gets out of the way.
 """
 import json
 import os
+import re
 import socket
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_TIMEOUT = 20
@@ -326,11 +328,124 @@ def find_custom_provider(config, provider):
             fallback = entry
     return fallback
 
-# When an entry resolves to no key of its own, runtime_provider still tries
-# these two before giving up, so an entry naming neither api_key nor key_env
-# can be perfectly runnable. A checker that stops short of them blocks a
-# config the engine starts.
-CUSTOM_KEY_FALLBACK_VARS = ("OPENAI_API_KEY", "OPENROUTER_API_KEY")
+# When an entry has no key of its own, the engine does NOT reach for whatever
+# key happens to be in .env. _resolve_named_custom_runtime
+# (hermes_cli/runtime_provider_custom.py) tries the inline key, then key_env,
+# then runtime_provider._host_gated_env_key_candidates(base_url) -- and that
+# gate hands out OPENAI_API_KEY and OPENROUTER_API_KEY only at their own hosts,
+# because sending them anywhere else leaks them (GHSA-76xc-57q6-vm5m). Any
+# other address gets one variable named after its host: api.longcat.example
+# reads LONGCAT_API_KEY. With nothing set, the engine sends the placeholder
+# "no-key-required".
+#
+# This used to be a blanket ("OPENAI_API_KEY", "OPENROUTER_API_KEY") for every
+# address, which on a LongCat entry with no key of its own was wrong three
+# ways: with only OPENAI_API_KEY set we probed with it and let the launch
+# through, then every chat 401'd; with only OPENROUTER_API_KEY set we sent the
+# OpenRouter key to LongCat and blocked the launch on its 401; with only
+# LONGCAT_API_KEY set -- which the engine uses -- we blocked, saying no key.
+
+# hermes-agent 0.21.4 (v2026.9.21) added one pairing: OPENAI_API_KEY also goes
+# to the exact address OPENAI_BASE_URL names -- the pair Config.html writes
+# for every custom provider. 0.21.3 does not. Which rule applies is
+# decided by the engine installed next to these scripts, not by the pin: the
+# scripts get synced onto installs whose engine is older or newer than that.
+OPENAI_BASE_URL_PAIRING_SINCE = (0, 21, 4)
+
+
+def parse_engine_version(raw):
+    """"0.21.4" (or "0.22.0rc1") -> (0, 21, 4); None when it does not parse."""
+    match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", str(raw or ""))
+    return tuple(int(part or 0) for part in match.groups()) if match else None
+
+
+def installed_engine_version():
+    """The importable engine's version, or None when there is none.
+
+    hermes_cli.__version__ rather than package metadata: it is the code that
+    will actually run, and the package itself is a sub-millisecond import
+    where a metadata lookup takes 60 ms.
+    """
+    try:
+        import hermes_cli
+    except Exception:
+        return None
+    return parse_engine_version(getattr(hermes_cli, "__version__", ""))
+
+
+def _url_hostname(base_url):
+    """utils.base_url_hostname: lowercased host, tolerating a bare host[:port]/path."""
+    raw = (base_url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw if "://" in raw else "//" + raw)
+        return (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""  # an unclosed [IPv6 bracket, say
+
+
+def _host_matches(base_url, domain):
+    """utils.base_url_host_matches: the host or a subdomain of it, never a substring.
+
+    api.openai.com.evil.test and proxy.test/api.openai.com are not OpenAI.
+    """
+    hostname = _url_hostname(base_url)
+    return bool(hostname) and (hostname == domain or hostname.endswith("." + domain))
+
+
+def host_derived_key_var(base_url):
+    """runtime_provider._host_derived_api_key, returning the name, not the value.
+
+    The vendor is the second-to-last label once leading api./www. are dropped,
+    so a lookalike (api.deepseek.com.evil.test) reads EVIL_API_KEY, never
+    DEEPSEEK_API_KEY. "" for IPs, localhost and IPv6 literals, single-label
+    hosts, labels starting with a digit, and OPENAI/OPENROUTER/OLLAMA, which
+    have gates of their own.
+    """
+    hostname = _url_hostname(base_url)
+    if (not hostname or any(ch.isdigit() for ch in hostname.split(".")[-1])
+            or hostname == "localhost" or ":" in hostname):
+        return ""
+    labels = [label for label in hostname.split(".") if label]
+    while labels and labels[0] in ("api", "www"):
+        labels.pop(0)
+    if len(labels) < 2:
+        return ""
+    vendor = "".join(ch if ch.isalnum() else "_" for ch in labels[-2]).upper()
+    if not vendor or not vendor[0].isalpha() or vendor in ("OPENAI", "OPENROUTER", "OLLAMA"):
+        return ""
+    return vendor + "_API_KEY"
+
+
+def _env_value(env, name):
+    return ((env or {}).get(name) or os.environ.get(name) or "").strip()
+
+
+def custom_key_fallback_vars(base_url, env=None, engine_version=None):
+    """The variables the engine reads for an entry with no key of its own.
+
+    _host_gated_env_key_candidates(base_url, ollama=False), in its order,
+    as names. env matters only for OPENAI_BASE_URL. engine_version defaults
+    to the installed engine's; with none importable, the newest rule known.
+    """
+    if engine_version is None:
+        engine_version = installed_engine_version()
+    is_openai = (_host_matches(base_url, "openai.com")
+                 or _host_matches(base_url, "openai.azure.com"))
+    if not is_openai and (engine_version is None
+                          or engine_version >= OPENAI_BASE_URL_PAIRING_SINCE):
+        paired = _env_value(env, "OPENAI_BASE_URL").rstrip("/")
+        is_openai = bool(paired) and (base_url or "").strip().rstrip("/") == paired
+    names = []
+    if is_openai:
+        names.append("OPENAI_API_KEY")
+    if _host_matches(base_url, "openrouter.ai"):
+        names.append("OPENROUTER_API_KEY")
+    derived = host_derived_key_var(base_url)
+    if derived:
+        names.append(derived)
+    return tuple(names)
 
 
 def custom_provider_key_var(entry):
@@ -351,23 +466,26 @@ def custom_provider_inline_key(entry):
     return _first_field(entry, INLINE_KEY_FIELDS)
 
 
-def custom_provider_credential(entry, env=None):
-    """(address, key) for an entry, reading .env where it names a variable.
+def custom_provider_credential(entry, env=None, engine_version=None):
+    """(address, key) for an entry: the key the engine will send, or "".
 
     env is a mapping of what data/.env holds; the process environment is
-    the fallback, exactly as at runtime.
+    the fallback, exactly as at runtime. "" is where the engine sends its
+    no-key-required placeholder.
     """
     env = env or {}
-    # runtime_provider._resolve_custom's order: the inline key first, then
-    # the variable the entry names, then the two blanket fallbacks.
+    base_url = custom_provider_base_url(entry)
+    # _resolve_named_custom_runtime's order: the inline key first, then the
+    # variable the entry names, then only what the host gate hands this address.
     key = custom_provider_inline_key(entry)
     if not key:
-        names = (custom_provider_key_var(entry),) + CUSTOM_KEY_FALLBACK_VARS
+        names = ((custom_provider_key_var(entry),)
+                 + custom_key_fallback_vars(base_url, env, engine_version))
         for var in names:
             if not var:
                 continue
-            key = (env.get(var) or os.environ.get(var) or "").strip()
+            key = _env_value(env, var)
             if key:
                 break
-    return custom_provider_base_url(entry), key
+    return base_url, key
 

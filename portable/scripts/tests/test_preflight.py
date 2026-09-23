@@ -8,6 +8,7 @@ those wrong at some point.
 
 Run:  python portable/scripts/tests/test_preflight.py
 """
+import ast
 import http.server
 import importlib.util
 import io
@@ -65,8 +66,12 @@ BLOCK_YAML = NL.join([
 ])
 
 
-def run(config=None, env_file=None, args=(), no_yaml=False, probe=False):
-    """Run preflight against a throwaway data dir; return (code, output)."""
+def run(config=None, env_file=None, args=(), no_yaml=False, probe=False,
+        extra_env=None):
+    """Run preflight against a throwaway data dir; return (code, output).
+
+    extra_env is applied last; a value of None removes that variable.
+    """
     shutil.rmtree(SANDBOX, ignore_errors=True)
     data = os.path.join(SANDBOX, "data")
     os.makedirs(data)
@@ -80,9 +85,10 @@ def run(config=None, env_file=None, args=(), no_yaml=False, probe=False):
     environ = dict(os.environ)
     environ["PYTHONIOENCODING"] = "utf-8"
     # A key sitting in the ambient environment would make the "no key" cases
-    # pass for the wrong reason.
+    # pass for the wrong reason -- and an exported OPENAI_BASE_URL decides
+    # which address OPENAI_API_KEY goes to.
     for name in list(environ):
-        if name.endswith("_API_KEY"):
+        if name.endswith("_API_KEY") or name.endswith("_BASE_URL"):
             del environ[name]
     environ.pop("PYTHONPATH", None)
     # Off unless a test asks for it. preflight now makes a REAL call to the
@@ -93,6 +99,11 @@ def run(config=None, env_file=None, args=(), no_yaml=False, probe=False):
         environ["U_HERMES_SKIP_PROBE"] = "1"
     else:
         environ.pop("U_HERMES_SKIP_PROBE", None)
+    for name, value in (extra_env or {}).items():
+        if value is None:
+            environ.pop(name, None)
+        else:
+            environ[name] = value
 
     argv = [sys.executable]
     argv += ["-c", BLOCK_YAML] if no_yaml else []
@@ -287,10 +298,13 @@ class _Fake(http.server.BaseHTTPRequestHandler):
     body = b"{}"
     hits = 0
     last_auth = ""
+    last_path = ""
 
     def do_POST(self):
         _Fake.hits += 1
         _Fake.last_auth = self.headers.get("Authorization") or ""
+        # The whole target URL when it arrives as a proxy.
+        _Fake.last_path = self.path
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.send_response(_Fake.status)
         self.send_header("Content-Length", str(len(_Fake.body)))
@@ -306,6 +320,7 @@ def fake_provider(status, body):
     _Fake.body = json.dumps(body).encode("utf-8")
     _Fake.hits = 0
     _Fake.last_auth = ""
+    _Fake.last_path = ""
     srv = http.server.HTTPServer(("127.0.0.1", 0), _Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, "http://127.0.0.1:%d/v1" % srv.server_address[1]
@@ -552,21 +567,30 @@ def test_a_key_written_into_the_config_counts_as_a_key():
           "...but is not called a missing entry, because it is right there")
     check("api_key" in out and "key_env" in out,
           "...and the message names both ways to supply one")
+    check("https://x/v1" in out and "不会" in out,
+          "...and says the engine reads no variable for that address")
 
-    # ...and it is only a hint. runtime_provider falls back to OPENAI_API_KEY
-    # and then OPENROUTER_API_KEY before giving up, so an entry naming no key
-    # of its own still runs when one of those is set. Blocking it would cost
-    # the user the whole install to save them one error message.
+    # The engine does NOT fall back to OPENAI_API_KEY or OPENROUTER_API_KEY
+    # for any address: _host_gated_env_key_candidates keeps both away from
+    # hosts that are not theirs, and https://x/v1 gets the placeholder
+    # no-key-required. This used to pass, probing with a key the engine
+    # would never send.
     code, out = run(config=cfg(""), env_file="OPENAI_API_KEY=sk-present" + NL)
-    check(code == 0, "...and such an entry launches when OPENAI_API_KEY is set")
+    check(code == NEEDS_CONFIG,
+          "OPENAI_API_KEY does not count for an entry at someone else's address")
+    code, out = run(config=cfg(""), env_file="OPENROUTER_API_KEY=sk-or-present" + NL)
+    check(code == NEEDS_CONFIG, "...and neither does OPENROUTER_API_KEY")
 
     code, out = run(config=cfg('    key_env: "MY_KEY"' + NL),
                     env_file="OPENAI_API_KEY=sk-present" + NL)
-    check(code == 0, "a named variable that is unset falls back the way the engine does")
+    check(code == NEEDS_CONFIG,
+          "an unset key_env does not fall through to OPENAI_API_KEY either")
+    check("MY_KEY" in out, "...and the message names the variable the entry reads")
 
     # Both spellings at once: the engine reads the inline key first
-    # (runtime_provider._resolve_custom), so that is what the probe must ask
-    # with, or it proves a credential the engine will not use.
+    # (_resolve_named_custom_runtime in hermes_cli/runtime_provider_custom.py),
+    # so that is what the probe must ask with, or it proves a credential the
+    # engine will not use.
     srv, url = fake_provider(200, GOOD_REPLY)
     try:
         both = ('model:' + NL + '  provider: "custom:local"' + NL +
@@ -591,6 +615,83 @@ def test_a_key_written_into_the_config_counts_as_a_key():
           "...and there the missing-entry wording is the true one")
 
 
+def _engine_version_preflight_sees():
+    """provider_probe.installed_engine_version() in preflight's own process.
+
+    run() drops PYTHONPATH, so that can be a different engine from the one
+    this suite imports.
+    """
+    environ = dict(os.environ)
+    environ.pop("PYTHONPATH", None)
+    code = ("import sys; sys.path.insert(0, %r); import provider_probe; "
+            "print(provider_probe.installed_engine_version())" % SCRIPTS)
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, env=environ)
+    return ast.literal_eval(proc.stdout.decode("utf-8").strip() or "None")
+
+
+def test_a_custom_entry_is_sent_only_the_keys_the_engine_sends():
+    """A LongCat entry with no key of its own. The engine reads
+    LONGCAT_API_KEY for it and nothing else -- _host_gated_env_key_candidates
+    keeps OPENAI_API_KEY and OPENROUTER_API_KEY for their own hosts -- and the
+    launch gate, which fell back to both for any address, got it wrong three
+    ways. Each was confirmed with resolve_runtime_provider on 0.21.3 and 0.21.4:
+
+      OPENAI_API_KEY only      passed, and then every chat 401'd
+      OPENROUTER_API_KEY only  sent the OpenRouter key to LongCat, blocked on its 401
+      LONGCAT_API_KEY only     blocked, saying there was no key
+
+    The address is http so the probe can go through a proxy on loopback:
+    .example never resolves, and the proxy is what shows which key would
+    have left the machine.
+    """
+    longcat = "http://api.longcat.example/v1"
+    config = ('model:' + NL + '  provider: "custom:longcat"' + NL +
+              '  default: "LongCat-2.0"' + NL + 'custom_providers:' + NL +
+              '  - name: "LongCat"' + NL +
+              '    base_url: "' + longcat + '"' + NL)
+    srv, _ = fake_provider(200, GOOD_REPLY)
+    proxy = "http://127.0.0.1:%d" % srv.server_address[1]
+    via_proxy = {"HTTP_PROXY": proxy, "http_proxy": None,
+                 "NO_PROXY": None, "no_proxy": None}
+
+    def attempt(env_file):
+        _Fake.hits, _Fake.last_auth, _Fake.last_path = 0, "", ""
+        return run(config=config, env_file=env_file, probe=True, extra_env=via_proxy)
+
+    try:
+        code, out = attempt("LONGCAT_API_KEY=sk-longcat" + NL)
+        check(code == 0, "LONGCAT_API_KEY is the key the engine reads for LongCat, so it launches")
+        check(_Fake.hits == 1 and "api.longcat.example" in _Fake.last_path,
+              "...after asking LongCat itself")
+        check("sk-longcat" in _Fake.last_auth, "...with that key")
+
+        for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+            code, out = attempt(name + "=sk-someone-elses" + NL)
+            check(code == NEEDS_CONFIG,
+                  "%s alone is no key for LongCat: the engine sends it "
+                  "no-key-required" % name)
+            check(_Fake.hits == 0, "...so %s is never sent there to prove otherwise" % name)
+            check("LONGCAT_API_KEY" in out,
+                  "...and the message names the variable the engine does read")
+
+        # 0.21.4 pairs OPENAI_API_KEY with the exact address OPENAI_BASE_URL
+        # names -- the pair Config.html writes. The engine preflight runs
+        # beside decides whether that counts.
+        version = _engine_version_preflight_sees()
+        code, out = attempt("OPENAI_API_KEY=sk-paired" + NL
+                            + "OPENAI_BASE_URL=" + longcat + NL)
+        if version is None or version >= (0, 21, 4):
+            check(code == 0 and "sk-paired" in _Fake.last_auth,
+                  "engine %s: OPENAI_API_KEY goes to the OPENAI_BASE_URL address, "
+                  "so it launches" % (version,))
+        else:
+            check(code == NEEDS_CONFIG and _Fake.hits == 0,
+                  "engine %s pairs nothing with OPENAI_BASE_URL yet, so it is "
+                  "still blocked" % (version,))
+    finally:
+        srv.shutdown()
+
+
 if __name__ == "__main__":
     for fn in (test_unreadable_configs_are_named_precisely,
                test_a_python_without_pyyaml_does_not_accuse_the_config,
@@ -600,6 +701,7 @@ if __name__ == "__main__":
                test_custom_providers,
                test_a_custom_provider_is_matched_the_way_the_engine_matches_it,
                test_a_key_written_into_the_config_counts_as_a_key,
+               test_a_custom_entry_is_sent_only_the_keys_the_engine_sends,
                test_the_gateway_key_is_looked_for_where_the_engine_reads_it,
                test_the_launch_probe_asks_the_provider_before_the_user_does,
                test_only_config_fixable_failures_block_a_launch,
