@@ -174,7 +174,10 @@ def _as_sent(base_url, api_key):
     both made http.client raise UnicodeEncodeError, and a key the engine
     uses fine was reported as broken.
     """
-    key = "".join(ch for ch in (api_key or "") if ord(ch) < 128).strip()
+    # No .strip() here: the engine strips only keys it loads from
+    # credential variables (env_value does that part). An inline key with a
+    # space before a note keeps that space, and the engine's call fails.
+    key = "".join(ch for ch in (api_key or "") if ord(ch) < 128)
     url = urllib.parse.quote(base_url or "", safe=":/?#[]@!$&'()*+,;=%~")
     return url, key
 
@@ -454,6 +457,9 @@ def host_derived_key_var(base_url):
 # not a reason to refuse a launch: ask with exactly this and see.
 NO_KEY = "no-key-required"
 
+# hermes_cli/env_loader.py _CREDENTIAL_SUFFIXES (same on 0.21.3 and 0.21.4).
+CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
+
 
 def env_value(env, name):
     """name's value as the engine will see it: data/.env wins, even when it
@@ -475,7 +481,12 @@ def env_value(env, name):
         value, seen = env[name], True
     if not seen:
         value = os.environ.get(name)
-    return (value or "").strip()
+    value = value or ""
+    if name.endswith(CREDENTIAL_SUFFIXES):
+        # _sanitize_loaded_credentials: non-ASCII out of credential
+        # variables on load, before anything strips them.
+        value = "".join(ch for ch in value if ord(ch) < 128)
+    return value.strip()
 
 
 _env_value = env_value
@@ -575,7 +586,7 @@ def parse_env(text):
             # python-dotenv drops the whole line -- "could not parse
             # statement" -- when the quote never closes or anything but a
             # comment follows it, so the engine never sees the variable.
-            if content is None or (rest.strip() and not re.match(r"\s+#", rest)):
+            if content is None or (rest.strip() and not re.match(r"\s*#", rest)):
                 continue
             value = content
         else:

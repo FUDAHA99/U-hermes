@@ -610,6 +610,9 @@ ENV_LINES = [
     ("KEY_HASH_NO_SPACE=sk#part", "KEY_HASH_NO_SPACE", "sk#part"),
     ("KEY_EMPTY=", "KEY_EMPTY", ""),
     ('KEY_ESC="a\\nb"', "KEY_ESC", "a\nb"),
+    # A comment straight after the closing quote, no space: dotenv keeps the value.
+    ('KEY_DQ_HASH="sk-dq"#LongCat key', "KEY_DQ_HASH", "sk-dq"),
+    ("KEY_SQ_HASH='sk-sq'#old one", "KEY_SQ_HASH", "sk-sq"),
     # python-dotenv drops these lines entirely ("could not parse statement").
     ('KEY_QUOTED_THEN_TEXT="sk-lc" my longcat key', "KEY_QUOTED_THEN_TEXT", None),
     ('KEY_UNTERMINATED="sk-lc', "KEY_UNTERMINATED", None),
@@ -700,6 +703,15 @@ def test_a_key_is_sent_the_way_the_engine_sends_it():
     check(all(ord(c) < 128 for c in url) and "%20" in url, "the address is percent-encoded (%r)" % url)
     r = pp.probe("http://127.0.0.1:9/v1", "sk-lc" + chr(0x200B), "m", timeout=2)
     check(r.kind == pp.NETWORK, "so such a key reaches the network instead of failing locally (%s)" % r.kind)
+    # But only credential variables are stripped of whitespace on load; an
+    # inline key keeps the space in front of its note, and the engine's
+    # call with it fails -- so the probe must not quietly repair it.
+    _url, inline = pp._as_sent("http://x/v1", "sk-lc （旧）")
+    check(inline == "sk-lc ", "an inline key keeps its trailing space (%r)" % inline)
+    check(pp.env_value({"LONGCAT_API_KEY": "sk-lc （旧）"}, "LONGCAT_API_KEY") == "sk-lc",
+          "a *_API_KEY variable is cleaned then stripped, as the engine loads it")
+    check(pp.env_value({"LCKEY": "sk-lc" + chr(0x200B)}, "LCKEY") == "sk-lc" + chr(0x200B),
+          "a variable without a credential suffix is not cleaned on load")
 
 
 if __name__ == "__main__":
