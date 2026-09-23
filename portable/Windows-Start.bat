@@ -74,6 +74,18 @@ echo       它会用中文说清卡在哪一层。
 )
 
 :: ============================================================================
+:: Remove program files an older release shipped and this one does not
+:: ============================================================================
+:: Upgrading means extracting the new zip over this folder, which replaces
+:: files but never deletes one -- and the engine imports whatever sits in its
+:: tools and plugin folders. Only files named by an older release's list in
+:: hermes\manifests are removed, never data\. \. keeps a drive-root install
+:: (SCRIPT_DIR = H:) from meaning "the current directory on H:".
+if exist "%HERMES_DIR%\manifests" if exist "%RUNTIME_DIR%\python-win-x64\python.exe" (
+    "%RUNTIME_DIR%\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\prune-stale-files.py" "%SCRIPT_DIR%\."
+)
+
+:: ============================================================================
 :: Fix stale paths in portable venv (first run on new machine)
 :: ============================================================================
 
