@@ -418,8 +418,93 @@ def host_derived_key_var(base_url):
     return vendor + "_API_KEY"
 
 
-def _env_value(env, name):
-    return ((env or {}).get(name) or os.environ.get(name) or "").strip()
+# What the engine sends when a custom entry yields no key at all
+# (_resolve_named_custom_runtime). A keyless server -- LM Studio, Ollama, a
+# box on the LAN -- takes it; a cloud provider answers 401. So "no key" is
+# not a reason to refuse a launch: ask with exactly this and see.
+NO_KEY = "no-key-required"
+
+
+def env_value(env, name):
+    """name's value as the engine will see it: data/.env wins, even when it
+    sets the variable to nothing -- load_hermes_dotenv loads it with
+    override=True -- and only a name the file does not mention falls back
+    to the process environment."""
+    env = env or {}
+    value = env[name] if name in env else os.environ.get(name)
+    return (value or "").strip()
+
+
+_env_value = env_value
+
+
+# --- data/.env, read the way python-dotenv reads it ------------------------
+# The engine loads data/.env with python-dotenv. A simpler reader disagreed
+# with it on lines people really write -- `KEY=value  # note`, `export KEY=`
+# -- and preflight then blocked a launch the engine would have run fine.
+
+_DQ_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'",
+               "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
+def _quoted(value, quote):
+    """(content, ok) of a value opening with `quote`."""
+    out, i = [], 1
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            if quote == '"' and nxt in _DQ_ESCAPES:
+                out.append(_DQ_ESCAPES[nxt])
+                i += 2
+                continue
+            if quote == "'" and nxt in ("\\", "'"):
+                out.append(nxt)
+                i += 2
+                continue
+        if ch == quote:
+            return "".join(out), True
+        out.append(ch)
+        i += 1
+    return value, False
+
+
+def parse_env(text):
+    """{name: value} for the common shapes of a .env line, as python-dotenv
+    parses them: `export ` prefixes, spaces around `=`, single and double
+    quotes, and ` # comments` after an unquoted value. A line without `=`
+    is skipped (dotenv gives it no value either)."""
+    values = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export ") or line.startswith("export\t"):
+            line = line[len("export"):].lstrip()
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        if value[:1] in ("'", '"'):
+            content, ok = _quoted(value, value[0])
+            value = content if ok else value
+        else:
+            value = re.sub(r"\s+#.*", "", value).rstrip()
+        values[name] = value
+    return values
+
+
+def read_env(path):
+    """parse_env of a file, {} if it is not there. utf-8-sig: a BOM must
+    never become part of the first variable's name."""
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            return parse_env(f.read())
+    except OSError:
+        return {}
 
 
 def custom_key_fallback_vars(base_url, env=None, engine_version=None):

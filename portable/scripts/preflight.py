@@ -80,18 +80,10 @@ def repair_env_bom(path):
 
 
 def read_env_file(path):
-    values = {}
-    if not os.path.exists(path):
-        return values
-    # utf-8-sig: a BOM must never become part of the first variable's name.
-    with io.open(path, encoding="utf-8-sig", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            values[name.strip()] = value.strip().strip("'").strip('"')
-    return values
+    # As python-dotenv reads it, which is how the engine reads it. The old
+    # line splitter kept `  # note` and `export ` as part of values and
+    # names, so a working OPENAI_BASE_URL pairing looked absent.
+    return provider_probe.read_env(path)
 
 
 NO_YAML = "no-yaml"
@@ -244,7 +236,7 @@ def remember_probe_passed(data_dir, fingerprint):
         pass  # a read-only stick is not a reason to fail a launch
 
 
-def run_launch_probe(data_dir, provider, model, base_url, key):
+def run_launch_probe(data_dir, provider, model, base_url, key, auth_lines=None):
     """Ask the provider one question before the user does.
 
     Everything above this point is static: the file parses, a provider is
@@ -271,6 +263,9 @@ def run_launch_probe(data_dir, provider, model, base_url, key):
         remember_probe_passed(data_dir, fingerprint)
         return 0
 
+    if result.kind == provider_probe.AUTH and auth_lines:
+        say(*auth_lines)
+        return NEEDS_CONFIG
     if result.kind in provider_probe.FIXABLE_IN_CONFIG:
         say("模型服务商拒绝了这次调用，现在聊天也不会有回复：",
             "  " + result.message,
@@ -429,10 +424,11 @@ def main(argv):
 
     found = ""
     for name in candidates:
-        value = env.get(name) or os.environ.get(name) or ""
-        if value.strip():
+        if provider_probe.env_value(env, name):
             found = name
             break
+
+    probed = False
 
     if not found and not inline_key:
         # candidates is () for a custom entry with no key_env at an address
@@ -449,18 +445,34 @@ def main(argv):
         auth_json = os.path.join(data_dir, "auth.json")
         has_stored_login = os.path.exists(auth_json) and os.path.getsize(auth_json) > 2
         if not has_stored_login:
-            say("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model), *where)
-            return NEEDS_CONFIG
+            no_key = ("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model),) + where
+            if entry is None or not base_url:
+                say(*no_key)
+                return NEEDS_CONFIG
+            # A custom entry with an address is not refused by the engine
+            # for having no key: it sends provider_probe.NO_KEY, which a
+            # keyless local server (LM Studio, Ollama, a box on the LAN)
+            # accepts and a cloud provider rejects. Ask with exactly that,
+            # and block only on the rejection. A static "no key, refuse" was
+            # a lockout for every keyless server. With the probe switched
+            # off there is no way to tell, so nothing is refused.
+            probe_code = run_launch_probe(
+                data_dir, provider, model, base_url_for(provider, config, env),
+                provider_probe.NO_KEY, auth_lines=no_key)
+            if probe_code != 0:
+                return probe_code
+            probed = True
 
     # Everything above is static. This is the only check that finds out
     # whether the thing will actually answer.
-    key_value = (env.get(found) or os.environ.get(found) or "") if found else ""
-    probe_code = run_launch_probe(
-        data_dir, provider, model,
-        base_url_for(provider, config, env),
-        inline_key or key_value)
-    if probe_code != 0:
-        return probe_code
+    if not probed:
+        key_value = provider_probe.env_value(env, found) if found else ""
+        probe_code = run_launch_probe(
+            data_dir, provider, model,
+            base_url_for(provider, config, env),
+            inline_key or key_value)
+        if probe_code != 0:
+            return probe_code
 
     # Not fatal: the launcher generates this before the gateway starts.
     #

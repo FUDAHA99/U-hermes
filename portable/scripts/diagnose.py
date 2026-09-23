@@ -135,18 +135,9 @@ def section(title):
 
 
 def load_env():
-    env = {}
-    if os.path.exists(ENV_FILE):
-        try:
-            with open(ENV_FILE, encoding="utf-8-sig", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, _, v = line.partition("=")
-                        env[k.strip()] = v.strip()
-        except OSError:
-            pass
-    return env
+    # Read as python-dotenv reads it -- the engine's reader -- so quotes,
+    # `export ` and trailing `# notes` mean here what they mean at runtime.
+    return provider_probe.read_env(ENV_FILE)
 
 
 def load_config():
@@ -291,6 +282,16 @@ def main():
                 print("  %s 主模型 %s: %s" % (OK if ok else BAD, name, msg))
                 if not ok:
                     problems.append("主模型连接异常：%s" % msg)
+            elif base_url:
+                # No key for this entry, so the engine sends its placeholder.
+                # A keyless local server takes it; ask the way the engine will
+                # rather than calling a working setup incomplete.
+                ok, msg = call_provider(base_url, provider_probe.NO_KEY, model_name)
+                if ok:
+                    print("  %s 主模型 %s: %s（这个服务不需要密钥）" % (OK, name, msg))
+                else:
+                    print("  %s 主模型 %s 没有配置密钥，不带密钥的请求失败了：%s" % (BAD, name, msg))
+                    problems.append("主模型没有配置 API 密钥，请重新配置。")
             else:
                 print("  %s 主模型 %s 缺少地址或密钥" % (BAD, name))
                 problems.append("主模型配置不完整，请重新配置。")

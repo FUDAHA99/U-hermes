@@ -251,9 +251,24 @@ def test_custom_providers():
            '  default: "x"' + NL + 'custom_providers:' + NL +
            '  - name: "mine"' + NL + '    base_url: "https://x/v1"' + NL +
            '    key_env: "MY_KEY"' + NL)
-    code, out = run(config=cfg)
-    check(code == NEEDS_CONFIG, "a custom provider whose key variable is unset is blocked")
-    check("MY_KEY" in out, "...and the message names that variable")
+    # With MY_KEY empty the engine still runs: it sends its placeholder. So
+    # whether this is a mistake is the provider's call, and preflight asks it.
+    srv, url = fake_provider(200, GOOD_REPLY, accept={"abc"})
+    try:
+        at_url = cfg.replace("https://x/v1", url)
+        code, out = run(config=at_url, probe=True)
+        check(code == NEEDS_CONFIG,
+              "a custom provider whose key variable is unset is blocked once the provider refuses")
+        check("MY_KEY" in out, "...and the message names that variable")
+        check("no-key-required" in _Fake.last_auth,
+              "...having asked with exactly what the engine would send")
+        code, _ = run(config=at_url, env_file="MY_KEY=abc" + NL, probe=True)
+        check(code == 0 and "abc" in _Fake.last_auth, "a custom provider with its key set launches")
+    finally:
+        srv.shutdown()
+
+    code, _ = run(config=cfg)
+    check(code == 0, "with the probe off nothing can tell, so an unset key is not refused")
 
     code, _ = run(config=cfg, env_file="MY_KEY=abc" + NL)
     check(code == 0, "a custom provider with its key set launches")
@@ -299,6 +314,9 @@ class _Fake(http.server.BaseHTTPRequestHandler):
     hits = 0
     last_auth = ""
     last_path = ""
+    # None: answer every request alike. A set: a cloud provider that answers
+    # 401 to any bearer token not in it -- including the engine's placeholder.
+    accept = None
 
     def do_POST(self):
         _Fake.hits += 1
@@ -306,18 +324,23 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         # The whole target URL when it arrives as a proxy.
         _Fake.last_path = self.path
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        self.send_response(_Fake.status)
-        self.send_header("Content-Length", str(len(_Fake.body)))
+        status, body = _Fake.status, _Fake.body
+        token = _Fake.last_auth[len("Bearer "):] if _Fake.last_auth.startswith("Bearer ") else ""
+        if _Fake.accept is not None and token not in _Fake.accept:
+            status, body = 401, json.dumps({"error": {"message": "invalid api key"}}).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(_Fake.body)
+        self.wfile.write(body)
 
     def log_message(self, fmt, *a):
         pass
 
 
-def fake_provider(status, body):
+def fake_provider(status, body, accept=None):
     _Fake.status = status
     _Fake.body = json.dumps(body).encode("utf-8")
+    _Fake.accept = set(accept) if accept is not None else None
     _Fake.hits = 0
     _Fake.last_auth = ""
     _Fake.last_path = ""
@@ -561,31 +584,56 @@ def test_a_key_written_into_the_config_counts_as_a_key():
         srv.shutdown()
 
 
+    # An entry carrying no key at all. The engine does not refuse to run it:
+    # it sends the placeholder no-key-required. A keyless local server --
+    # LM Studio, Ollama, a box on the LAN -- takes that and answers. Blocking
+    # it statically locked those setups out (review of PR #10), so preflight
+    # asks with the placeholder and lets the provider decide.
+    def at(url, extra):
+        return cfg(extra).replace("https://x/v1", url)
+
+    srv, url = fake_provider(200, GOOD_REPLY)
+    try:
+        code, out = run(config=at(url, ""), env_file="OPENAI_API_KEY=sk-present" + NL, probe=True)
+        check(code == 0, "a keyless local server with no key in its entry launches")
+        check(_Fake.hits == 1 and "no-key-required" in _Fake.last_auth,
+              "...after being asked with the engine's placeholder")
+        check("sk-present" not in _Fake.last_auth,
+              "...not with OPENAI_API_KEY, which the engine keeps for OpenAI's own address")
+    finally:
+        srv.shutdown()
+
+    # A cloud provider at the same kind of address refuses the placeholder.
+    srv, url = fake_provider(200, GOOD_REPLY, accept={"sk-real"})
+    try:
+        code, out = run(config=at(url, ""), probe=True)
+        check(code == NEEDS_CONFIG, "an entry with no key at a provider that refuses it is blocked")
+        check("没有它的条目" not in out,
+              "...but is not called a missing entry, because it is right there")
+        check("api_key" in out and "key_env" in out,
+              "...and the message names both ways to supply one")
+        check(url in out and "不会" in out,
+              "...and says the engine reads no variable for that address")
+
+        # The engine does NOT fall back to OPENAI_API_KEY or OPENROUTER_API_KEY
+        # for any address: _host_gated_env_key_candidates keeps both away from
+        # hosts that are not theirs. This used to pass, probing with a key the
+        # engine would never send.
+        for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+            code, out = run(config=at(url, ""), env_file=name + "=sk-present" + NL, probe=True)
+            check(code == NEEDS_CONFIG and "sk-present" not in _Fake.last_auth,
+                  "%s is not sent to an entry at someone else's address" % name)
+
+        code, out = run(config=at(url, '    key_env: "MY_KEY"' + NL),
+                        env_file="OPENAI_API_KEY=sk-present" + NL, probe=True)
+        check(code == NEEDS_CONFIG and "sk-present" not in _Fake.last_auth,
+              "an unset key_env does not fall through to OPENAI_API_KEY either")
+        check("MY_KEY" in out, "...and the message names the variable the entry reads")
+    finally:
+        srv.shutdown()
+
     code, out = run(config=cfg(""))
-    check(code == NEEDS_CONFIG, "an entry carrying no key at all is still blocked")
-    check("没有它的条目" not in out,
-          "...but is not called a missing entry, because it is right there")
-    check("api_key" in out and "key_env" in out,
-          "...and the message names both ways to supply one")
-    check("https://x/v1" in out and "不会" in out,
-          "...and says the engine reads no variable for that address")
-
-    # The engine does NOT fall back to OPENAI_API_KEY or OPENROUTER_API_KEY
-    # for any address: _host_gated_env_key_candidates keeps both away from
-    # hosts that are not theirs, and https://x/v1 gets the placeholder
-    # no-key-required. This used to pass, probing with a key the engine
-    # would never send.
-    code, out = run(config=cfg(""), env_file="OPENAI_API_KEY=sk-present" + NL)
-    check(code == NEEDS_CONFIG,
-          "OPENAI_API_KEY does not count for an entry at someone else's address")
-    code, out = run(config=cfg(""), env_file="OPENROUTER_API_KEY=sk-or-present" + NL)
-    check(code == NEEDS_CONFIG, "...and neither does OPENROUTER_API_KEY")
-
-    code, out = run(config=cfg('    key_env: "MY_KEY"' + NL),
-                    env_file="OPENAI_API_KEY=sk-present" + NL)
-    check(code == NEEDS_CONFIG,
-          "an unset key_env does not fall through to OPENAI_API_KEY either")
-    check("MY_KEY" in out, "...and the message names the variable the entry reads")
+    check(code == 0, "with the probe off nothing can tell, so a keyless entry is not refused")
 
     # Both spellings at once: the engine reads the inline key first
     # (_resolve_named_custom_runtime in hermes_cli/runtime_provider_custom.py),
@@ -649,14 +697,16 @@ def test_a_custom_entry_is_sent_only_the_keys_the_engine_sends():
               '  default: "LongCat-2.0"' + NL + 'custom_providers:' + NL +
               '  - name: "LongCat"' + NL +
               '    base_url: "' + longcat + '"' + NL)
-    srv, _ = fake_provider(200, GOOD_REPLY)
+    # LongCat, as a cloud provider does, answers 401 to anything but a real key.
+    srv, _ = fake_provider(200, GOOD_REPLY, accept={"sk-longcat", "sk-paired"})
     proxy = "http://127.0.0.1:%d" % srv.server_address[1]
     via_proxy = {"HTTP_PROXY": proxy, "http_proxy": None,
                  "NO_PROXY": None, "no_proxy": None}
 
-    def attempt(env_file):
+    def attempt(env_file, extra=None):
         _Fake.hits, _Fake.last_auth, _Fake.last_path = 0, "", ""
-        return run(config=config, env_file=env_file, probe=True, extra_env=via_proxy)
+        return run(config=config, env_file=env_file, probe=True,
+                   extra_env=dict(via_proxy, **(extra or {})))
 
     try:
         code, out = attempt("LONGCAT_API_KEY=sk-longcat" + NL)
@@ -669,10 +719,17 @@ def test_a_custom_entry_is_sent_only_the_keys_the_engine_sends():
             code, out = attempt(name + "=sk-someone-elses" + NL)
             check(code == NEEDS_CONFIG,
                   "%s alone is no key for LongCat: the engine sends it "
-                  "no-key-required" % name)
-            check(_Fake.hits == 0, "...so %s is never sent there to prove otherwise" % name)
+                  "no-key-required, and LongCat refuses that" % name)
+            check("no-key-required" in _Fake.last_auth and "sk-someone-elses" not in _Fake.last_auth,
+                  "...so the placeholder is what is asked with, and %s never leaves" % name)
             check("LONGCAT_API_KEY" in out,
                   "...and the message names the variable the engine does read")
+
+        # data/.env wins over the process environment even when it sets a
+        # variable to nothing: the engine loads it with override=True.
+        code, out = attempt("LONGCAT_API_KEY=" + NL, extra={"LONGCAT_API_KEY": "sk-longcat"})
+        check(code == NEEDS_CONFIG and "sk-longcat" not in _Fake.last_auth,
+              "an empty LONGCAT_API_KEY= in data/.env hides the one in the process environment")
 
         # 0.21.4 pairs OPENAI_API_KEY with the exact address OPENAI_BASE_URL
         # names -- the pair Config.html writes. The engine preflight runs
@@ -685,9 +742,23 @@ def test_a_custom_entry_is_sent_only_the_keys_the_engine_sends():
                   "engine %s: OPENAI_API_KEY goes to the OPENAI_BASE_URL address, "
                   "so it launches" % (version,))
         else:
-            check(code == NEEDS_CONFIG and _Fake.hits == 0,
+            check(code == NEEDS_CONFIG and "sk-paired" not in _Fake.last_auth,
                   "engine %s pairs nothing with OPENAI_BASE_URL yet, so it is "
                   "still blocked" % (version,))
+
+        # The same pair, written the ways people write .env lines. python-
+        # dotenv (the engine's reader) drops a trailing comment and an
+        # `export `; the old line splitter kept them, missed the pairing and
+        # blocked a launch the engine would run.
+        for label, line in (("a trailing comment", "OPENAI_BASE_URL=" + longcat + "  # longcat"),
+                            ("an export prefix", "export OPENAI_BASE_URL=" + longcat),
+                            ("double quotes", 'OPENAI_BASE_URL="' + longcat + '"')):
+            code, out = attempt("OPENAI_API_KEY=sk-paired" + NL + line + NL)
+            if version is None or version >= (0, 21, 4):
+                check(code == 0 and "sk-paired" in _Fake.last_auth,
+                      "OPENAI_BASE_URL with %s still pairs, as the engine reads it" % label)
+            else:
+                check(code == NEEDS_CONFIG, "engine %s: %s changes nothing" % (version, label))
     finally:
         srv.shutdown()
 

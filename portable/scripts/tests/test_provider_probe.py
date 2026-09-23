@@ -596,8 +596,61 @@ def test_there_is_only_one_copy_of_this_lookup():
           % ", ".join(owners))
 
 
+# Lines people actually put in data/.env. What matters is agreeing with
+# python-dotenv, the engine's reader; the expected values below were taken
+# from it, and when it is importable the test asks it directly.
+ENV_LINES = [
+    ("OPENAI_API_KEY=sk-plain", "OPENAI_API_KEY", "sk-plain"),
+    ("OPENAI_BASE_URL=https://a.example/v1  # longcat", "OPENAI_BASE_URL", "https://a.example/v1"),
+    ("export OPENAI_BASE_URL=https://a.example/v1", "OPENAI_BASE_URL", "https://a.example/v1"),
+    ("KEY_SPACED = sk-spaced", "KEY_SPACED", "sk-spaced"),
+    ('KEY_DQ="sk-dq # not a comment"', "KEY_DQ", "sk-dq # not a comment"),
+    ("KEY_SQ='sk-sq # not a comment'", "KEY_SQ", "sk-sq # not a comment"),
+    ('KEY_DQ_TAIL="sk-dq"  # note', "KEY_DQ_TAIL", "sk-dq"),
+    ("KEY_HASH_NO_SPACE=sk#part", "KEY_HASH_NO_SPACE", "sk#part"),
+    ("KEY_EMPTY=", "KEY_EMPTY", ""),
+    ('KEY_ESC="a\\nb"', "KEY_ESC", "a\nb"),
+]
+
+
+def test_env_files_are_read_the_way_the_engine_reads_them():
+    import io
+    NL = chr(10)
+    text = NL.join(line for line, _k, _v in ENV_LINES) + NL + "# a comment" + NL + "NOT_A_PAIR" + NL
+    ours = pp.parse_env(text)
+    for line, key, want in ENV_LINES:
+        check(ours.get(key) == want, "%-45s -> %r" % (line[:45], ours.get(key)))
+    check("NOT_A_PAIR" not in ours, "a line with no '=' sets nothing")
+    try:
+        import dotenv
+    except ImportError:
+        print("  skip  python-dotenv not importable here; the table above is its output")
+        return
+    theirs = {k: v for k, v in dotenv.dotenv_values(stream=io.StringIO(text)).items() if v is not None}
+    for _line, key, _want in ENV_LINES:
+        check(ours.get(key) == theirs.get(key),
+              "agrees with python-dotenv %s on %s (%r)" % (dotenv.__name__, key, theirs.get(key)))
+
+
+def test_an_empty_value_in_env_hides_the_process_one():
+    saved = os.environ.get("PP_TEST_SHADOW")
+    os.environ["PP_TEST_SHADOW"] = "from-process"
+    try:
+        check(pp.env_value({"PP_TEST_SHADOW": ""}, "PP_TEST_SHADOW") == "",
+              "data/.env setting it to nothing wins, as load_hermes_dotenv(override=True) does")
+        check(pp.env_value({}, "PP_TEST_SHADOW") == "from-process",
+              "a name the file does not mention falls back to the process environment")
+    finally:
+        if saved is None:
+            os.environ.pop("PP_TEST_SHADOW", None)
+        else:
+            os.environ["PP_TEST_SHADOW"] = saved
+
+
 if __name__ == "__main__":
-    for fn in (test_a_working_provider,
+    for fn in (test_env_files_are_read_the_way_the_engine_reads_them,
+               test_an_empty_value_in_env_hides_the_process_one,
+               test_a_working_provider,
                test_an_anthropic_surface_is_probed_differently,
                test_every_status_gets_its_own_answer,
                test_400_used_to_be_a_shrug,
