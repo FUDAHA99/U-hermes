@@ -2,9 +2,11 @@
 remove files an older release shipped and this one does not.
 
 The cost of getting this wrong is not symmetric. A stale file left behind is
-what we have today; a current file deleted, or anything under data\\, is a
-broken install or lost chats. Most of the cases below are about what must
-survive.
+what we had before this existed; a current file deleted, a package the
+engine installed at runtime half-deleted, or anything under data\\ touched,
+is a broken install or lost chats. Most of the cases below are about what
+must survive. Several were found by an adversarial review of the first
+version, which reproduced each with real files.
 
 Run:  python portable/scripts/tests/test_prune_stale_files.py
 """
@@ -14,8 +16,10 @@ import io
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
+import zipfile
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -38,7 +42,7 @@ def check(condition, label):
         FAILURES.append(label)
 
 
-SITE = "hermes/.venv/Lib/site-packages/"
+SITE = ps.SITE
 
 
 def put(root, rel, text="x"):
@@ -53,9 +57,17 @@ def exists(root, rel):
     return os.path.exists(os.path.join(root, *rel.split("/")))
 
 
-def manifest(root, version, paths, header=True):
-    lines = (["%s %s" % (ps.HEADER, version)] if header else []) + list(paths)
-    put(root, "%s/%s" % (ps.MANIFEST_DIR, ps.manifest_name(version)), "\n".join(lines) + "\n")
+def manifest(root, version, paths, legacy=False, text=None):
+    name = (ps.LEGACY_PREFIX if legacy else "") + ps.manifest_name(version)
+    put(root, "%s/%s" % (ps.MANIFEST_DIR, name), ps.render_manifest(version, paths) if text is None else text)
+
+
+def record(root, dist, paths):
+    """A dist-info as pip leaves it: RECORD lists its files, itself included."""
+    rel = SITE + dist + "/RECORD"
+    rows = [p + ",sha256=x,1" for p in paths] + [dist + "/RECORD,,"]
+    put(root, rel, "\n".join(rows) + "\n")
+    return rel
 
 
 def install(version="v0.4.5"):
@@ -74,38 +86,101 @@ def quiet(fn, *a):
 
 
 def test_what_v0_4_4_left_behind_is_removed():
-    print("the real case: v0.4.4 extracted over v0.4.3")
-    root = install("v0.4.4")
+    print("the real case: a v0.4.4 install (no list of its own) upgraded by extraction")
+    root = install("v0.4.5")
     try:
-        old_meta = SITE + "hermes_agent-0.21.3.dist-info/METADATA"
+        old_dist = "hermes_agent-0.21.3.dist-info"
+        old_meta = SITE + old_dist + "/METADATA"
         old_tool = SITE + "tools/setup_mcp_tool.py"
         old_plugin = SITE + "plugins/model-providers/opencode-free/__init__.py"
         new_meta = SITE + "hermes_agent-0.21.4.dist-info/METADATA"
         shared = SITE + "tools/registry.py"
         for rel in (old_meta, old_tool, old_plugin, new_meta, shared):
             put(root, rel)
-        manifest(root, "v0.4.3", [old_meta, old_tool, old_plugin, shared])
-        manifest(root, "v0.4.4", [new_meta, shared])
+        old_record = record(root, old_dist, ["hermes_agent-0.21.3.dist-info/METADATA", "tools/setup_mcp_tool.py"])
+        manifest(root, "v0.4.3", [old_meta, old_record, old_tool, old_plugin, shared], legacy=True)
+        manifest(root, "v0.4.5", [new_meta, shared])
 
         deleted, failed, _ = ps.prune(root)
-        check(deleted == 3 and not failed, "three stale files deleted (%d, %r)" % (deleted, failed))
-        check(not exists(root, old_meta), "the second dist-info is gone, so metadata reports 0.21.4 again")
-        check(not exists(root, SITE + "hermes_agent-0.21.3.dist-info"), "...and its now-empty folder")
+        check(deleted == 4 and not failed, "four stale files deleted (%d, %r)" % (deleted, failed))
+        check(not exists(root, SITE + old_dist), "the second dist-info is gone, so metadata reports 0.21.4 again")
         check(not exists(root, old_tool), "the tool upstream deleted is not auto-imported any more")
         check(not exists(root, SITE + "plugins/model-providers/opencode-free"),
               "the deleted provider plugin's folder is gone")
         check(exists(root, new_meta) and exists(root, shared), "everything this version ships is still there")
         check(exists(root, SITE + "tools"), "tools/ itself stays: it still holds a current file")
-        check(not exists(root, ps.MANIFEST_DIR + "/files-v0.4.3.txt"),
-              "the older list is dropped once it is fully applied")
-        check(exists(root, ps.MANIFEST_DIR + "/files-v0.4.4.txt"), "this version's list stays")
+        check(not exists(root, ps.MANIFEST_DIR + "/legacy-files-v0.4.3.txt"), "the stored list is dropped once applied")
+        check(exists(root, ps.MANIFEST_DIR + "/files-v0.4.5.txt"), "this version's list stays")
         check(ps.prune(root)[:2] == (0, []), "the next start is a no-op")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_stored_lists_are_not_reapplied_after_every_upgrade():
+    print("review F1: the stored v0.4.3/v0.4.4 lists come back with every zip")
+    root = install("v0.4.7")
+    try:
+        # Upgrading from v0.4.6, which had a real list. The stored v0.4.4 list
+        # comes back with the zip and names telegram, which v0.4.7 dropped
+        # and which the engine had since reinstalled at runtime.
+        tg = SITE + "telegram/__init__.py"
+        put(root, tg)
+        put(root, SITE + "runtime_only.py")
+        manifest(root, "v0.4.4", [tg, SITE + "runtime_only.py"], legacy=True)
+        manifest(root, "v0.4.6", [])
+        manifest(root, "v0.4.7", [])
+        ps.prune(root)
+        check(exists(root, tg) and exists(root, SITE + "runtime_only.py"),
+              "with a real older list present, the stored ones are ignored")
+        check(not exists(root, ps.MANIFEST_DIR + "/legacy-files-v0.4.4.txt"), "...and cleared away")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_package_reinstalled_at_runtime_is_not_half_deleted():
+    print("review F1: the engine installs optional packages into this venv at runtime")
+    root = install("v0.4.7")
+    try:
+        # v0.4.6 shipped python-telegram-bot 22.8. The engine has since
+        # upgraded it to 22.9 in place; v0.4.7 no longer ships it at all.
+        mods = ["telegram/__init__.py", "telegram/_bot.py"]
+        for m in mods:
+            put(root, SITE + m)
+        record(root, "python_telegram_bot-22.9.dist-info", mods)
+        put(root, SITE + "python_telegram_bot-22.9.dist-info/METADATA")
+        old_dist = [SITE + "python_telegram_bot-22.8.dist-info/METADATA",
+                    SITE + "python_telegram_bot-22.8.dist-info/RECORD"]
+        manifest(root, "v0.4.6", [SITE + m for m in mods] + old_dist)
+        manifest(root, "v0.4.7", [])
+        ps.prune(root)
+        check(all(exists(root, SITE + m) for m in mods),
+              "files claimed by an installed distribution's RECORD stay")
+        check(exists(root, SITE + "python_telegram_bot-22.9.dist-info/METADATA"), "its dist-info stays")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_shipped_package_that_is_going_away_goes_whole():
+    print("...but a package only the older release had is removed, dist-info and all")
+    root = install("v0.4.7")
+    try:
+        mods = ["oldpkg/__init__.py", "oldpkg/core.py"]
+        for m in mods:
+            put(root, SITE + m)
+        rec = record(root, "oldpkg-1.0.dist-info", mods)
+        meta = SITE + "oldpkg-1.0.dist-info/METADATA"
+        put(root, meta)
+        manifest(root, "v0.4.6", [SITE + m for m in mods] + [rec, meta])
+        manifest(root, "v0.4.7", [])
+        deleted, _f, _ = ps.prune(root)
+        check(deleted == 4 and not exists(root, SITE + "oldpkg") and not exists(root, SITE + "oldpkg-1.0.dist-info"),
+              "its own RECORD does not protect it (%d deleted)" % deleted)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_nothing_the_user_owns_is_touched():
-    print("data\\, the user's own files and runtime installs survive")
+    print("data\\, other folders and files no release shipped survive")
     root = install()
     try:
         in_data = "data/state.db"
@@ -113,7 +188,6 @@ def test_nothing_the_user_owns_is_touched():
         user_file = SITE + "someone_pip_installed.py"
         for rel in (in_data, outside_roots, user_file):
             put(root, rel)
-        # An older list that (wrongly) names them must still not reach them.
         manifest(root, "v0.4.4", [in_data, outside_roots])
         manifest(root, "v0.4.5", [])
         ps.prune(root)
@@ -138,7 +212,7 @@ def test_a_case_only_rename_does_not_delete_the_new_file():
 
 
 def test_a_hostile_or_broken_list_cannot_escape():
-    print("paths that climb out, are absolute, or use backslashes are ignored")
+    print("paths that climb out, are absolute, use backslashes or alias names are ignored")
     root = install()
     victim_dir = tempfile.mkdtemp(prefix="prune-outside-")
     try:
@@ -149,17 +223,68 @@ def test_a_hostile_or_broken_list_cannot_escape():
                "runtime/../data/keep.txt",
                outside.replace("\\", "/"),
                "runtime\\..\\data\\keep.txt",
-               "runtime//keep.txt"]
+               "runtime//keep.txt",
+               "runtime/foo.py.",
+               "runtime/foo.py "]
         manifest(root, "v0.4.4", bad)
         manifest(root, "v0.4.5", [])
         ps.prune(root)
         check(exists(root, "data/keep.txt"), "a ..-path into data\\ does nothing")
         check(os.path.exists(outside), "an absolute path outside the install does nothing")
         for p in bad:
-            check(not ps._safe(p), "rejected: %s" % p[:50])
+            check(not ps._safe(p), "rejected: %r" % p[:50])
     finally:
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(victim_dir, ignore_errors=True)
+
+
+def test_a_junction_inside_the_install_is_not_followed():
+    print("review F4: a junction under runtime\\ must not lead the delete outside")
+    if os.name != "nt":
+        print("  skip  Windows only")
+        return
+    root = install()
+    outside = tempfile.mkdtemp(prefix="prune-junction-target-")
+    try:
+        victim = put(outside, "sub/victim.txt")
+        put(outside, "keepme.txt")
+        os.makedirs(os.path.join(root, "runtime"), exist_ok=True)
+        link = os.path.join(root, "runtime", "jx")
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", link, outside], capture_output=True)
+        if r.returncode != 0:
+            print("  skip  could not create a junction here")
+            return
+        manifest(root, "v0.4.4", ["runtime/jx/sub/victim.txt"])
+        manifest(root, "v0.4.5", [])
+        ps.prune(root)
+        check(os.path.exists(victim), "the file behind the junction survives")
+        check(os.path.isdir(link), "the junction itself is not removed")
+    finally:
+        link = os.path.join(root, "runtime", "jx")
+        if os.path.isdir(link):
+            os.rmdir(link)  # removes the junction, not its target
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+def test_a_long_path_is_deleted_not_skipped_and_forgotten():
+    print("review F5: a stale file beyond MAX_PATH must not be treated as absent")
+    if os.name != "nt":
+        print("  skip  Windows only")
+        return
+    root = install()
+    try:
+        rel = "runtime/" + "/".join(["d%02d_%s" % (i, "x" * 20) for i in range(14)]) + "/deep.js"
+        full = "\\\\?\\" + os.path.join(os.path.abspath(root), *rel.split("/"))
+        os.makedirs(os.path.dirname(full))
+        open(full, "w").close()
+        check(len(os.path.join(root, *rel.split("/"))) > 300, "the path really is long (%d)" % len(os.path.join(root, *rel.split("/"))))
+        manifest(root, "v0.4.4", [rel])
+        manifest(root, "v0.4.5", [])
+        deleted, failed, _ = ps.prune(root)
+        check(deleted == 1 and not os.path.exists(full), "it is deleted (%d, %r)" % (deleted, failed))
+    finally:
+        shutil.rmtree("\\\\?\\" + os.path.abspath(root), ignore_errors=True)
 
 
 def test_a_locked_file_is_retried_next_time():
@@ -175,15 +300,52 @@ def test_a_locked_file_is_retried_next_time():
         if os.name == "nt":
             check(failed == [rel], "the read-only file is reported, not fatal")
             check(exists(root, ps.MANIFEST_DIR + "/files-v0.4.4.txt"), "the older list is kept")
-        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        if os.path.exists(path):  # POSIX deletes a read-only file in a writable folder
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
         deleted, failed, _ = ps.prune(root)
         check(not exists(root, rel) and not failed, "once writable, the next start finishes the job")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_an_interrupted_extraction_deletes_nothing_new():
+    print("review F3: VERSION still says the old release, the new list is already there")
+    root = install("v0.4.5")
+    try:
+        added = SITE + "added_in_046.py"
+        put(root, added)
+        manifest(root, "v0.4.6", [added])
+        manifest(root, "v0.4.5", [])
+        deleted, _f, _ = ps.prune(root)
+        check(deleted == 0 and exists(root, added), "a newer list is never applied")
+        check(exists(root, ps.MANIFEST_DIR + "/files-v0.4.6.txt"),
+              "and it stays, for when the extraction is finished")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_torn_list_is_not_a_short_list():
+    print("review F2: a list cut short must read as unreadable, not as complete")
+    root = install("v0.4.5")
+    try:
+        kept = [SITE + "a.py", SITE + "b.py", "runtime/node-win-x64/node.exe"]
+        for rel in kept:
+            put(root, rel)
+        manifest(root, "v0.4.3", kept, legacy=True)
+        whole = ps.render_manifest("v0.4.5", kept)
+        manifest(root, "v0.4.5", None, text=whole[: len(whole) // 2])
+        check(ps.prune(root)[0] == 0 and all(exists(root, r) for r in kept),
+              "a torn current list: nothing is deleted")
+        manifest(root, "v0.4.5", None, text=whole.replace("# end 3", "# end 5"))
+        check(ps.prune(root)[0] == 0 and all(exists(root, r) for r in kept),
+              "a count that does not match: nothing is deleted")
+        check(ps.parse_manifest(whole) == set(kept), "the whole list parses")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_when_it_cannot_know_it_does_nothing():
-    print("no VERSION, no list for this version, or a foreign file: no guessing")
+    print("no VERSION, no list for this version, a foreign file, a CI build")
     root = tempfile.mkdtemp(prefix="prune-dev-")
     try:
         put(root, SITE + "x.py")
@@ -193,72 +355,56 @@ def test_when_it_cannot_know_it_does_nothing():
         check(ps.prune(root)[0] == 0 and exists(root, SITE + "x.py"),
               "a pre-manifest release extracted over a newer one (no list for itself)")
         put(root, "VERSION", "v0.4.5\n")
-        manifest(root, "v0.4.5", ["not a manifest"], header=False)
+        manifest(root, "v0.4.5", None, text="not a manifest\n")
         check(ps.prune(root)[0] == 0 and exists(root, SITE + "x.py"),
               "a current list without our header is not trusted")
+        put(root, "VERSION", "0.0.0-ci\n")
+        manifest(root, "0.0.0-ci", [])
+        check(ps.prune(root)[0] == 0 and exists(root, SITE + "x.py"), "a CI build has no release order")
     finally:
         shutil.rmtree(root, ignore_errors=True)
     check(quiet(ps.main, ["x", os.path.join(tempfile.gettempdir(), "no-such-install")]) == 0,
           "a missing install directory still exits 0 (never blocks the launch)")
 
 
-def test_a_downgrade_removes_what_the_newer_version_added():
-    print("extracting an older release over a newer one")
-    root = install("v0.4.5")
+def test_the_list_is_built_from_the_zip_itself():
+    print("--add-to-zip, as CI runs it right after Compress-Archive")
+    tmp = tempfile.mkdtemp(prefix="prune-zip-")
     try:
-        added_later = SITE + "added_in_046.py"
-        put(root, added_later)
-        manifest(root, "v0.4.6", [added_later])
-        manifest(root, "v0.4.5", [])
-        ps.prune(root)
-        check(not exists(root, added_later), "a module only the newer engine had is not left to be imported")
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def test_the_manifest_lists_exactly_what_is_on_disk():
-    print("--write-manifest, as CI runs it at packaging time")
-    root = install("v0.4.5")
-    try:
-        for rel in (SITE + "a.py", "hermes/hermes-agent/cli.py", "runtime/uv/uv.exe",
-                    "data/config.yaml.default", "scripts/diagnose.py", "Windows-Start.bat"):
-            put(root, rel)
-        path, count = ps.write_manifest(root, "v0.4.5")
-        listed = ps.read_manifest(path)
-        check(listed == {SITE + "a.py", "hermes/hermes-agent/cli.py", "runtime/uv/uv.exe"},
-              "only the three roots, and all of them (%r)" % sorted(listed or []))
-        check(count == 3, "the count it prints is the count it wrote")
-        with io.open(path, "rb") as f:
-            raw = f.read()
-        check(b"\r\n" not in raw and b"\\" not in raw, "LF and forward slashes, whatever the OS")
-        check(os.path.basename(path) == "files-v0.4.5.txt", "named for the version, so an older one survives extraction")
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def test_older_lists_ride_along_but_never_replace_this_one():
-    print("--write-manifest with the history folder")
-    root = install("v0.4.5")
-    hist = tempfile.mkdtemp(prefix="prune-hist-")
-    try:
-        put(root, "runtime/uv/uv.exe")
+        hist = os.path.join(tmp, "hist")
+        os.makedirs(hist)
         for v, body in (("v0.4.3", [SITE + "old.py"]), ("v0.4.5", [SITE + "IMPOSTOR.py"])):
             with open(os.path.join(hist, ps.manifest_name(v) + ".gz"), "wb") as f:
-                f.write(gzip.compress(("%s %s\n" % (ps.HEADER, v) + "\n".join(body) + "\n").encode("utf-8")))
-        ps.write_manifest(root, "v0.4.5", hist)
-        mdir = os.path.join(root, *ps.MANIFEST_DIR.split("/"))
-        check(ps.read_manifest(os.path.join(mdir, "files-v0.4.3.txt")) == {SITE + "old.py"},
-              "a stored list for an older release is unpacked beside this one")
-        check(ps.read_manifest(os.path.join(mdir, "files-v0.4.5.txt")) == {"runtime/uv/uv.exe"},
-              "a stored list with this release's name does not overwrite the real one")
+                f.write(gzip.compress(ps.render_manifest(v, body).encode("utf-8")))
+        zpath = os.path.join(tmp, "p.zip")
+        with zipfile.ZipFile(zpath, "w") as z:
+            z.writestr("VERSION", "v0.4.5\n")
+            for e in (SITE + "a.py", "hermes/hermes-agent/cli.py", "runtime/uv/uv.exe",
+                      "data/config.yaml.default", "Windows-Start.bat", "runtime/empty-dir/"):
+                z.writestr(e, "" if e.endswith("/") else "x")
+        count, names = ps.add_to_zip(zpath, "v0.4.5", hist)
+        with zipfile.ZipFile(zpath) as z:
+            listed = ps.parse_manifest(z.read(ps.MANIFEST_DIR + "/files-v0.4.5.txt").decode("utf-8"))
+            legacy = ps.parse_manifest(z.read(ps.MANIFEST_DIR + "/legacy-files-v0.4.3.txt").decode("utf-8"))
+            all_names = z.namelist()
+        check(listed == {SITE + "a.py", "hermes/hermes-agent/cli.py", "runtime/uv/uv.exe"},
+              "exactly the zip's files under the roots (%r)" % sorted(listed or []))
+        check(count == 3, "the count it reports is the count it wrote")
+        check(legacy == {SITE + "old.py"}, "a stored older list rides along as legacy-files-*")
+        check(ps.MANIFEST_DIR + "/legacy-files-v0.4.5.txt" not in all_names,
+              "a stored list with this release's name is not shipped")
+        check(ps.check_zip(zpath, "v0.4.5") == [], "and the verify step's check agrees")
+        try:
+            ps.add_to_zip(zpath, "v0.4.5", hist)
+            check(False, "adding twice is refused")
+        except ValueError:
+            check(True, "adding twice is refused")
     finally:
-        shutil.rmtree(root, ignore_errors=True)
-        shutil.rmtree(hist, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_the_zip_check_catches_a_list_that_disagrees():
     print("--check-zip: the list must be exactly the zip's files under the roots")
-    import zipfile
     tmp = tempfile.mkdtemp(prefix="prune-zip-")
     try:
         def make(entries, listed, version="v0.4.5"):
@@ -268,7 +414,7 @@ def test_the_zip_check_catches_a_list_that_disagrees():
                 for e in entries:
                     z.writestr(e, "x")
                 z.writestr("%s/%s" % (ps.MANIFEST_DIR, ps.manifest_name(version)),
-                           "%s %s\n" % (ps.HEADER, version) + "\n".join(listed) + "\n")
+                           ps.render_manifest(version, listed))
             return path
         good = [SITE + "a.py", "runtime/uv/uv.exe"]
         check(ps.check_zip(make(good + ["Windows-Start.bat"], good), "v0.4.5") == [],
@@ -294,24 +440,32 @@ def test_the_lists_for_releases_before_this_existed():
         if not os.path.exists(path):
             check(False, "%s is committed" % os.path.basename(path))
             continue
-        lines = gzip.decompress(open(path, "rb").read()).decode("utf-8").splitlines()
-        check(lines[0] == "%s %s" % (ps.HEADER, version), "%s has our header" % version)
-        body = lines[1:]
+        text = gzip.decompress(open(path, "rb").read()).decode("utf-8")
+        body = ps.parse_manifest(text)
+        check(body is not None and text.startswith("%s %s\n" % (ps.HEADER, version)),
+              "%s is a whole list with our header and trailer" % version)
+        body = body or set()
         check(len(body) > 50000, "%s lists the whole package (%d files)" % (version, len(body)))
         check(all(ps._safe(p) for p in body), "%s: every entry is inside the roots" % version)
         check(SITE + marker in body, "%s: lists its own engine's dist-info" % version)
+        check(not any("/.git/" in p for p in body), "%s: nothing Compress-Archive leaves out" % version)
 
 
 if __name__ == "__main__":
     for fn in (test_what_v0_4_4_left_behind_is_removed,
+               test_stored_lists_are_not_reapplied_after_every_upgrade,
+               test_a_package_reinstalled_at_runtime_is_not_half_deleted,
+               test_a_shipped_package_that_is_going_away_goes_whole,
                test_nothing_the_user_owns_is_touched,
                test_a_case_only_rename_does_not_delete_the_new_file,
                test_a_hostile_or_broken_list_cannot_escape,
+               test_a_junction_inside_the_install_is_not_followed,
+               test_a_long_path_is_deleted_not_skipped_and_forgotten,
                test_a_locked_file_is_retried_next_time,
+               test_an_interrupted_extraction_deletes_nothing_new,
+               test_a_torn_list_is_not_a_short_list,
                test_when_it_cannot_know_it_does_nothing,
-               test_a_downgrade_removes_what_the_newer_version_added,
-               test_the_manifest_lists_exactly_what_is_on_disk,
-               test_older_lists_ride_along_but_never_replace_this_one,
+               test_the_list_is_built_from_the_zip_itself,
                test_the_zip_check_catches_a_list_that_disagrees,
                test_the_lists_for_releases_before_this_existed):
         fn()

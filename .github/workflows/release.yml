@@ -314,14 +314,14 @@ jobs:
                               "portable/runtime/node-win-x64/node_modules/hermes-web-ui/.ekko")) {
             Remove-Item -Recurse -Force $junk -ErrorAction SilentlyContinue
           }
-          # The file list the launcher's prune-stale-files.py works from: every
-          # file under hermes/.venv, hermes/hermes-agent and runtime/, plus the
-          # stored lists of releases that shipped without one. Written after
-          # the junk removal and nothing touches those folders after it, so it
-          # names exactly what is zipped -- the verify step holds it to that.
-          python portable/scripts/prune-stale-files.py --write-manifest portable $label tools/release-manifests
-          if ($LASTEXITCODE -ne 0) { Write-Error "could not write the release file list"; exit 1 }
           Compress-Archive -Path "portable/*" -DestinationPath $zipName -Force
+          # The file list the launcher's prune-stale-files.py works from: every
+          # file under hermes/.venv, hermes/hermes-agent and runtime/ -- read
+          # from the zip, not the build folder, because they differ:
+          # Compress-Archive skips hidden items, and the engine clone's .git is
+          # hidden. Plus the stored lists of releases that shipped without one.
+          python portable/scripts/prune-stale-files.py --add-to-zip $zipName $label tools/release-manifests
+          if ($LASTEXITCODE -ne 0) { Write-Error "could not add the release file list"; exit 1 }
           echo "ARTIFACT=$zipName" >> $env:GITHUB_ENV
 
       - name: Verify the packaged artifact

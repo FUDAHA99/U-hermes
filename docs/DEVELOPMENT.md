@@ -81,7 +81,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\sync-to-instance.ps1 -
 | `test_sync_excludes` | 把数据库同步到实测实例。网页账号库在 `portable\packages\` 下，第一版排除名单里没有它，一次同步就会盖掉 U 盘上的账号和网页登录密码 |
 | `test_upstream_tweaks` | 上游挪了代码，补丁跟丢。v0.21.4 把 `_cprint` 从 `cli.py` 挪进 `hermes_cli/cli_render.py`，补丁只认旧位置，于是周一的哨兵构建失败了，却没人看到（Actions 日志只留 1 天）。其中一条测试直接模拟「没有控制台」的场景，看打过补丁的函数会不会崩 |
 | `test_launcher_env` | 引擎状态写到了别人电脑上。v0.21.4 起同一个系统用户只能跑一个网关，登记表默认放在 `%USERPROFILE%\.local\state\hermes`；不把 `HERMES_GATEWAY_LOCK_DIR` 指到 U 盘的话，网页界面带 `--replace` 启动网关时会关掉电脑主人自己的 Hermes，每次启动还会在那台电脑上留下文件。另外会调用引擎自身的函数，确认这个变量名确实是引擎读取的 |
-| `test_prune_stale_files` + 校验里的清单比对 | 解压覆盖升级留下的旧程序文件。解压只替换、不删除，而引擎会自动加载 `tools/`、`providers/` 和插件目录里的所有模块：v0.4.3 覆盖升级到 v0.4.4 后留下 508 个旧文件，多加载了上游已删的工具和服务商，`importlib.metadata` 报的还是 0.21.3。现在每个发布包都带一份 `hermes/manifests/files-<版本>.txt`，启动器会删掉「旧清单里有、新清单里没有」的文件。这份清单必须和压缩包逐个对上：漏掉一个文件，而旧清单里恰好有它，这个文件就会从所有覆盖升级的安装里被删掉。v0.4.3 和 v0.4.4 发布时还没有清单，它们的清单是事后根据发布包生成的，存放在 `tools/release-manifests/` |
+| `test_prune_stale_files` + 校验里的清单比对 | 解压覆盖升级留下的旧程序文件。解压只替换、不删除，而引擎会自动加载 `tools/`、`providers/` 和插件目录里的所有模块：v0.4.3 覆盖升级到 v0.4.4 后留下 508 个旧文件，多加载了上游已删的工具和服务商，`importlib.metadata` 报的还是 0.21.3。现在每个发布包都带一份 `hermes/manifests/files-<版本>.txt`，启动器会删掉「比当前版本旧的清单里有、当前清单里没有」的文件。几条关键规则：清单从**压缩包本身**生成，因为打包工具会跳过隐藏的 `.git`，从构建目录生成就对不上；`site-packages` 里只要某个还在的包的 RECORD 声明了一个文件，这个文件就不删，因为引擎运行时会往这个 venv 里装依赖；为 v0.4.3/v0.4.4 补做的历史清单（`tools/release-manifests/`，包里叫 `legacy-files-*`）只在安装里没有真正的旧清单时才用，否则它们每次升级都会跟着新包回来，被重复应用。这些都是对抗性审查用真实文件复现出来的问题 |
 | 「校验压缩包」里的 `*.db` 检查 | 把构建机的状态打进发布包。冒烟测试会在 `portable\` 里起网页界面，于是账号库和 `.ekko\` 就留在了待打包的目录里 |
 | 「校验压缩包」 | 解压之后跑不起来的包。Windows 会验证能 import 引擎、几个关键文件在不在；macOS 目前在这里失败 |
 
