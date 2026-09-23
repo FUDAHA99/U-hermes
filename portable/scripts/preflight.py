@@ -80,18 +80,10 @@ def repair_env_bom(path):
 
 
 def read_env_file(path):
-    values = {}
-    if not os.path.exists(path):
-        return values
-    # utf-8-sig: a BOM must never become part of the first variable's name.
-    with io.open(path, encoding="utf-8-sig", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            values[name.strip()] = value.strip().strip("'").strip('"')
-    return values
+    # As python-dotenv reads it, which is how the engine reads it. The old
+    # line splitter kept `  # note` and `export ` as part of values and
+    # names, so a working OPENAI_BASE_URL pairing looked absent.
+    return provider_probe.read_env(path)
 
 
 NO_YAML = "no-yaml"
@@ -207,14 +199,17 @@ def base_url_for(provider, config, env):
     # An override in .env wins, exactly as it will at runtime.
     var = getattr(pconfig, "base_url_env_var", "") or ""
     if var:
-        override = (env.get(var) or os.environ.get(var) or "").strip()
+        # An empty VAR= in data/.env hides the process value, as at runtime.
+        override = provider_probe.env_value(env, var)
         if override:
             return override
     return str(getattr(pconfig, "inference_base_url", "") or "")
 
 
-def _probe_fingerprint(provider, model, key):
-    raw = "|".join([provider, model, key]).encode("utf-8")
+def _probe_fingerprint(provider, model, key, base_url=""):
+    # The address is part of it: a pass remembered for an entry at a keyless
+    # local server must not carry over when that entry is pointed elsewhere.
+    raw = "|".join([provider, model, key, base_url or ""]).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -262,7 +257,7 @@ def run_launch_probe(data_dir, provider, model, base_url, key):
     if not base_url or not key:
         return 0  # nothing to ask, or nowhere to ask it
 
-    fingerprint = _probe_fingerprint(provider, model, key)
+    fingerprint = _probe_fingerprint(provider, model, key, base_url)
     if probe_already_passed(data_dir, fingerprint):
         return 0
 
@@ -282,6 +277,66 @@ def run_launch_probe(data_dir, provider, model, base_url, key):
         "    程序照常启动 —— 这类问题通常和配置无关。"
         "如果聊天确实没有回复，双击「出问题点我-诊断.bat」。")
     return 0
+
+
+# Outcomes that say nothing about the configuration: the launch goes ahead.
+TRANSIENT = (provider_probe.NETWORK, provider_probe.RATE, provider_probe.SERVER)
+
+
+def _provider_words(result):
+    """The provider's own explanation inside a probe message, or ""."""
+    marker = "服务商原话："
+    return result.message.split(marker, 1)[1].strip() if marker in result.message else ""
+
+
+def probe_without_a_key(data_dir, provider, model, base_url, no_key_lines):
+    """A custom entry with an address and no key: ask the way the engine will.
+
+    The engine does not refuse to run such an entry; it sends
+    provider_probe.NO_KEY. A keyless server -- LM Studio, Ollama, a box on
+    the LAN -- answers that; a cloud provider does not. So:
+
+      a real reply          launch: this service needs no key
+      network / 429 / 5xx   launch, as for any provider -- but say the key
+                            is missing, since that may be the real problem
+      anything else         block, saying no key was found AND what the
+                            provider answered: a 404 or 400 to a keyless
+                            request is at least as likely "no key" as
+                            "wrong model name", and a 402 is certainly not
+                            "your key is fine, top up"
+    """
+    # Said when the launch goes ahead without an answer either way. Only a
+    # conditional: for a keyless LM Studio that is merely switched off,
+    # "add an api_key" would be wrong advice.
+    maybe = ("[i] 这个条目没有配置 API 密钥。如果这个服务需要密钥：",) + tuple(
+        "    " + line for line in no_key_lines[1:])
+    if os.environ.get("U_HERMES_SKIP_PROBE"):
+        say(*maybe)
+        return 0
+    fingerprint = _probe_fingerprint(provider, model, provider_probe.NO_KEY, base_url)
+    if probe_already_passed(data_dir, fingerprint):
+        return 0
+    result = provider_probe.probe(base_url, provider_probe.NO_KEY, model, timeout=PROBE_TIMEOUT)
+    if result.ok:
+        remember_probe_passed(data_dir, fingerprint)
+        return 0
+    # No HTTP status at all (a truncated body, a bad status line) is a local
+    # protocol hiccup, as it is on the keyed path -- not the provider's answer.
+    local_error = result.kind == provider_probe.UNKNOWN and not result.http_code
+    if result.kind in TRANSIENT or local_error:
+        say("[!] 试着调用了一次模型，没有成功：",
+            "  " + result.message,
+            "    程序照常启动。")
+        say(*maybe)
+        return 0
+    answer = "不带密钥试了一次，没有得到正常回复"
+    answer += "（HTTP %d）" % result.http_code if result.http_code else ""
+    words = _provider_words(result)
+    answer += "。服务商原话：" + words if words else "：" + result.message
+    say(*no_key_lines)
+    say(answer,
+        "如果这个服务确实不需要密钥，请检查模型名称和接口地址。配置页马上打开。")
+    return NEEDS_CONFIG
 
 
 def say(*lines):
@@ -399,6 +454,13 @@ def main(argv):
     if repair_env_bom(env_path):
         say("[i] data\\.env 开头有一个 BOM 字符，引擎会因此读不到第一个变量。已经去掉了。")
     env = read_env_file(env_path)
+    # ${VAR} / ${env:VAR} in config.yaml, expanded against .env as the engine
+    # does on load -- before anything below reads a key or an address.
+    config = provider_probe.expand_env_refs(config, env)
+    model = provider_probe.expand_env_refs(model, env)
+    if entry is not None:
+        entry = provider_probe.find_custom_provider(config, provider)
+        inline_key = provider_probe.custom_provider_inline_key(entry)
 
     no_key_hint = ()
     if entry is not None:
@@ -429,10 +491,11 @@ def main(argv):
 
     found = ""
     for name in candidates:
-        value = env.get(name) or os.environ.get(name) or ""
-        if value.strip():
+        if provider_probe.env_value(env, name):
             found = name
             break
+
+    probed = False
 
     if not found and not inline_key:
         # candidates is () for a custom entry with no key_env at an address
@@ -449,18 +512,33 @@ def main(argv):
         auth_json = os.path.join(data_dir, "auth.json")
         has_stored_login = os.path.exists(auth_json) and os.path.getsize(auth_json) > 2
         if not has_stored_login:
-            say("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model), *where)
-            return NEEDS_CONFIG
+            no_key = ("已经选好 %s / %s，但没有找到 API 密钥。" % (provider, model),) + where
+            if entry is None or not base_url:
+                say(*no_key)
+                return NEEDS_CONFIG
+            # A custom entry with an address is not refused by the engine
+            # for having no key: it sends provider_probe.NO_KEY, which a
+            # keyless local server (LM Studio, Ollama, a box on the LAN)
+            # accepts and a cloud provider rejects. Ask with exactly that,
+            # and block only on the rejection. A static "no key, refuse" was
+            # a lockout for every keyless server. With the probe switched
+            # off there is no way to tell, so nothing is refused.
+            probe_code = probe_without_a_key(
+                data_dir, provider, model, base_url_for(provider, config, env), no_key)
+            if probe_code != 0:
+                return probe_code
+            probed = True
 
     # Everything above is static. This is the only check that finds out
     # whether the thing will actually answer.
-    key_value = (env.get(found) or os.environ.get(found) or "") if found else ""
-    probe_code = run_launch_probe(
-        data_dir, provider, model,
-        base_url_for(provider, config, env),
-        inline_key or key_value)
-    if probe_code != 0:
-        return probe_code
+    if not probed:
+        key_value = provider_probe.env_value(env, found) if found else ""
+        probe_code = run_launch_probe(
+            data_dir, provider, model,
+            base_url_for(provider, config, env),
+            inline_key or key_value)
+        if probe_code != 0:
+            return probe_code
 
     # Not fatal: the launcher generates this before the gateway starts.
     #

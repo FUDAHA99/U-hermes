@@ -596,8 +596,132 @@ def test_there_is_only_one_copy_of_this_lookup():
           % ", ".join(owners))
 
 
+# Lines people actually put in data/.env. What matters is agreeing with
+# python-dotenv, the engine's reader; the expected values below were taken
+# from it, and when it is importable the test asks it directly.
+ENV_LINES = [
+    ("OPENAI_API_KEY=sk-plain", "OPENAI_API_KEY", "sk-plain"),
+    ("OPENAI_BASE_URL=https://a.example/v1  # longcat", "OPENAI_BASE_URL", "https://a.example/v1"),
+    ("export OPENAI_BASE_URL=https://a.example/v1", "OPENAI_BASE_URL", "https://a.example/v1"),
+    ("KEY_SPACED = sk-spaced", "KEY_SPACED", "sk-spaced"),
+    ('KEY_DQ="sk-dq # not a comment"', "KEY_DQ", "sk-dq # not a comment"),
+    ("KEY_SQ='sk-sq # not a comment'", "KEY_SQ", "sk-sq # not a comment"),
+    ('KEY_DQ_TAIL="sk-dq"  # note', "KEY_DQ_TAIL", "sk-dq"),
+    ("KEY_HASH_NO_SPACE=sk#part", "KEY_HASH_NO_SPACE", "sk#part"),
+    ("KEY_EMPTY=", "KEY_EMPTY", ""),
+    ('KEY_ESC="a\\nb"', "KEY_ESC", "a\nb"),
+    # A comment straight after the closing quote, no space: dotenv keeps the value.
+    ('KEY_DQ_HASH="sk-dq"#LongCat key', "KEY_DQ_HASH", "sk-dq"),
+    ("KEY_SQ_HASH='sk-sq'#old one", "KEY_SQ_HASH", "sk-sq"),
+    # python-dotenv drops these lines entirely ("could not parse statement").
+    ('KEY_QUOTED_THEN_TEXT="sk-lc" my longcat key', "KEY_QUOTED_THEN_TEXT", None),
+    ('KEY_UNTERMINATED="sk-lc', "KEY_UNTERMINATED", None),
+]
+
+
+def test_env_files_are_read_the_way_the_engine_reads_them():
+    import io
+    NL = chr(10)
+    text = NL.join(line for line, _k, _v in ENV_LINES) + NL + "# a comment" + NL + "NOT_A_PAIR" + NL
+    ours = pp.parse_env(text)
+    for line, key, want in ENV_LINES:
+        check(ours.get(key) == want, "%-45s -> %r" % (line[:45], ours.get(key)))
+    check("NOT_A_PAIR" not in ours, "a line with no '=' sets nothing")
+    try:
+        import dotenv
+    except ImportError:
+        print("  skip  python-dotenv not importable here; the table above is its output")
+        return
+    theirs = {k: v for k, v in dotenv.dotenv_values(stream=io.StringIO(text)).items() if v is not None}
+    for _line, key, _want in ENV_LINES:
+        check(ours.get(key) == theirs.get(key),
+              "agrees with python-dotenv %s on %s (%r)" % (dotenv.__name__, key, theirs.get(key)))
+
+
+def test_an_empty_value_in_env_hides_the_process_one():
+    saved = os.environ.get("PP_TEST_SHADOW")
+    os.environ["PP_TEST_SHADOW"] = "from-process"
+    try:
+        check(pp.env_value({"PP_TEST_SHADOW": ""}, "PP_TEST_SHADOW") == "",
+              "data/.env setting it to nothing wins, as load_hermes_dotenv(override=True) does")
+        check(pp.env_value({}, "PP_TEST_SHADOW") == "from-process",
+              "a name the file does not mention falls back to the process environment")
+    finally:
+        if saved is None:
+            os.environ.pop("PP_TEST_SHADOW", None)
+        else:
+            os.environ["PP_TEST_SHADOW"] = saved
+
+
+def test_a_malformed_address_is_a_result_not_an_exception():
+    for url in ("api.longcat.example/v1", "http://[::1/v1", "${LC_URL}", ""):
+        try:
+            r = pp.probe(url, "k", "m", timeout=2)
+            check(not r.ok and r.kind in pp.FIXABLE_IN_CONFIG + (pp.NETWORK,),
+                  "%r -> %s: %s" % (url, r.kind, r.message))
+        except Exception as e:  # what crashed diagnose.py
+            check(False, "%r raised %r" % (url, e))
+
+
+def test_config_refs_are_expanded_the_way_the_engine_does():
+    saved = os.environ.get("PP_TEST_REF")
+    os.environ["PP_TEST_REF"] = "from-process"
+    try:
+        env = {"LC_KEY": "sk-lc"}
+        cfg = {"a": "${LC_KEY}", "b": "${env:LC_KEY}", "c": ["x-${LC_KEY}-y"],
+               "d": "${NOT_SET_ANYWHERE_42}", "e": "${vault:secret/x}", "f": "${PP_TEST_REF}", "g": 7}
+        got = pp.expand_env_refs(cfg, env)
+        check(got["a"] == "sk-lc" and got["b"] == "sk-lc", "${VAR} and ${env:VAR} expand from data/.env")
+        check(got["c"] == ["x-sk-lc-y"], "...inside lists and longer strings")
+        check(got["d"] == "${NOT_SET_ANYWHERE_42}", "an unresolved ref stays verbatim, as in the engine")
+        check(got["e"] == "${vault:secret/x}", "a non-env SecretRef is left alone")
+        check(got["f"] == "from-process", "the process environment counts when .env does not name it")
+        check(got["g"] == 7, "non-strings are untouched")
+    finally:
+        if saved is None:
+            os.environ.pop("PP_TEST_REF", None)
+        else:
+            os.environ["PP_TEST_REF"] = saved
+
+
+def test_env_names_ignore_case_on_windows():
+    if os.name != "nt":
+        print("  skip  Windows only")
+        return
+    check(pp.env_value({"longcat_api_key": "sk-lower"}, "LONGCAT_API_KEY") == "sk-lower",
+          "a lower-case name in data/.env is the same variable, as os.environ has it on Windows")
+    check(pp.env_value({"LONGCAT_API_KEY": "", "longcat_api_key": "sk-lower"}, "LONGCAT_API_KEY") == "sk-lower",
+          "of two lines differing only in case the later wins, as in os.environ -- even over an exact-case empty one")
+
+
+def test_a_key_is_sent_the_way_the_engine_sends_it():
+    # A zero-width space pasted in with the key, or a Chinese note after it:
+    # the engine strips non-ASCII from keys on load, and the SDK encodes the
+    # address. Raw, both raised UnicodeEncodeError, reported as a bad address.
+    url, key = pp._as_sent("http://127.0.0.1:1/v1/我的 模型", "sk-lc" + chr(0x200B) + "（旧）")
+    check(key == "sk-lc", "non-ASCII is dropped from the key (%r)" % key)
+    check(all(ord(c) < 128 for c in url) and "%20" in url, "the address is percent-encoded (%r)" % url)
+    r = pp.probe("http://127.0.0.1:9/v1", "sk-lc" + chr(0x200B), "m", timeout=2)
+    check(r.kind == pp.NETWORK, "so such a key reaches the network instead of failing locally (%s)" % r.kind)
+    # But only credential variables are stripped of whitespace on load; an
+    # inline key keeps the space in front of its note, and the engine's
+    # call with it fails -- so the probe must not quietly repair it.
+    _url, inline = pp._as_sent("http://x/v1", "sk-lc （旧）")
+    check(inline == "sk-lc ", "an inline key keeps its trailing space (%r)" % inline)
+    check(pp.env_value({"LONGCAT_API_KEY": "sk-lc （旧）"}, "LONGCAT_API_KEY") == "sk-lc",
+          "a *_API_KEY variable is cleaned then stripped, as the engine loads it")
+    check(pp.env_value({"LCKEY": "sk-lc" + chr(0x200B)}, "LCKEY") == "sk-lc" + chr(0x200B),
+          "a variable without a credential suffix is not cleaned on load")
+
+
 if __name__ == "__main__":
-    for fn in (test_a_working_provider,
+    for fn in (test_a_malformed_address_is_a_result_not_an_exception,
+               test_config_refs_are_expanded_the_way_the_engine_does,
+               test_env_names_ignore_case_on_windows,
+               test_a_key_is_sent_the_way_the_engine_sends_it,
+               test_env_files_are_read_the_way_the_engine_reads_them,
+               test_an_empty_value_in_env_hides_the_process_one,
+               test_a_working_provider,
                test_an_anthropic_surface_is_probed_differently,
                test_every_status_gets_its_own_answer,
                test_400_used_to_be_a_shrug,

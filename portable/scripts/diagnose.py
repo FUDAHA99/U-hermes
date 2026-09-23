@@ -135,18 +135,9 @@ def section(title):
 
 
 def load_env():
-    env = {}
-    if os.path.exists(ENV_FILE):
-        try:
-            with open(ENV_FILE, encoding="utf-8-sig", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, _, v = line.partition("=")
-                        env[k.strip()] = v.strip()
-        except OSError:
-            pass
-    return env
+    # Read as python-dotenv reads it -- the engine's reader -- so quotes,
+    # `export ` and trailing `# notes` mean here what they mean at runtime.
+    return provider_probe.read_env(ENV_FILE)
 
 
 def load_config():
@@ -280,6 +271,8 @@ def main():
     section("API 连通性")
     env = load_env()
     if cfg:
+        # ${VAR} in config.yaml, as the engine expands it on load.
+        cfg = provider_probe.expand_env_refs(cfg, env)
         model_cfg = cfg.get("model") or {}
         provider = model_cfg.get("provider") or ""
         model_name = model_cfg.get("default") or model_cfg.get("model") or ""
@@ -291,6 +284,24 @@ def main():
                 print("  %s 主模型 %s: %s" % (OK if ok else BAD, name, msg))
                 if not ok:
                     problems.append("主模型连接异常：%s" % msg)
+            elif base_url:
+                # No key for this entry, so the engine sends its placeholder.
+                # A keyless local server takes it; ask the way the engine will
+                # rather than calling a working setup incomplete. The same
+                # reading as preflight.probe_without_a_key.
+                result = provider_probe.probe(base_url, provider_probe.NO_KEY, model_name)
+                if result.ok:
+                    print("  %s 主模型 %s: %s（这个服务不需要密钥）" % (OK, name, result.message))
+                elif result.kind == provider_probe.NETWORK:
+                    # The server is off or unreachable: that, not a key, is
+                    # what the user needs to hear first.
+                    print("  %s 主模型 %s: %s（这个条目没有配置密钥）" % (BAD, name, result.message))
+                    problems.append("主模型连接异常：%s" % result.message)
+                else:
+                    print("  %s 主模型 %s 没有配置密钥，不带密钥试了一次没有得到正常回复：%s"
+                          % (BAD, name, result.message))
+                    problems.append("主模型没有配置 API 密钥；如果这个服务确实不需要密钥，"
+                                    "请检查模型名称和接口地址。")
             else:
                 print("  %s 主模型 %s 缺少地址或密钥" % (BAD, name))
                 problems.append("主模型配置不完整，请重新配置。")

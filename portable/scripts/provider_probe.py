@@ -164,11 +164,37 @@ def _with_detail(base, detail):
     return base + ("　服务商原话：" + detail if detail else "")
 
 
+def _as_sent(base_url, api_key):
+    """(address, key) as the engine's HTTP client would put them on the wire.
+
+    The engine strips non-ASCII from *_API_KEY values when it loads them
+    (_sanitize_loaded_credentials): a zero-width space pasted in from a web
+    page, or a note like "（旧）", is gone before any request. The SDK
+    percent-encodes a space or a Chinese character in the address. Sent raw,
+    both made http.client raise UnicodeEncodeError, and a key the engine
+    uses fine was reported as broken.
+    """
+    # No .strip() here: the engine strips only keys it loads from
+    # credential variables (env_value does that part). An inline key with a
+    # space before a note keeps that space, and the engine's call fails.
+    key = "".join(ch for ch in (api_key or "") if ord(ch) < 128)
+    url = urllib.parse.quote(base_url or "", safe=":/?#[]@!$&'()*+,;=%~")
+    return url, key
+
+
 def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
     """Make the call. Never raises; every outcome is a Result."""
-    req_url, payload, headers, ok_field = build_request(base_url, api_key, model)
-    req = urllib.request.Request(
-        req_url, data=payload, headers=headers, method="POST")
+    shown_url = base_url
+    base_url, api_key = _as_sent(base_url, api_key)
+    try:
+        req_url, payload, headers, ok_field = build_request(base_url, api_key, model)
+        # Building the request is where a malformed address fails (no scheme,
+        # a broken IPv6 literal) -- with ValueError, which escaped "never
+        # raises" and crashed diagnose.py outright.
+        req = urllib.request.Request(
+            req_url, data=payload, headers=headers, method="POST")
+    except ValueError:
+        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (shown_url or "（空）"))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -240,6 +266,13 @@ def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
         return Result(False, NETWORK,
                       "网络中断（%s），请检查网络、代理或防火墙后重试。"
                       % e.__class__.__name__)
+    except UnicodeError as e:
+        # Whatever _as_sent could not make ASCII. Not the address's fault as
+        # far as anyone can tell, so it is not something to block a launch on.
+        return Result(False, UNKNOWN, "测试失败：%s" % e.__class__.__name__)
+    except ValueError:
+        # http.client.InvalidURL and friends, raised while connecting.
+        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (shown_url or "（空）"))
     except Exception as e:
         return Result(False, UNKNOWN, "测试失败：%s" % e.__class__.__name__)
 
@@ -418,8 +451,158 @@ def host_derived_key_var(base_url):
     return vendor + "_API_KEY"
 
 
-def _env_value(env, name):
-    return ((env or {}).get(name) or os.environ.get(name) or "").strip()
+# What the engine sends when a custom entry yields no key at all
+# (_resolve_named_custom_runtime). A keyless server -- LM Studio, Ollama, a
+# box on the LAN -- takes it; a cloud provider answers 401. So "no key" is
+# not a reason to refuse a launch: ask with exactly this and see.
+NO_KEY = "no-key-required"
+
+# hermes_cli/env_loader.py _CREDENTIAL_SUFFIXES (same on 0.21.3 and 0.21.4).
+CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
+
+
+def env_value(env, name):
+    """name's value as the engine will see it: data/.env wins, even when it
+    sets the variable to nothing -- load_hermes_dotenv loads it with
+    override=True -- and only a name the file does not mention falls back
+    to the process environment."""
+    env = env or {}
+    value, seen = None, False
+    if os.name == "nt":
+        # Windows environment names ignore case: once dotenv has put
+        # `longcat_api_key=` into os.environ, the engine reads it as
+        # LONGCAT_API_KEY, and of two lines differing only in case the later
+        # one wins. parse_env keeps file order, so the last match is it.
+        folded = name.upper()
+        for k, v in env.items():
+            if k.upper() == folded:
+                value, seen = v, True
+    elif name in env:
+        value, seen = env[name], True
+    if not seen:
+        value = os.environ.get(name)
+    value = value or ""
+    if name.endswith(CREDENTIAL_SUFFIXES):
+        # _sanitize_loaded_credentials: non-ASCII out of credential
+        # variables on load, before anything strips them.
+        value = "".join(ch for ch in value if ord(ch) < 128)
+    return value.strip()
+
+
+_env_value = env_value
+
+
+# --- ${VAR} in config.yaml ---------------------------------------------------
+# The engine expands ${VAR} and ${env:VAR} in every config string when it
+# loads config.yaml (hermes_cli/config.py _expand_env_vars). Unresolved refs
+# and other SecretRef sources (${vault:...}) stay verbatim. Without this, an
+# entry with api_key: "${LONGCAT_API_KEY}" was probed with that literal text,
+# and a base_url of "${LC_URL}" was no address at all.
+
+_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def expand_env_refs(obj, env=None):
+    """obj with ${VAR} / ${env:VAR} in its strings expanded as the engine does."""
+    if isinstance(obj, str):
+        if "${" not in obj:
+            return obj
+
+        def one(m):
+            inner = m.group(1).strip()
+            if inner.startswith("env:"):
+                name = inner[len("env:"):].strip()
+            elif re.match(r"^[a-z][a-z0-9_-]*:", inner):
+                return m.group(0)  # ${vault:...} and the like: not an env ref
+            else:
+                name = inner
+            if not name:
+                return m.group(0)
+            env_map = env or {}
+            present = name in env_map or name in os.environ or (
+                os.name == "nt" and any(k.upper() == name.upper() for k in env_map))
+            return env_value(env_map, name) if present else m.group(0)
+
+        return _ENV_REF_RE.sub(one, obj)
+    if isinstance(obj, dict):
+        return {k: expand_env_refs(v, env) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [expand_env_refs(v, env) for v in obj]
+    return obj
+
+
+# --- data/.env, read the way python-dotenv reads it ------------------------
+# The engine loads data/.env with python-dotenv. A simpler reader disagreed
+# with it on lines people really write -- `KEY=value  # note`, `export KEY=`
+# -- and preflight then blocked a launch the engine would have run fine.
+
+_DQ_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'",
+               "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
+def _quoted(value, quote):
+    """(content, rest after the closing quote), or (None, None) if it never closes."""
+    out, i = [], 1
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            if quote == '"' and nxt in _DQ_ESCAPES:
+                out.append(_DQ_ESCAPES[nxt])
+                i += 2
+                continue
+            if quote == "'" and nxt in ("\\", "'"):
+                out.append(nxt)
+                i += 2
+                continue
+        if ch == quote:
+            return "".join(out), value[i + 1:]
+        out.append(ch)
+        i += 1
+    return None, None
+
+
+def parse_env(text):
+    """{name: value} for the common shapes of a .env line, as python-dotenv
+    parses them: `export ` prefixes, spaces around `=`, single and double
+    quotes, and ` # comments` after an unquoted value. A line without `=`
+    is skipped (dotenv gives it no value either)."""
+    values = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export ") or line.startswith("export\t"):
+            line = line[len("export"):].lstrip()
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        if value[:1] in ("'", '"'):
+            content, rest = _quoted(value, value[0])
+            # python-dotenv drops the whole line -- "could not parse
+            # statement" -- when the quote never closes or anything but a
+            # comment follows it, so the engine never sees the variable.
+            if content is None or (rest.strip() and not re.match(r"\s*#", rest)):
+                continue
+            value = content
+        else:
+            value = re.sub(r"\s+#.*", "", value).rstrip()
+        values[name] = value
+    return values
+
+
+def read_env(path):
+    """parse_env of a file, {} if it is not there. utf-8-sig: a BOM must
+    never become part of the first variable's name."""
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            return parse_env(f.read())
+    except OSError:
+        return {}
 
 
 def custom_key_fallback_vars(base_url, env=None, engine_version=None):
