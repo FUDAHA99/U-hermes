@@ -647,8 +647,52 @@ def test_an_empty_value_in_env_hides_the_process_one():
             os.environ["PP_TEST_SHADOW"] = saved
 
 
+def test_a_malformed_address_is_a_result_not_an_exception():
+    for url in ("api.longcat.example/v1", "http://[::1/v1", "${LC_URL}", ""):
+        try:
+            r = pp.probe(url, "k", "m", timeout=2)
+            check(not r.ok and r.kind in pp.FIXABLE_IN_CONFIG + (pp.NETWORK,),
+                  "%r -> %s: %s" % (url, r.kind, r.message))
+        except Exception as e:  # what crashed diagnose.py
+            check(False, "%r raised %r" % (url, e))
+
+
+def test_config_refs_are_expanded_the_way_the_engine_does():
+    saved = os.environ.get("PP_TEST_REF")
+    os.environ["PP_TEST_REF"] = "from-process"
+    try:
+        env = {"LC_KEY": "sk-lc"}
+        cfg = {"a": "${LC_KEY}", "b": "${env:LC_KEY}", "c": ["x-${LC_KEY}-y"],
+               "d": "${NOT_SET_ANYWHERE_42}", "e": "${vault:secret/x}", "f": "${PP_TEST_REF}", "g": 7}
+        got = pp.expand_env_refs(cfg, env)
+        check(got["a"] == "sk-lc" and got["b"] == "sk-lc", "${VAR} and ${env:VAR} expand from data/.env")
+        check(got["c"] == ["x-sk-lc-y"], "...inside lists and longer strings")
+        check(got["d"] == "${NOT_SET_ANYWHERE_42}", "an unresolved ref stays verbatim, as in the engine")
+        check(got["e"] == "${vault:secret/x}", "a non-env SecretRef is left alone")
+        check(got["f"] == "from-process", "the process environment counts when .env does not name it")
+        check(got["g"] == 7, "non-strings are untouched")
+    finally:
+        if saved is None:
+            os.environ.pop("PP_TEST_REF", None)
+        else:
+            os.environ["PP_TEST_REF"] = saved
+
+
+def test_env_names_ignore_case_on_windows():
+    if os.name != "nt":
+        print("  skip  Windows only")
+        return
+    check(pp.env_value({"longcat_api_key": "sk-lower"}, "LONGCAT_API_KEY") == "sk-lower",
+          "a lower-case name in data/.env is the same variable, as os.environ has it on Windows")
+    check(pp.env_value({"LONGCAT_API_KEY": "sk-exact", "longcat_api_key": "sk-lower"}, "LONGCAT_API_KEY") == "sk-exact",
+          "an exact match still wins")
+
+
 if __name__ == "__main__":
-    for fn in (test_env_files_are_read_the_way_the_engine_reads_them,
+    for fn in (test_a_malformed_address_is_a_result_not_an_exception,
+               test_config_refs_are_expanded_the_way_the_engine_does,
+               test_env_names_ignore_case_on_windows,
+               test_env_files_are_read_the_way_the_engine_reads_them,
                test_an_empty_value_in_env_hides_the_process_one,
                test_a_working_provider,
                test_an_anthropic_surface_is_probed_differently,

@@ -763,8 +763,106 @@ def test_a_custom_entry_is_sent_only_the_keys_the_engine_sends():
         srv.shutdown()
 
 
+def test_what_a_keyless_request_is_answered_with_decides():
+    """A LongCat entry with no key: preflight asks with the engine's
+    placeholder. Only a real reply means "this service needs no key". A
+    second review found the first cut of this read every answer but 401
+    through the ordinary table -- telling a user with no key at all that
+    their model name was wrong (404/400) or that their key was fine and
+    their balance empty (402), and letting 429/5xx through silently.
+    """
+    longcat = "http://api.longcat.example/v1"
+    config = ('model:' + NL + '  provider: "custom:longcat"' + NL +
+              '  default: "LongCat-2.0"' + NL + 'custom_providers:' + NL +
+              '  - name: "LongCat"' + NL +
+              '    base_url: "' + longcat + '"' + NL)
+
+    def attempt(status, body, extra_env=None, cfg=None, env_file="OPENAI_API_KEY=sk-left-over" + NL):
+        srv, _ = fake_provider(status, body)
+        via_proxy = {"HTTP_PROXY": "http://127.0.0.1:%d" % srv.server_address[1],
+                     "http_proxy": None, "NO_PROXY": None, "no_proxy": None}
+        try:
+            return run(config=cfg or config, env_file=env_file, probe=True,
+                       extra_env=dict(via_proxy, **(extra_env or {})))
+        finally:
+            srv.shutdown()
+
+    for status, body, label in ((404, {"error": {"message": "model not found"}}, "404"),
+                                (400, [{"error": {"code": 400, "message": "API key not valid"}}], "400"),
+                                (402, {"error": {"message": "insufficient balance"}}, "402"),
+                                (200, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}},
+                                 "a 200 that is not a reply")):
+        code, out = attempt(status, body)
+        check(code == NEEDS_CONFIG, "%s to the placeholder blocks the launch" % label)
+        check("没有找到 API 密钥" in out and "LONGCAT_API_KEY" in out,
+              "...saying no key was found and where it goes")
+        check("密钥本身是好的" not in out, "...and never that the key is fine")
+        check("不带密钥试了一次" in out, "...and what the provider said to a keyless request")
+
+    for status, label in ((500, "a 5xx"), (429, "a 429")):
+        code, out = attempt(status, {"error": {"message": "busy"}})
+        check(code == 0, "%s is not about the config: the launch goes ahead" % label)
+        check("没有找到 API 密钥" in out, "...but the missing key is still pointed out")
+
+    # A keyless local server that is switched off: that is the problem, and
+    # nothing a config page fixes.
+    code, out = run(config=local_config("http://127.0.0.1:9/v1").replace('    key_env: "MY_KEY"' + NL, ""),
+                    probe=True)
+    check(code == 0, "a keyless server that is off does not block the launch")
+
+    # ${VAR} in config.yaml is expanded by the engine on load.
+    srv, url = fake_provider(200, GOOD_REPLY, accept={"sk-longcat"})
+    try:
+        templated = ('model:' + NL + '  provider: "custom:t"' + NL + '  default: "m"' + NL +
+                     'custom_providers:' + NL + '  - name: "t"' + NL +
+                     '    base_url: "${LC_URL}"' + NL + '    api_key: "${env:LC_KEY}"' + NL)
+        code, out = run(config=templated, env_file="LC_URL=" + url + NL + "LC_KEY=sk-longcat" + NL, probe=True)
+        check(code == 0 and "sk-longcat" in _Fake.last_auth,
+              "base_url ${LC_URL} and api_key ${env:LC_KEY} are expanded from data/.env, as the engine does")
+    finally:
+        srv.shutdown()
+
+    # A malformed address is a config problem, not a crash into the catch-all.
+    bad = config.replace(longcat, "api.longcat.example/v1")
+    code, out = run(config=bad, probe=True)
+    check(code == NEEDS_CONFIG and "地址格式不对" in out, "an address with no scheme is named, not a crash")
+
+    # A pass remembered for one address does not cover another.
+    srv, url = fake_provider(200, GOOD_REPLY)
+    try:
+        keyless = local_config(url).replace('    key_env: "MY_KEY"' + NL, "")
+        shutil.rmtree(SANDBOX, ignore_errors=True)
+        code, _ = run(config=keyless, probe=True)
+        check(code == 0, "a keyless server passes")
+    finally:
+        srv.shutdown()
+
+    code, out = run(config=config, env_file="OPENAI_API_KEY=sk-left-over" + NL,
+                    extra_env={"U_HERMES_SKIP_PROBE": "1"})
+    check(code == 0 and "[i]" in out and "没有找到 API 密钥" in out,
+          "with the probe off the launch goes ahead, but the missing key is pointed out")
+
+    if os.name == "nt":
+        code, out = attempt(200, GOOD_REPLY, env_file="longcat_api_key=sk-lower" + NL)
+        check(code == 0 and "sk-lower" in _Fake.last_auth,
+              "a lower-case name in data/.env counts: Windows environment names ignore case")
+
+
+def test_a_remembered_pass_is_tied_to_the_address():
+    spec = importlib.util.spec_from_file_location("pf", PREFLIGHT)
+    pf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pf)
+
+    def fp(url):
+        return pf._probe_fingerprint("custom:local", "m", "no-key-required", url)
+    check(fp("http://127.0.0.1:1234/v1") != fp("https://api.longcat.example/v1"),
+          "pointing the same entry at another address asks again")
+
+
 if __name__ == "__main__":
-    for fn in (test_unreadable_configs_are_named_precisely,
+    for fn in (test_what_a_keyless_request_is_answered_with_decides,
+               test_a_remembered_pass_is_tied_to_the_address,
+               test_unreadable_configs_are_named_precisely,
                test_a_python_without_pyyaml_does_not_accuse_the_config,
                test_a_bom_in_env_is_repaired_not_just_reported,
                test_key_presence,

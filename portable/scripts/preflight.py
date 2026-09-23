@@ -199,14 +199,17 @@ def base_url_for(provider, config, env):
     # An override in .env wins, exactly as it will at runtime.
     var = getattr(pconfig, "base_url_env_var", "") or ""
     if var:
-        override = (env.get(var) or os.environ.get(var) or "").strip()
+        # An empty VAR= in data/.env hides the process value, as at runtime.
+        override = provider_probe.env_value(env, var)
         if override:
             return override
     return str(getattr(pconfig, "inference_base_url", "") or "")
 
 
-def _probe_fingerprint(provider, model, key):
-    raw = "|".join([provider, model, key]).encode("utf-8")
+def _probe_fingerprint(provider, model, key, base_url=""):
+    # The address is part of it: a pass remembered for an entry at a keyless
+    # local server must not carry over when that entry is pointed elsewhere.
+    raw = "|".join([provider, model, key, base_url or ""]).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -236,7 +239,7 @@ def remember_probe_passed(data_dir, fingerprint):
         pass  # a read-only stick is not a reason to fail a launch
 
 
-def run_launch_probe(data_dir, provider, model, base_url, key, auth_lines=None):
+def run_launch_probe(data_dir, provider, model, base_url, key):
     """Ask the provider one question before the user does.
 
     Everything above this point is static: the file parses, a provider is
@@ -254,7 +257,7 @@ def run_launch_probe(data_dir, provider, model, base_url, key, auth_lines=None):
     if not base_url or not key:
         return 0  # nothing to ask, or nowhere to ask it
 
-    fingerprint = _probe_fingerprint(provider, model, key)
+    fingerprint = _probe_fingerprint(provider, model, key, base_url)
     if probe_already_passed(data_dir, fingerprint):
         return 0
 
@@ -263,9 +266,6 @@ def run_launch_probe(data_dir, provider, model, base_url, key, auth_lines=None):
         remember_probe_passed(data_dir, fingerprint)
         return 0
 
-    if result.kind == provider_probe.AUTH and auth_lines:
-        say(*auth_lines)
-        return NEEDS_CONFIG
     if result.kind in provider_probe.FIXABLE_IN_CONFIG:
         say("模型服务商拒绝了这次调用，现在聊天也不会有回复：",
             "  " + result.message,
@@ -277,6 +277,58 @@ def run_launch_probe(data_dir, provider, model, base_url, key, auth_lines=None):
         "    程序照常启动 —— 这类问题通常和配置无关。"
         "如果聊天确实没有回复，双击「出问题点我-诊断.bat」。")
     return 0
+
+
+# Outcomes that say nothing about the configuration: the launch goes ahead.
+TRANSIENT = (provider_probe.NETWORK, provider_probe.RATE, provider_probe.SERVER)
+
+
+def _provider_words(result):
+    """The provider's own explanation inside a probe message, or ""."""
+    marker = "服务商原话："
+    return result.message.split(marker, 1)[1].strip() if marker in result.message else ""
+
+
+def probe_without_a_key(data_dir, provider, model, base_url, no_key_lines):
+    """A custom entry with an address and no key: ask the way the engine will.
+
+    The engine does not refuse to run such an entry; it sends
+    provider_probe.NO_KEY. A keyless server -- LM Studio, Ollama, a box on
+    the LAN -- answers that; a cloud provider does not. So:
+
+      a real reply          launch: this service needs no key
+      network / 429 / 5xx   launch, as for any provider -- but say the key
+                            is missing, since that may be the real problem
+      anything else         block, saying no key was found AND what the
+                            provider answered: a 404 or 400 to a keyless
+                            request is at least as likely "no key" as
+                            "wrong model name", and a 402 is certainly not
+                            "your key is fine, top up"
+    """
+    if os.environ.get("U_HERMES_SKIP_PROBE"):
+        say("[i] " + no_key_lines[0], *no_key_lines[1:])
+        return 0
+    fingerprint = _probe_fingerprint(provider, model, provider_probe.NO_KEY, base_url)
+    if probe_already_passed(data_dir, fingerprint):
+        return 0
+    result = provider_probe.probe(base_url, provider_probe.NO_KEY, model, timeout=PROBE_TIMEOUT)
+    if result.ok:
+        remember_probe_passed(data_dir, fingerprint)
+        return 0
+    if result.kind in TRANSIENT:
+        say("[!] 试着调用了一次模型，没有成功：",
+            "  " + result.message,
+            "    程序照常启动。另外注意：" + no_key_lines[0],
+            *no_key_lines[1:])
+        return 0
+    answer = "不带密钥试了一次，没有得到正常回复"
+    answer += "（HTTP %d）" % result.http_code if result.http_code else ""
+    words = _provider_words(result)
+    answer += "。服务商原话：" + words if words else "：" + result.message
+    say(*no_key_lines)
+    say(answer,
+        "如果这个服务确实不需要密钥，请检查模型名称和接口地址。配置页马上打开。")
+    return NEEDS_CONFIG
 
 
 def say(*lines):
@@ -394,6 +446,12 @@ def main(argv):
     if repair_env_bom(env_path):
         say("[i] data\\.env 开头有一个 BOM 字符，引擎会因此读不到第一个变量。已经去掉了。")
     env = read_env_file(env_path)
+    # ${VAR} / ${env:VAR} in config.yaml, expanded against .env as the engine
+    # does on load -- before anything below reads a key or an address.
+    config = provider_probe.expand_env_refs(config, env)
+    if entry is not None:
+        entry = provider_probe.find_custom_provider(config, provider)
+        inline_key = provider_probe.custom_provider_inline_key(entry)
 
     no_key_hint = ()
     if entry is not None:
@@ -456,9 +514,8 @@ def main(argv):
             # and block only on the rejection. A static "no key, refuse" was
             # a lockout for every keyless server. With the probe switched
             # off there is no way to tell, so nothing is refused.
-            probe_code = run_launch_probe(
-                data_dir, provider, model, base_url_for(provider, config, env),
-                provider_probe.NO_KEY, auth_lines=no_key)
+            probe_code = probe_without_a_key(
+                data_dir, provider, model, base_url_for(provider, config, env), no_key)
             if probe_code != 0:
                 return probe_code
             probed = True

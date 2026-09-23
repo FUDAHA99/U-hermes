@@ -166,9 +166,15 @@ def _with_detail(base, detail):
 
 def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
     """Make the call. Never raises; every outcome is a Result."""
-    req_url, payload, headers, ok_field = build_request(base_url, api_key, model)
-    req = urllib.request.Request(
-        req_url, data=payload, headers=headers, method="POST")
+    try:
+        req_url, payload, headers, ok_field = build_request(base_url, api_key, model)
+        # Building the request is where a malformed address fails (no scheme,
+        # a broken IPv6 literal) -- with ValueError, which escaped "never
+        # raises" and crashed diagnose.py outright.
+        req = urllib.request.Request(
+            req_url, data=payload, headers=headers, method="POST")
+    except ValueError:
+        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (base_url or "（空）"))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -240,6 +246,9 @@ def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
         return Result(False, NETWORK,
                       "网络中断（%s），请检查网络、代理或防火墙后重试。"
                       % e.__class__.__name__)
+    except ValueError:
+        # http.client.InvalidURL and friends, raised while connecting.
+        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (base_url or "（空）"))
     except Exception as e:
         return Result(False, UNKNOWN, "测试失败：%s" % e.__class__.__name__)
 
@@ -431,11 +440,63 @@ def env_value(env, name):
     override=True -- and only a name the file does not mention falls back
     to the process environment."""
     env = env or {}
-    value = env[name] if name in env else os.environ.get(name)
+    if name in env:
+        value = env[name]
+    else:
+        value, seen = None, False
+        if os.name == "nt":
+            # Windows environment names ignore case, so once dotenv has put
+            # `longcat_api_key=` into os.environ the engine reads it as
+            # LONGCAT_API_KEY. The last matching line wins, as it does there.
+            folded = name.upper()
+            for k, v in env.items():
+                if k.upper() == folded:
+                    value, seen = v, True
+        if not seen:
+            value = os.environ.get(name)
     return (value or "").strip()
 
 
 _env_value = env_value
+
+
+# --- ${VAR} in config.yaml ---------------------------------------------------
+# The engine expands ${VAR} and ${env:VAR} in every config string when it
+# loads config.yaml (hermes_cli/config.py _expand_env_vars). Unresolved refs
+# and other SecretRef sources (${vault:...}) stay verbatim. Without this, an
+# entry with api_key: "${LONGCAT_API_KEY}" was probed with that literal text,
+# and a base_url of "${LC_URL}" was no address at all.
+
+_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def expand_env_refs(obj, env=None):
+    """obj with ${VAR} / ${env:VAR} in its strings expanded as the engine does."""
+    if isinstance(obj, str):
+        if "${" not in obj:
+            return obj
+
+        def one(m):
+            inner = m.group(1).strip()
+            if inner.startswith("env:"):
+                name = inner[len("env:"):].strip()
+            elif re.match(r"^[a-z][a-z0-9_-]*:", inner):
+                return m.group(0)  # ${vault:...} and the like: not an env ref
+            else:
+                name = inner
+            if not name:
+                return m.group(0)
+            env_map = env or {}
+            present = name in env_map or name in os.environ or (
+                os.name == "nt" and any(k.upper() == name.upper() for k in env_map))
+            return env_value(env_map, name) if present else m.group(0)
+
+        return _ENV_REF_RE.sub(one, obj)
+    if isinstance(obj, dict):
+        return {k: expand_env_refs(v, env) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [expand_env_refs(v, env) for v in obj]
+    return obj
 
 
 # --- data/.env, read the way python-dotenv reads it ------------------------
