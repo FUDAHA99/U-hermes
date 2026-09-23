@@ -802,13 +802,16 @@ def test_what_a_keyless_request_is_answered_with_decides():
     for status, label in ((500, "a 5xx"), (429, "a 429")):
         code, out = attempt(status, {"error": {"message": "busy"}})
         check(code == 0, "%s is not about the config: the launch goes ahead" % label)
-        check("没有找到 API 密钥" in out, "...but the missing key is still pointed out")
+        check("没有配置 API 密钥" in out and "LONGCAT_API_KEY" in out,
+              "...but the missing key is still pointed out, and where it would go")
 
     # A keyless local server that is switched off: that is the problem, and
     # nothing a config page fixes.
     code, out = run(config=local_config("http://127.0.0.1:9/v1").replace('    key_env: "MY_KEY"' + NL, ""),
                     probe=True)
     check(code == 0, "a keyless server that is off does not block the launch")
+    check("如果这个服务需要密钥" in out and "没有找到 API 密钥" not in out,
+          "...and is not told outright that it lacks a key it does not need")
 
     # ${VAR} in config.yaml is expanded by the engine on load.
     srv, url = fake_provider(200, GOOD_REPLY, accept={"sk-longcat"})
@@ -839,8 +842,8 @@ def test_what_a_keyless_request_is_answered_with_decides():
 
     code, out = run(config=config, env_file="OPENAI_API_KEY=sk-left-over" + NL,
                     extra_env={"U_HERMES_SKIP_PROBE": "1"})
-    check(code == 0 and "[i]" in out and "没有找到 API 密钥" in out,
-          "with the probe off the launch goes ahead, but the missing key is pointed out")
+    check(code == 0 and "[i]" in out and "没有配置 API 密钥" in out and "如果" in out,
+          "with the probe off the launch goes ahead, and the missing key is mentioned as a possibility")
 
     if os.name == "nt":
         code, out = attempt(200, GOOD_REPLY, env_file="longcat_api_key=sk-lower" + NL)

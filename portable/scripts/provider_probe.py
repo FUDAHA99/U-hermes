@@ -164,8 +164,25 @@ def _with_detail(base, detail):
     return base + ("　服务商原话：" + detail if detail else "")
 
 
+def _as_sent(base_url, api_key):
+    """(address, key) as the engine's HTTP client would put them on the wire.
+
+    The engine strips non-ASCII from *_API_KEY values when it loads them
+    (_sanitize_loaded_credentials): a zero-width space pasted in from a web
+    page, or a note like "（旧）", is gone before any request. The SDK
+    percent-encodes a space or a Chinese character in the address. Sent raw,
+    both made http.client raise UnicodeEncodeError, and a key the engine
+    uses fine was reported as broken.
+    """
+    key = "".join(ch for ch in (api_key or "") if ord(ch) < 128).strip()
+    url = urllib.parse.quote(base_url or "", safe=":/?#[]@!$&'()*+,;=%~")
+    return url, key
+
+
 def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
     """Make the call. Never raises; every outcome is a Result."""
+    shown_url = base_url
+    base_url, api_key = _as_sent(base_url, api_key)
     try:
         req_url, payload, headers, ok_field = build_request(base_url, api_key, model)
         # Building the request is where a malformed address fails (no scheme,
@@ -174,7 +191,7 @@ def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
         req = urllib.request.Request(
             req_url, data=payload, headers=headers, method="POST")
     except ValueError:
-        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (base_url or "（空）"))
+        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (shown_url or "（空）"))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -246,9 +263,13 @@ def probe(base_url, api_key, model, timeout=DEFAULT_TIMEOUT):
         return Result(False, NETWORK,
                       "网络中断（%s），请检查网络、代理或防火墙后重试。"
                       % e.__class__.__name__)
+    except UnicodeError as e:
+        # Whatever _as_sent could not make ASCII. Not the address's fault as
+        # far as anyone can tell, so it is not something to block a launch on.
+        return Result(False, UNKNOWN, "测试失败：%s" % e.__class__.__name__)
     except ValueError:
         # http.client.InvalidURL and friends, raised while connecting.
-        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (base_url or "（空）"))
+        return Result(False, NOT_FOUND, "API 地址格式不对：%s" % (shown_url or "（空）"))
     except Exception as e:
         return Result(False, UNKNOWN, "测试失败：%s" % e.__class__.__name__)
 
@@ -440,20 +461,20 @@ def env_value(env, name):
     override=True -- and only a name the file does not mention falls back
     to the process environment."""
     env = env or {}
-    if name in env:
-        value = env[name]
-    else:
-        value, seen = None, False
-        if os.name == "nt":
-            # Windows environment names ignore case, so once dotenv has put
-            # `longcat_api_key=` into os.environ the engine reads it as
-            # LONGCAT_API_KEY. The last matching line wins, as it does there.
-            folded = name.upper()
-            for k, v in env.items():
-                if k.upper() == folded:
-                    value, seen = v, True
-        if not seen:
-            value = os.environ.get(name)
+    value, seen = None, False
+    if os.name == "nt":
+        # Windows environment names ignore case: once dotenv has put
+        # `longcat_api_key=` into os.environ, the engine reads it as
+        # LONGCAT_API_KEY, and of two lines differing only in case the later
+        # one wins. parse_env keeps file order, so the last match is it.
+        folded = name.upper()
+        for k, v in env.items():
+            if k.upper() == folded:
+                value, seen = v, True
+    elif name in env:
+        value, seen = env[name], True
+    if not seen:
+        value = os.environ.get(name)
     return (value or "").strip()
 
 
@@ -509,7 +530,7 @@ _DQ_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'",
 
 
 def _quoted(value, quote):
-    """(content, ok) of a value opening with `quote`."""
+    """(content, rest after the closing quote), or (None, None) if it never closes."""
     out, i = [], 1
     while i < len(value):
         ch = value[i]
@@ -524,10 +545,10 @@ def _quoted(value, quote):
                 i += 2
                 continue
         if ch == quote:
-            return "".join(out), True
+            return "".join(out), value[i + 1:]
         out.append(ch)
         i += 1
-    return value, False
+    return None, None
 
 
 def parse_env(text):
@@ -550,8 +571,13 @@ def parse_env(text):
         if not name:
             continue
         if value[:1] in ("'", '"'):
-            content, ok = _quoted(value, value[0])
-            value = content if ok else value
+            content, rest = _quoted(value, value[0])
+            # python-dotenv drops the whole line -- "could not parse
+            # statement" -- when the quote never closes or anything but a
+            # comment follows it, so the engine never sees the variable.
+            if content is None or (rest.strip() and not re.match(r"\s+#", rest)):
+                continue
+            value = content
         else:
             value = re.sub(r"\s+#.*", "", value).rstrip()
         values[name] = value

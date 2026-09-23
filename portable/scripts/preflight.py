@@ -305,8 +305,13 @@ def probe_without_a_key(data_dir, provider, model, base_url, no_key_lines):
                             "wrong model name", and a 402 is certainly not
                             "your key is fine, top up"
     """
+    # Said when the launch goes ahead without an answer either way. Only a
+    # conditional: for a keyless LM Studio that is merely switched off,
+    # "add an api_key" would be wrong advice.
+    maybe = ("[i] 这个条目没有配置 API 密钥。如果这个服务需要密钥：",) + tuple(
+        "    " + line for line in no_key_lines[1:])
     if os.environ.get("U_HERMES_SKIP_PROBE"):
-        say("[i] " + no_key_lines[0], *no_key_lines[1:])
+        say(*maybe)
         return 0
     fingerprint = _probe_fingerprint(provider, model, provider_probe.NO_KEY, base_url)
     if probe_already_passed(data_dir, fingerprint):
@@ -315,11 +320,14 @@ def probe_without_a_key(data_dir, provider, model, base_url, no_key_lines):
     if result.ok:
         remember_probe_passed(data_dir, fingerprint)
         return 0
-    if result.kind in TRANSIENT:
+    # No HTTP status at all (a truncated body, a bad status line) is a local
+    # protocol hiccup, as it is on the keyed path -- not the provider's answer.
+    local_error = result.kind == provider_probe.UNKNOWN and not result.http_code
+    if result.kind in TRANSIENT or local_error:
         say("[!] 试着调用了一次模型，没有成功：",
             "  " + result.message,
-            "    程序照常启动。另外注意：" + no_key_lines[0],
-            *no_key_lines[1:])
+            "    程序照常启动。")
+        say(*maybe)
         return 0
     answer = "不带密钥试了一次，没有得到正常回复"
     answer += "（HTTP %d）" % result.http_code if result.http_code else ""
@@ -449,6 +457,7 @@ def main(argv):
     # ${VAR} / ${env:VAR} in config.yaml, expanded against .env as the engine
     # does on load -- before anything below reads a key or an address.
     config = provider_probe.expand_env_refs(config, env)
+    model = provider_probe.expand_env_refs(model, env)
     if entry is not None:
         entry = provider_probe.find_custom_provider(config, provider)
         inline_key = provider_probe.custom_provider_inline_key(entry)

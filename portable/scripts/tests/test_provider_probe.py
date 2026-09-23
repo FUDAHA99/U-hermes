@@ -610,6 +610,9 @@ ENV_LINES = [
     ("KEY_HASH_NO_SPACE=sk#part", "KEY_HASH_NO_SPACE", "sk#part"),
     ("KEY_EMPTY=", "KEY_EMPTY", ""),
     ('KEY_ESC="a\\nb"', "KEY_ESC", "a\nb"),
+    # python-dotenv drops these lines entirely ("could not parse statement").
+    ('KEY_QUOTED_THEN_TEXT="sk-lc" my longcat key', "KEY_QUOTED_THEN_TEXT", None),
+    ('KEY_UNTERMINATED="sk-lc', "KEY_UNTERMINATED", None),
 ]
 
 
@@ -684,14 +687,26 @@ def test_env_names_ignore_case_on_windows():
         return
     check(pp.env_value({"longcat_api_key": "sk-lower"}, "LONGCAT_API_KEY") == "sk-lower",
           "a lower-case name in data/.env is the same variable, as os.environ has it on Windows")
-    check(pp.env_value({"LONGCAT_API_KEY": "sk-exact", "longcat_api_key": "sk-lower"}, "LONGCAT_API_KEY") == "sk-exact",
-          "an exact match still wins")
+    check(pp.env_value({"LONGCAT_API_KEY": "", "longcat_api_key": "sk-lower"}, "LONGCAT_API_KEY") == "sk-lower",
+          "of two lines differing only in case the later wins, as in os.environ -- even over an exact-case empty one")
+
+
+def test_a_key_is_sent_the_way_the_engine_sends_it():
+    # A zero-width space pasted in with the key, or a Chinese note after it:
+    # the engine strips non-ASCII from keys on load, and the SDK encodes the
+    # address. Raw, both raised UnicodeEncodeError, reported as a bad address.
+    url, key = pp._as_sent("http://127.0.0.1:1/v1/我的 模型", "sk-lc" + chr(0x200B) + "（旧）")
+    check(key == "sk-lc", "non-ASCII is dropped from the key (%r)" % key)
+    check(all(ord(c) < 128 for c in url) and "%20" in url, "the address is percent-encoded (%r)" % url)
+    r = pp.probe("http://127.0.0.1:9/v1", "sk-lc" + chr(0x200B), "m", timeout=2)
+    check(r.kind == pp.NETWORK, "so such a key reaches the network instead of failing locally (%s)" % r.kind)
 
 
 if __name__ == "__main__":
     for fn in (test_a_malformed_address_is_a_result_not_an_exception,
                test_config_refs_are_expanded_the_way_the_engine_does,
                test_env_names_ignore_case_on_windows,
+               test_a_key_is_sent_the_way_the_engine_sends_it,
                test_env_files_are_read_the_way_the_engine_reads_them,
                test_an_empty_value_in_env_hides_the_process_one,
                test_a_working_provider,
