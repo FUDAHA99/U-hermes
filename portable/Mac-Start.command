@@ -82,6 +82,9 @@ bash "$SCRIPT_DIR/scripts/fix-portable-paths.sh" "$VENV_DIR" "$RUNTIME_DIR" "$HE
 # ============================================================================
 
 export HERMES_HOME="$DATA_DIR"
+# One gateway per OS user since hermes-agent 0.21.4; keep that rendezvous on
+# the stick, not in ~/.local/state (see Windows-Start.bat for why).
+export HERMES_GATEWAY_LOCK_DIR="$DATA_DIR/gateway-locks"
 export HERMES_CONFIG="$DATA_DIR/config.yaml"
 export HERMES_MEMORY_DIR="$DATA_DIR/memory"
 export HERMES_SKILLS_DIR="$DATA_DIR/skills"
@@ -113,6 +116,8 @@ export HERMES_AGENT_ROOT="$HERMES_DIR/hermes-agent"
 # Let the Web UI stop the gateway during its own shutdown; otherwise
 # closing the terminal leaves it running and holding the port.
 export HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=1
+# Paired phone App: no reply text in push notifications (Windows-Start.bat).
+export STUDIO_PUSH_CONTENT_PREVIEW=0
 
 # Gateway API Server settings
 export API_SERVER_ENABLED=true

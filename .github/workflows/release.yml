@@ -253,6 +253,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "version check test failed"; exit 1 }
           & $py scripts/tests/test_upstream_tweaks.py
           if ($LASTEXITCODE -ne 0) { Write-Error "upstream tweaks test failed"; exit 1 }
+          & $py scripts/tests/test_launcher_env.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "launcher env test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
           # tools/ is not packaged, but this one guards the target of a sync,
@@ -405,6 +407,13 @@ jobs:
             查看 commit 记录了解详情。
 
   portable-mac:
+    # macOS fails on purpose at "Verify the packaged artifact" until it ships a
+    # relocatable Python (see README). That made every run red, so the
+    # 2026-09-21 canary -- which also failed on Windows, over real upstream
+    # drift -- looked like any other week and nobody opened it. Canary runs
+    # ignore this job's result so their colour means Windows; release and
+    # ordinary manual runs still report it.
+    continue-on-error: ${{ github.event_name == 'schedule' || inputs.canary == true }}
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: 'utf-8'
@@ -521,6 +530,7 @@ jobs:
           "$PY" scripts/tests/test_provider_probe.py
           "$PY" scripts/tests/test_version_check.py
           "$PY" scripts/tests/test_upstream_tweaks.py
+          "$PY" scripts/tests/test_launcher_env.py
 
           echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)

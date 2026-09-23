@@ -67,9 +67,17 @@ ERROR_CLASSES = [
     (r"(Stream stale for \d+s|no chunks received|Stream drop|peer closed connection|RemoteProtocolError|Streaming failed after partial delivery)",
      "AI 回复过程中连接被中途掐断，或长时间收不到内容。",
      "程序会自动重连重试；频繁发生时请换个网络环境或切换模型。"),
-    (r"(No inference provider configured|no provider available \(tried:|no_provider_configured)",
+    # hermes-agent 0.21.4 reworded this; older engines' logs still say the first.
+    (r"(No inference provider configured|Hermes is not connected to any AI provider yet"
+     r"|no provider available \(tried:|no_provider_configured)",
      "还没有配置任何 AI 模型和密钥，程序不知道该用哪个 AI 服务。",
      "打开配置页选择模型并填入 API 密钥后保存。"),
+    # 0.21.4+: logged before the request goes out, naming the variable. Without
+    # it the only trace was the provider's 401 a moment later.
+    (r"key_env \S+ is set but the variable is empty/unset",
+     "配置里写着从某个环境变量读取 API 密钥，但 data\\.env 里这个变量是空的（日志里写了变量名），"
+     "请求只能带一个占位密钥发出去，服务商一定会拒绝。",
+     "打开配置页，重新填写这个服务商的 API 密钥并保存。"),
     (r"(error_type=RateLimitError|HTTP 429|Error code: 429|HTTP 402|Error code: 402|payment / credit error)",
      "AI 服务商提示账户余额/额度不足，或请求太频繁触发了限流。",
      "稍等几分钟再试，或到服务商官网充值，也可以切换备用模型。"),

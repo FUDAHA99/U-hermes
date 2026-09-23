@@ -14,6 +14,7 @@ set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
+set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
 set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"

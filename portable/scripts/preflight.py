@@ -292,7 +292,8 @@ def say(*lines):
 def print_workspace(data_dir):
     """Print the configured workspace, or nothing.
 
-    The CLI does not honour terminal.cwd: cli.py overwrites it with
+    The CLI does not honour terminal.cwd: its config loader (cli.py up to
+    0.21.3, hermes_cli/cli_config_load.py from 0.21.4) overwrites it with
     os.getcwd() whenever the backend is local, before anything reads the
     config. So the launcher has to chdir there itself, or the folder the
     user picked on the config page would apply to the Web UI and not to
