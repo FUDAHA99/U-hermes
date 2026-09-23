@@ -73,6 +73,7 @@ goto MENU
 :START_GATEWAY
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
+set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
 set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%\runtime\python-win-x64;%PATH%"
@@ -111,6 +112,7 @@ goto MENU
 :MODEL
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
+set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
 set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PATH=%SCRIPT_DIR%\hermes\.venv\Scripts;%SCRIPT_DIR%\runtime\python-win-x64;%PATH%"
@@ -120,6 +122,7 @@ goto MENU
 :DOCTOR
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
+set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
 set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
@@ -132,6 +135,7 @@ goto MENU
 :PRUNE
 set "VENV_PYTHON=%SCRIPT_DIR%\hermes\.venv\Scripts\python.exe"
 set "HERMES_HOME=%SCRIPT_DIR%\data"
+set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
 set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"

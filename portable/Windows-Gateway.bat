@@ -21,6 +21,8 @@ if not exist "%VENV_PYTHON%" (
 
 :: Environment
 set "HERMES_HOME=%SCRIPT_DIR%\data"
+:: Gateway singleton record stays on the stick; see Windows-Start.bat.
+set "HERMES_GATEWAY_LOCK_DIR=%SCRIPT_DIR%\data\gateway-locks"
 set "HERMES_CONFIG=%SCRIPT_DIR%\data\config.yaml"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"

@@ -39,6 +39,11 @@ def write(path, text):
 # _pt_print(_PT_ANSI(text)) in the branches that bail out early. On Windows
 # without a console those raise NoConsoleScreenBufferError and kill the CLI.
 # We route those two sites through the helper.
+#
+# _cprint() lived in cli.py until v2026.9.21 moved it, bail-outs and all, to
+# hermes_cli/cli_render.py. Newest layout first. Only files that own the real
+# _cprint belong here: hermes_cli/worktree_ops.py has a delegating one.
+CPRINT_HOMES = ("hermes_cli/cli_render.py", "cli.py")
 
 RAW_CALL = "        _pt_print(_PT_ANSI(text))\n        return\n"
 SAFE_CALL = "        _pt_print_ansi(text)\n        return\n"
@@ -58,34 +63,36 @@ HELPER_DEF = '''def _pt_print_ansi(text: str) -> None:
 
 
 def tweak_no_console(agent_dir):
-    path = os.path.join(agent_dir, "cli.py")
-    if not os.path.exists(path):
-        raise TweakError("cli.py not found at %s -- upstream layout changed" % path)
+    anchor = "def _cprint("
+    for rel in CPRINT_HOMES:
+        path = os.path.join(agent_dir, *rel.split("/"))
+        if os.path.exists(path) and anchor in read(path):
+            break
+    else:
+        raise TweakError(
+            "no _cprint() in %s -- upstream moved the print path again; "
+            "this tweak needs review" % " or ".join(CPRINT_HOMES)
+        )
 
+    name = os.path.basename(path)
     src = read(path)
 
     # Upstream added this helper in 2026; inject our own if it ever goes away.
     if "def _pt_print_ansi" not in src:
-        anchor = "def _cprint("
-        if anchor not in src:
-            raise TweakError(
-                "cli.py has neither _pt_print_ansi() nor _cprint() -- "
-                "upstream refactored the print path; this tweak needs review"
-            )
         src = src.replace(anchor, HELPER_DEF + anchor, 1)
-        print("  %s cli.py: injected _pt_print_ansi() helper" % OK)
+        print("  %s %s: injected _pt_print_ansi() helper" % (OK, name))
 
     count = src.count(RAW_CALL)
     if count:
         src = src.replace(RAW_CALL, SAFE_CALL)
         write(path, src)
-        print("  %s cli.py: routed %d bail-out print(s) through _pt_print_ansi()" % (OK, count))
+        print("  %s %s: routed %d bail-out print(s) through _pt_print_ansi()" % (OK, name, count))
     elif "_pt_print_ansi(text)" in src:
-        print("  %s cli.py: no-console fallback already in place" % SKIP)
+        print("  %s %s: no-console fallback already in place" % (SKIP, name))
     else:
         raise TweakError(
-            "cli.py: found no '_pt_print(_PT_ANSI(text))' + return site and no "
-            "existing fallback -- upstream changed the print path; review this tweak"
+            "%s: found no '_pt_print(_PT_ANSI(text))' + return site and no "
+            "existing fallback -- upstream changed the print path; review this tweak" % name
         )
 
 

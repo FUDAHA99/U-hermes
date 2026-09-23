@@ -86,6 +86,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\scripts\fix-po
 :: ============================================================================
 
 set "HERMES_HOME=%DATA_DIR%"
+:: hermes-agent 0.21.4+ allows one gateway per OS user and keeps that
+:: rendezvous under the PC user's .local\state\hermes by default. Left there,
+:: the Web UI's `gateway run --replace` would kill a Hermes gateway the PC's
+:: owner already runs (or refuse to start next to it), and every launch left
+:: a record naming this stick behind. Keep it on the stick. Trade-off: a bot
+:: token shared with the PC's own Hermes is no longer detected as a clash.
+set "HERMES_GATEWAY_LOCK_DIR=%DATA_DIR%\gateway-locks"
 set "HERMES_CONFIG=%DATA_DIR%\config.yaml"
 set "HERMES_MEMORY_DIR=%DATA_DIR%\memory"
 set "HERMES_SKILLS_DIR=%DATA_DIR%\skills"
@@ -123,6 +130,12 @@ set "HERMES_AGENT_ROOT=%HERMES_DIR%\hermes-agent"
 :: the gateway kept running and holding port 8642 after the user thought
 :: they had stopped everything.
 set "HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=1"
+:: Web UI 0.7.24+: once a phone App is paired, each finished reply is pushed
+:: to the App through ekkostudio.xyz and Apple with up to 160 characters of
+:: its text. Off here so chat text stays on the stick; data\.env loads after
+:: this, so STUDIO_PUSH_CONTENT_PREVIEW=1 there turns it back on. Nothing is
+:: sent at all unless an App is paired. Live Activity titles are not covered.
+set "STUDIO_PUSH_CONTENT_PREVIEW=0"
 
 :: Gateway API Server settings
 set "API_SERVER_ENABLED=true"
@@ -161,7 +174,7 @@ if not exist "%DATA_DIR%\config.yaml" (
     :: resolve_journal_mode() reads database.journal_mode before any pragma
     :: is issued. (An earlier comment here claimed the opposite -- it was
     :: written by reading the 0.14.0 checkout in portable\hermes, which is
-    :: four months older than the v2026.9.14 the release actually builds.)
+    :: four months older than the v2026.9.14 the release built at the time.)
     ::
     :: On this package it is belt-and-braces rather than the deciding factor:
     :: the bundled interpreter links SQLite 3.45.1, which the engine's own

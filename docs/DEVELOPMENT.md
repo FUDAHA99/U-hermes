@@ -79,6 +79,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\sync-to-instance.ps1 -
 | `test_diagnose_rules` | 永远不会触发的诊断规则。这条不变量一加上就抓出三条从没被验证过的旧规则 |
 | `test_provider_probe` | HTTP 映射表。曾经有两份几乎逐字相同的拷贝，都没有 400 分支，都把服务商自己的报错内容丢掉 |
 | `test_sync_excludes` | 把数据库同步到实测实例。网页账号库在 `portable\packages\` 下，第一版排除名单里没有它，一次同步就会盖掉 U 盘上的账号和网页登录密码 |
+| `test_upstream_tweaks` | 上游挪了代码，补丁跟丢。v0.21.4 把 `_cprint` 从 `cli.py` 挪进 `hermes_cli/cli_render.py`，补丁只认旧位置，于是周一的哨兵构建失败了，却没人看到（Actions 日志只留 1 天）。其中一条测试直接模拟「没有控制台」的场景，看打过补丁的函数会不会崩 |
+| `test_launcher_env` | 引擎状态写到了别人电脑上。v0.21.4 起同一个系统用户只能跑一个网关，登记表默认放在 `%USERPROFILE%\.local\state\hermes`；不把 `HERMES_GATEWAY_LOCK_DIR` 指到 U 盘的话，网页界面带 `--replace` 启动网关时会关掉电脑主人自己的 Hermes，每次启动还会在那台电脑上留下文件。另外会调用引擎自身的函数，确认这个变量名确实是引擎读取的 |
 | 「校验压缩包」里的 `*.db` 检查 | 把构建机的状态打进发布包。冒烟测试会在 `portable\` 里起网页界面，于是账号库和 `.ekko\` 就留在了待打包的目录里 |
 | 「校验压缩包」 | 解压之后跑不起来的包。Windows 会验证能 import 引擎、几个关键文件在不在；macOS 目前在这里失败 |
 

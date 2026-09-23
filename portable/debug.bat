@@ -6,6 +6,10 @@ echo.
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "DATA_DIR=%SCRIPT_DIR%\data"
+:: Point the engine at the stick. Without this the dashboard below read the
+:: PC's own ~/.hermes, not the config printed above it.
+set "HERMES_HOME=%DATA_DIR%"
+set "HERMES_GATEWAY_LOCK_DIR=%DATA_DIR%\gateway-locks"
 set "HERMES_DIR=%SCRIPT_DIR%\hermes"
 set "VENV_PYTHON=%HERMES_DIR%\.venv\Scripts\python.exe"
 set "NODE_EXE=%SCRIPT_DIR%\runtime\node-win-x64\node.exe"

@@ -46,13 +46,17 @@ def check(condition, label):
 # --- Real lines, as hermes_logging.py's _LOG_FORMAT renders them ------------
 # "%(asctime)s %(levelname)s%(session_tag)s %(name)s: %(message)s"
 
+# v2026.9.21 wording (hermes_state_wal.py). v2026.9.14 ended "stop all
+# connections to this DB and run a one-time offline 'PRAGMA
+# journal_mode=DELETE' on the file"; the rule keys on the unchanged prefix.
 WAL_DELETE_OVERRIDDEN = (
     "2026-09-21 09:12:03,117 ERROR hermes_state: state.db: "
     "database.journal_mode=delete is configured but the on-disk database is "
     "already WAL; keeping WAL (a live downgrade under open connections can "
-    "corrupt the DB). To apply journal_mode=DELETE, stop all connections to "
-    "this DB and run a one-time offline 'PRAGMA journal_mode=DELETE' on the "
-    "file. This message fires once per process per database."
+    "corrupt the DB). To apply journal_mode=DELETE, stop every Hermes process "
+    "using this database and run `hermes sessions set-journal-mode delete` "
+    "(add `--db PATH` for a store other than state.db). This message fires "
+    "once per process per database."
 )
 WAL_DELETE_OVERRIDDEN_OTHER_DB = WAL_DELETE_OVERRIDDEN.replace(
     "state.db:", "response_store.db:"
@@ -130,6 +134,33 @@ KEY_LEGACY_NONE = (
     "unauthorized access to sessions, responses, and cron jobs."
 )
 
+# Rendered from v2026.9.21's own strings, not from our regex -- the older
+# sample below ("No inference provider configured") is the pre-0.21.4
+# sentence, and it kept this suite green while the rule matched nothing the
+# new engine wrote. Gateway path: gateway/run_turn_runner.py; Web API path:
+# gateway/platforms/api_server.py; message: hermes_cli/auth.py.
+NO_PROVIDER_ENGINE_SAYS = (
+    "Hermes is not connected to any AI provider yet. Run `hermes model` to "
+    "pick one (the free Nous tier needs no API key), type `/login` in chat, "
+    "or add a key with `hermes auth add <provider>`. (Advanced: put an API "
+    "key such as OPENROUTER_API_KEY in F:\\U-Hermes\\data/.env.)"
+)
+NO_PROVIDER_GATEWAY = (
+    "2026-09-21 10:00:13,000 WARNING gateway.run_turn_runner: Model resolution "
+    "failed for session agent:main:telegram:dm:42: " + NO_PROVIDER_ENGINE_SAYS
+)
+NO_PROVIDER_API_SERVER = (
+    "2026-09-21 10:00:14,000 WARNING gateway.platforms.api_server: Provider "
+    "resolution failed for session=abc123: " + NO_PROVIDER_ENGINE_SAYS
+)
+# hermes_cli/runtime_provider_custom.py _key_env_secret, v2026.9.21.
+KEY_ENV_EMPTY = (
+    "2026-09-21 10:00:15,000 WARNING hermes_cli.runtime_provider: custom "
+    "provider 'longcat': key_env OPENAI_API_KEY is set but the variable is "
+    "empty/unset — the request will carry the placeholder no-key-required and "
+    "the endpoint will reject it"
+)
+
 # Lines the older rules own; the new ones must keep their hands off.
 #
 # These predate this file. Their strings are taken from each rule's own
@@ -162,6 +193,7 @@ ALL_SAMPLES = [
     WAL_RESET_BUG, WAL_RESET_KEPT_WAL, WAL_RESET_INDETERMINATE,
     KEY_MISSING, KEY_TOO_SHORT, KEY_UNVERIFIABLE,
     KEY_REJECTED, KEY_NO_PROFILE, KEY_LEGACY_NONE,
+    NO_PROVIDER_GATEWAY, NO_PROVIDER_API_SERVER, KEY_ENV_EMPTY,
 ] + OTHER_RULES
 
 
@@ -244,6 +276,30 @@ def test_the_sqlite_warning_is_split_by_outcome():
             check(not matches(r, line), "no false hit on: %s" % line[40:80])
 
 
+def test_the_engine_s_own_no_provider_line_is_recognised():
+    r = rule("No inference provider configured")
+    check(matches(r, NO_PROVIDER_GATEWAY),
+          "0.21.4's wording, as the messaging gateway logs it")
+    check(matches(r, NO_PROVIDER_API_SERVER),
+          "0.21.4's wording, as the API server logs it")
+    check(matches(r, "2026-09-21 10:00:05,000 ERROR agent: No inference provider configured"),
+          "an older engine's wording still counts")
+    for line in [KEY_ENV_EMPTY, KEY_MISSING, WAL_DELETE_OVERRIDDEN] + NOISE:
+        check(not matches(r, line), "no false hit on: %s" % line[40:80])
+
+
+def test_an_empty_key_variable_is_named_before_the_401():
+    r = rule("key_env")
+    check(matches(r, KEY_ENV_EMPTY), "catches the empty key_env warning")
+    check("data\\.env" in r[1] and "配置页" in r[2],
+          "says where the key should be and where to put it back")
+    auth = rule("error_type=AuthenticationError")
+    check(not matches(auth, KEY_ENV_EMPTY),
+          "is not mistaken for a rejected key (nothing was sent yet)")
+    for line in [NO_PROVIDER_GATEWAY, KEY_MISSING, KEY_REJECTED] + OTHER_RULES + NOISE:
+        check(not matches(r, line), "no false hit on: %s" % line[40:80])
+
+
 def test_no_rule_is_dead():
     """The invariant: a rule with no sample here is a rule nobody has seen fire."""
     for pattern, _meaning, _advice in dg.ERROR_CLASSES:
@@ -261,6 +317,8 @@ def test_noise_stays_unclassified():
 if __name__ == "__main__":
     for fn in (test_every_pattern_compiles, test_wal_rule,
                test_api_server_key_rule, test_the_sqlite_warning_is_split_by_outcome,
+               test_the_engine_s_own_no_provider_line_is_recognised,
+               test_an_empty_key_variable_is_named_before_the_401,
                test_no_rule_is_dead, test_noise_stays_unclassified):
         print(fn.__name__)
         fn()
