@@ -177,26 +177,33 @@ if not exist "%DATA_DIR%\config.yaml" if exist "%DATA_DIR%\config.yaml.default" 
     copy /Y "%DATA_DIR%\config.yaml.default" "%DATA_DIR%\config.yaml" >nul 2>&1
 )
 
+:: journal_mode IS read by the pinned engine: hermes_state_wal's
+:: resolve_journal_mode() reads database.journal_mode before any pragma
+:: is issued. (An earlier comment here claimed the opposite -- it was
+:: written by reading the 0.14.0 checkout in portable\hermes, which is
+:: four months older than the v2026.9.14 the release built at the time.)
+::
+:: On this package it is belt-and-braces rather than the deciding factor:
+:: the bundled interpreter links SQLite 3.45.1, which the engine's own
+:: is_sqlite_wal_reset_vulnerable() classifies as carrying the WAL-reset
+:: corruption bug, so a NEW database is forced to DELETE whatever the
+:: config says. The line is what makes DELETE stick once the bundled
+:: SQLite is new enough for that gate to stop firing.
+::
+:: It does NOT rescue an existing WAL database: the engine refuses to
+:: downgrade one in place. See section 八 of 0-先看我-使用说明.txt.
+::
+:: These notes sit above the block, not inside it. cmd reads a :: line as
+:: a label, and inside ( ) a label is followed by a line cmd parses as a
+:: command: the second line of this very comment, with its "()", made
+:: cmd.exe reject the whole launcher ("reads was unexpected at this time")
+:: from v0.4.2 to v0.4.5 -- on every start, whether or not the block ran.
+:: test_batch_parse.py now feeds every block of every launcher to cmd.
 if not exist "%DATA_DIR%\config.yaml" (
     echo.
     echo   [i] 首次启动，正在创建默认配置...
     echo.
     mkdir "%DATA_DIR%" 2>nul
-    :: journal_mode IS read by the pinned engine: hermes_state_wal's
-    :: resolve_journal_mode() reads database.journal_mode before any pragma
-    :: is issued. (An earlier comment here claimed the opposite -- it was
-    :: written by reading the 0.14.0 checkout in portable\hermes, which is
-    :: four months older than the v2026.9.14 the release built at the time.)
-    ::
-    :: On this package it is belt-and-braces rather than the deciding factor:
-    :: the bundled interpreter links SQLite 3.45.1, which the engine's own
-    :: is_sqlite_wal_reset_vulnerable() classifies as carrying the WAL-reset
-    :: corruption bug, so a NEW database is forced to DELETE whatever the
-    :: config says. The line is what makes DELETE stick once the bundled
-    :: SQLite is new enough for that gate to stop firing.
-    ::
-    :: It does NOT rescue an existing WAL database: the engine refuses to
-    :: downgrade one in place. See section 八 of 0-先看我-使用说明.txt.
     (
         echo model:
         echo   provider: ""
@@ -282,12 +289,12 @@ if /I "%~1"=="--gateway" shift
 :: from Node, and putting it after meant a failed npm install exited the
 :: script -- so on exactly the broken-network machine where someone reaches
 :: for the command line as a fallback, the fallback was unreachable too.
+::
+:: Start in the workspace the user chose. The CLI overwrites terminal.cwd
+:: with its own working directory whenever the backend is local, so without
+:: this the config page's workspace box would apply to the Web UI and not to
+:: `hermes chat`, and the CLI agent would write into the program files instead.
 if not "%~1"=="" (
-    :: Start in the workspace the user chose. The CLI overwrites
-    :: terminal.cwd with its own working directory whenever the backend is
-    :: local, so without this the config page's workspace box would apply to
-    :: the Web UI and not to `hermes chat`, and the CLI agent would write
-    :: into the program files instead.
     for /f "usebackq delims=" %%W in (`""%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\preflight.py" --print-workspace "%DATA_DIR%""`) do set "AGENT_CWD=%%W"
     if defined AGENT_CWD if exist "!AGENT_CWD!\" cd /d "!AGENT_CWD!"
     "%VENV_PYTHON%" -m hermes_cli.main %*
