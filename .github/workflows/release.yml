@@ -257,6 +257,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "launcher env test failed"; exit 1 }
           & $py scripts/tests/test_prune_stale_files.py
           if ($LASTEXITCODE -ne 0) { Write-Error "prune stale files test failed"; exit 1 }
+          & $py scripts/tests/test_batch_parse.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "batch parse test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
           # tools/ is not packaged, but this one guards the target of a sync,
@@ -405,6 +407,70 @@ jobs:
           if (Test-Path (Join-Path $work "packages")) {
             Write-Error "the zip contains packages/ -- that is the Web UI account store"; exit 1
           }
+
+          # Last, because it writes databases and packages/ into $work, which
+          # the two checks above would rightly refuse. Double-click, as near
+          # as CI gets: run the extracted Windows-Start.bat itself. Everything
+          # above runs the engine or the Web UI directly, never the file a
+          # user opens -- and from v0.4.2 to v0.4.5 cmd.exe rejected that file
+          # on every start ("reads was unexpected at this time") while every
+          # one of these checks passed.
+          # A provider nobody answers for: preflight reports a network error
+          # and lets the launch go ahead, as on a user's machine that is
+          # offline. The key is a placeholder; nothing is ever sent anywhere.
+          @(
+            'model:',
+            '  provider: custom:ci',
+            '  default: ci-model',
+            'custom_providers:',
+            '  - name: ci',
+            '    base_url: http://127.0.0.1:9/v1',
+            '    api_key: ci-placeholder-not-a-key',
+            'database:',
+            '  journal_mode: "delete"',
+            'platforms:',
+            '  api_server:',
+            '    enabled: true',
+            '    extra:',
+            '      port: 8642',
+            '      host: 127.0.0.1'
+          ) | Set-Content (Join-Path $work "data\config.yaml") -Encoding ascii
+          $startOut = Join-Path $env:RUNNER_TEMP "start.out"
+          $startErr = Join-Path $env:RUNNER_TEMP "start.err"
+          $noInput = Join-Path $env:RUNNER_TEMP "no-input.txt"
+          Set-Content $noInput "" -NoNewline
+          $bat = Start-Process cmd.exe -ArgumentList "/d /c `"`"$work\Windows-Start.bat`"`"" `
+            -RedirectStandardOutput $startOut -RedirectStandardError $startErr `
+            -RedirectStandardInput $noInput -WindowStyle Hidden -PassThru
+          $up = $false
+          foreach ($i in 1..60) {
+            Start-Sleep -Seconds 2
+            if ($bat.HasExited) { break }
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8648" -UseBasicParsing -TimeoutSec 3
+              if ($r.StatusCode -eq 200) { $up = $true; break }
+            } catch {}
+          }
+          # Stop the server the way a user's Ctrl+C does, so the launcher runs
+          # its own shutdown path too; then sweep up whatever it started.
+          # Matched by executable, not command line: a command line that
+          # merely mentions $work can belong to whatever is running this.
+          $fromPackage = { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$work\*" } }
+          & $fromPackage | Where-Object { $_.Name -eq "node.exe" } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          $null = $bat.WaitForExit(60000)
+          if (-not $bat.HasExited) { Stop-Process -Id $bat.Id -Force -ErrorAction SilentlyContinue }
+          & $fromPackage | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          $log = (Get-Content $startOut -Raw -Encoding utf8) + (Get-Content $startErr -Raw -Encoding utf8)
+          Write-Host $log
+          if ($log -match 'was unexpected at this time|syntax of the command is incorrect|cannot find the drive specified|is not recognized as an internal or external command') {
+            Write-Error "cmd.exe could not run Windows-Start.bat as shipped"; exit 1
+          }
+          if ($log -notmatch [regex]::Escape("U-Hermes $pruneLabel")) {
+            Write-Error "Windows-Start.bat never reached its launch banner"; exit 1
+          }
+          if (-not $up) { Write-Error "Windows-Start.bat did not bring the Web UI up on 8648 within 120s"; exit 1 }
+          Write-Host "Windows-Start.bat, as shipped, started the Web UI and shut down cleanly."
 
           Write-Host "Packaged artifact verified."
 
