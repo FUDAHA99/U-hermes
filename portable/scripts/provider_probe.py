@@ -21,6 +21,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 DEFAULT_TIMEOUT = 20
 
@@ -39,6 +40,27 @@ UNKNOWN = "unknown"
 # temporary or needs a credit card, and blocking a launch over those costs
 # more than it saves.
 FIXABLE_IN_CONFIG = (AUTH, NOT_FOUND, BAD_REQUEST)
+
+
+def _package_version():
+    """The VERSION file at the package root ("v0.4.7" -> "0.4.7"), or ""."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+    try:
+        with open(path, encoding="utf-8") as f:
+            found = f.read().strip().lstrip("v")
+    except (OSError, ValueError):
+        return ""
+    return found if re.fullmatch(r"[0-9A-Za-z.+-]{1,32}", found) else ""
+
+
+# Who is asking. urllib's own name, "Python-urllib/3.x", is on Cloudflare's
+# list of bot signatures: opencode.ai (OpenCode Zen and Go) answers it with
+# 403 "error code: 1010" before looking at the key, and the launcher took
+# that for a bad key and refused to start with a key the engine uses fine --
+# the engine's HTTP client never sends urllib's name. On 2026-09-26 the other
+# twelve addresses the config page offers or users run answered this name
+# and urllib's identically.
+USER_AGENT = "U-Hermes/" + (_package_version() or "dev")
 
 
 class Result(object):
@@ -69,6 +91,27 @@ def is_anthropic_surface(base_url):
     )
 
 
+def is_opencode_host(base_url):
+    """opencode.ai or a subdomain: the engine's _is_opencode_endpoint."""
+    host = (urllib.parse.urlparse(base_url or "").hostname or "").lower().rstrip(".")
+    return host == "opencode.ai" or host.endswith(".opencode.ai")
+
+
+def identity_headers(base_url):
+    """The headers that say who is asking, as the engine sends them.
+
+    OpenCode Go refuses a request without x-opencode-session (HTTP 400
+    "Request is missing x-opencode-session"), and a real key was reported as
+    a config error until this was sent. The engine sends one to every
+    opencode.ai request, making up "oneshot-<hex>" when there is no
+    conversation (agent/opencode_affinity.py); so does this.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    if is_opencode_host(base_url):
+        headers["x-opencode-session"] = "oneshot-" + uuid.uuid4().hex[:16]
+    return headers
+
+
 def build_request(base_url, api_key, model):
     """The smallest call that proves the whole chain works."""
     url = (base_url or "").rstrip("/")
@@ -84,6 +127,7 @@ def build_request(base_url, api_key, model):
                 "Content-Type": "application/json",
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
+                **identity_headers(url)
             },
             "content",
         )
@@ -97,6 +141,7 @@ def build_request(base_url, api_key, model):
         {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + (api_key or ""),
+            **identity_headers(url)
         },
         "choices",
     )
