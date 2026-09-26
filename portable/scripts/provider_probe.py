@@ -21,6 +21,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 DEFAULT_TIMEOUT = 20
 
@@ -90,6 +91,27 @@ def is_anthropic_surface(base_url):
     )
 
 
+def is_opencode_host(base_url):
+    """opencode.ai or a subdomain: the engine's _is_opencode_endpoint."""
+    host = (urllib.parse.urlparse(base_url or "").hostname or "").lower().rstrip(".")
+    return host == "opencode.ai" or host.endswith(".opencode.ai")
+
+
+def identity_headers(base_url):
+    """The headers that say who is asking, as the engine sends them.
+
+    OpenCode Go refuses a request without x-opencode-session (HTTP 400
+    "Request is missing x-opencode-session"), and a real key was reported as
+    a config error until this was sent. The engine sends one to every
+    opencode.ai request, making up "oneshot-<hex>" when there is no
+    conversation (agent/opencode_affinity.py); so does this.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    if is_opencode_host(base_url):
+        headers["x-opencode-session"] = "oneshot-" + uuid.uuid4().hex[:16]
+    return headers
+
+
 def build_request(base_url, api_key, model):
     """The smallest call that proves the whole chain works."""
     url = (base_url or "").rstrip("/")
@@ -105,7 +127,7 @@ def build_request(base_url, api_key, model):
                 "Content-Type": "application/json",
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
-                "User-Agent": USER_AGENT,
+                **identity_headers(url)
             },
             "content",
         )
@@ -119,7 +141,7 @@ def build_request(base_url, api_key, model):
         {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + (api_key or ""),
-            "User-Agent": USER_AGENT,
+            **identity_headers(url)
         },
         "choices",
     )

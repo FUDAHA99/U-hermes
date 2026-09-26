@@ -733,6 +733,46 @@ def test_the_probe_does_not_call_itself_urllib():
           "the name is plain ASCII with a version or 'dev' (%s)" % pp.USER_AGENT)
 
 
+OPENCODE_HOSTS = [
+    ("https://opencode.ai/zen/go/v1", True),
+    ("https://opencode.ai/zen/v1", True),
+    ("https://OpenCode.AI/zen/go/v1/", True),
+    ("https://api.opencode.ai/v1", True),
+    ("https://api.deepseek.com/v1", False),
+    ("https://notopencode.ai/v1", False),
+    ("https://opencode.ai.example.com/v1", False),
+    ("http://127.0.0.1:9/v1", False),
+]
+
+
+def test_opencode_gets_the_session_header_the_engine_sends():
+    """OpenCode Go answers a request without x-opencode-session with HTTP 400
+    "Request is missing x-opencode-session" -- which the launcher showed as
+    "通常是模型名称写错" and blocked, with a key and model that work. The
+    engine sends one on every opencode.ai request, "oneshot-<hex>" when
+    there is no conversation (agent/opencode_affinity.py).
+    """
+    for url, wanted in OPENCODE_HOSTS:
+        _u, _p, headers, _f = pp.build_request(url, "sk-test", "deepseek-v4-pro")
+        sid = headers.get("x-opencode-session")
+        if wanted:
+            check(re.fullmatch(r"oneshot-[0-9a-f]{16}", sid or "") is not None,
+                  "%s gets a session id (%r)" % (url, sid))
+        else:
+            check(sid is None, "%s gets no OpenCode header" % url)
+    _u, _p, anthropic, _f = pp.build_request("https://opencode.ai/zen/anthropic", "k", "m")
+    check("x-opencode-session" in anthropic, "...on the Anthropic surface too")
+
+    try:
+        from agent.anthropic_endpoints import _is_opencode_endpoint
+    except Exception as exc:
+        print("  skip  no hermes engine importable here (%s)" % exc.__class__.__name__)
+        return
+    for url, _wanted in OPENCODE_HOSTS:
+        check(pp.is_opencode_host(url) == bool(_is_opencode_endpoint(url)),
+              "%s: the engine's host check agrees" % url)
+
+
 def test_a_key_is_sent_the_way_the_engine_sends_it():
     # A zero-width space pasted in with the key, or a Chinese note after it:
     # the engine strips non-ASCII from keys on load, and the SDK encodes the
@@ -763,6 +803,7 @@ if __name__ == "__main__":
                test_a_working_provider,
                test_an_anthropic_surface_is_probed_differently,
                test_the_probe_does_not_call_itself_urllib,
+               test_opencode_gets_the_session_header_the_engine_sends,
                test_every_status_gets_its_own_answer,
                test_400_used_to_be_a_shrug,
                test_the_key_never_comes_back_out,
