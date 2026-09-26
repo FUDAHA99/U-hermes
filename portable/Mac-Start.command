@@ -248,28 +248,13 @@ if [ $# -gt 0 ]; then
     exit $?
 fi
 
-# --- Pre-launch: Sync config to ~/.hermes/ for GatewayManager ---
-# The Web UI's GatewayManager overrides HERMES_HOME to ~/.hermes
-# so the gateway reads ~/.hermes/config.yaml instead of data/config.yaml.
-# We must copy model+provider config AND set port=8642 before launching.
-USER_HERMES_DIR="$HOME/.hermes"
-mkdir -p "$USER_HERMES_DIR"
-# Copy full data/config.yaml (model, custom_providers, skills, etc.)
-cp -f "$DATA_DIR/config.yaml" "$USER_HERMES_DIR/config.yaml" 2>/dev/null
-# Append platforms section (GatewayManager reads port from here)
-cat >> "$USER_HERMES_DIR/config.yaml" << 'HCEOF'
-
-platforms:
-  api_server:
-    extra:
-      port: 8642
-      host: 127.0.0.1
-    enabled: true
-    key: ''
-    cors_origins: '*'
-HCEOF
-# Copy .env (API keys) if present
-[ -f "$DATA_DIR/.env" ] && cp -f "$DATA_DIR/.env" "$USER_HERMES_DIR/.env" 2>/dev/null
+# --- Nothing of ours goes into ~/.hermes ---
+# Up to v0.4.7 this copied data/config.yaml and data/.env -- the user's API
+# keys -- over ~/.hermes/config.yaml and ~/.hermes/.env on every run, without
+# setting the machine's own files aside and without ever taking them away.
+# Its premise, that the Web UI's GatewayManager overrode HERMES_HOME, was
+# withdrawn long ago: every process started here gets HERMES_HOME above, and
+# the Web UI hands it on to every Hermes process it starts.
 
 # --- Step 1: Kill leftover gateway processes ---
 lsof -ti:8642 2>/dev/null | xargs kill -9 2>/dev/null

@@ -364,46 +364,22 @@ echo     %UH_TITLE%
 echo   ============================================
 echo.
 
-:: --- Pre-launch: mirror the config into ~/.hermes ---
-:: HERMES_HOME IS honoured by both the Web UI and the gateway (verified), so
-:: this is a fallback, not a workaround for an override: it keeps a working
-:: config in the default location for any component started without our env.
+:: --- Nothing of ours goes into %USERPROFILE%\.hermes -----------------------
+:: Up to v0.4.7 this copied data\config.yaml and data\.env -- the user's API
+:: keys -- into %USERPROFILE%\.hermes for the length of every run, as "a
+:: fallback for any component started without our env". No such component
+:: exists. On Windows the engine falls back to %LOCALAPPDATA%\hermes, never to
+:: ~/.hermes, and the Web UI hands HERMES_HOME to every Hermes process it
+:: starts. With the copy gone, chat, the gateway API, the CLI and the agent's
+:: shell all ran unchanged (checked 2026-09-26 on an isolated instance). The
+:: one program that did read the copy was a Hermes the machine's owner had
+:: installed for themselves -- and it then ran on the stick owner's keys. A
+:: window closed with [X], or a stick pulled out, also left the keys behind.
+::
+:: What is left is taking away a copy that an older version left here.
 set "USER_HERMES_DIR=%USERPROFILE%\.hermes"
 set "MIRROR_MARK=%USER_HERMES_DIR%\.u-hermes-mirror"
-if not exist "%USER_HERMES_DIR%" mkdir "%USER_HERMES_DIR%" 2>nul
-
-:: A previous run that was Ctrl+C'd or had its window closed never reached
-:: its own cleanup, so its copy of the keys is still sitting here. Clear it
-:: before doing anything else, so at worst the keys survive until the next
-:: launch on this machine rather than indefinitely.
-call :restore_mirror quiet
-
-:: If this machine already has its own Hermes, move its files aside rather
-:: than overwriting them, and put them back on the way out. The marker says
-:: "the config.yaml and .env in here are ours" -- it survives a hard kill, so
-:: a second run will not stash a mirror on top of a mirror.
-if exist "%MIRROR_MARK%" goto :mirror_ready
-
-:: A copy that is byte-identical to ours is a mirror an older version of this
-:: launcher left behind, from before the marker existed. Preserving it would
-:: mean restoring our own keys onto this machine on the way out.
-if not exist "%USER_HERMES_DIR%\config.yaml" goto :mirror_stashed
-fc /B "%USER_HERMES_DIR%\config.yaml" "%DATA_DIR%\config.yaml" >nul 2>&1
-if not errorlevel 1 goto :mirror_stashed
-move /Y "%USER_HERMES_DIR%\config.yaml" "%USER_HERMES_DIR%\config.yaml.before-u-hermes" >nul 2>&1
-if exist "%USER_HERMES_DIR%\.env" move /Y "%USER_HERMES_DIR%\.env" "%USER_HERMES_DIR%\.env.before-u-hermes" >nul 2>&1
-
-:mirror_stashed
-echo u-hermes> "%MIRROR_MARK%"
-
-:mirror_ready
-
-:: The platforms block used to be appended here with key: '' when missing,
-:: which handed the gateway an empty key and stopped it starting. It is not
-:: needed any more: protect-config.ps1 has already put a real one in the
-:: source config above, so a byte copy is correct.
-copy /Y "%DATA_DIR%\config.yaml" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
-if exist "%DATA_DIR%\.env" copy /Y "%DATA_DIR%\.env" "%USER_HERMES_DIR%\.env" >nul 2>&1
+call :remove_old_copy
 
 :: --- Step 1: Kill leftover gateway processes ---
 for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":8642.*LISTENING"') do (
@@ -427,8 +403,6 @@ echo   -----------------------------------------------
 echo     浏览器地址: http://127.0.0.1:8648
 if defined AGENT_CWD echo     智能体工作区: !AGENT_CWD!
 echo     停止服务: 按 Ctrl+C，问「终止批处理操作吗」时选 N
-echo     （选 N 才会顺带清掉本机上的配置副本；选 Y 或直接点 X
-echo       也能停，只是清理要留到下次启动、或用菜单 [8]）
 echo   -----------------------------------------------
 echo.
 
@@ -468,8 +442,6 @@ for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":8642.*LISTENING"') d
     taskkill /F /PID %%P >nul 2>&1
 )
 
-call :restore_mirror
-
 :check_exit
 echo.
 echo   Hermes 已停止。
@@ -477,19 +449,32 @@ echo.
 pause
 exit /b 0
 
-:: --- Take the copy of the user's keys off this machine ---------------------
-:: "数据不出U盘" has to survive running on someone else's computer, and the
-:: mirror contains their API keys in plain text. Only files we put there are
-:: removed; anything this machine had is moved back.
-::
-:: Called both on the way out and at the start of the next run, because
-:: neither Ctrl+C nor closing the window with [X] reaches the exit path.
-:restore_mirror
-if not exist "%MIRROR_MARK%" goto :eof
+:: --- Take away a copy of the user's keys that an older version left here ----
+:: v0.4.2 to v0.4.7 marked their copy with .u-hermes-mirror, and moved any
+:: config.yaml / .env this machine had of its own aside as *.before-u-hermes,
+:: so those go back. v0.3.5 to v0.4.1 left theirs unmarked; one that is still
+:: byte-identical to ours can only be ours. Anything else in that folder
+:: belongs to a Hermes this machine had, and is left alone.
+:remove_old_copy
+set "_OLD_COPY="
+if not exist "%MIRROR_MARK%" goto :old_copy_unmarked
 del /Q "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
 del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
 if exist "%USER_HERMES_DIR%\config.yaml.before-u-hermes" move /Y "%USER_HERMES_DIR%\config.yaml.before-u-hermes" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
 if exist "%USER_HERMES_DIR%\.env.before-u-hermes" move /Y "%USER_HERMES_DIR%\.env.before-u-hermes" "%USER_HERMES_DIR%\.env" >nul 2>&1
 del /Q "%MIRROR_MARK%" >nul 2>&1
-if not "%~1"=="quiet" echo   已清理本机上的配置副本。
+set "_OLD_COPY=1"
+:old_copy_unmarked
+if not exist "%USER_HERMES_DIR%\config.yaml" goto :old_copy_done
+fc /B "%USER_HERMES_DIR%\config.yaml" "%DATA_DIR%\config.yaml" >nul 2>&1
+if errorlevel 1 goto :old_copy_done
+del /Q "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
+fc /B "%USER_HERMES_DIR%\.env" "%DATA_DIR%\.env" >nul 2>&1
+if not errorlevel 1 del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
+set "_OLD_COPY=1"
+:old_copy_done
+:: Only succeeds on an empty folder -- one that an older version created and
+:: nothing else ever used.
+rd "%USER_HERMES_DIR%" >nul 2>&1
+if defined _OLD_COPY echo   [i] 已删掉旧版本留在这台电脑上的配置和密钥副本（%USER_HERMES_DIR%）。
 goto :eof

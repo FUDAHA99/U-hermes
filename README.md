@@ -229,17 +229,20 @@ never touch it, and neither does deleting the install folder. The launcher
 prints the path on every start. Your own files are in there, so delete it
 separately, once you are sure.
 
-**2. A config copy on every machine it has run on.** While running, U-Hermes
-mirrors `config.yaml` and `.env` (which holds your API key) into
-`%USERPROFILE%\.hermes\`, so that any component started without our
-environment still finds a working config. A clean exit removes both, and so
-does the next launch on that machine — but only if you answer **N** to
-cmd's `终止批处理操作吗(Y/N)?` after Ctrl+C. Answering **Y** ends the batch
-file at that prompt, so the cleanup it was about to run never happens, and
-closing the window with [X] skips it too. Either way the next launch on that
-machine clears it, and `Windows-Menu.bat` → `[8] 清理本机残留` does it on
-demand: it deletes exactly those two files and reports anything else it
-finds rather than assuming it is ours.
+**2. A config copy left by v0.4.7 or earlier.** Those versions mirrored
+`config.yaml` and `.env` (which holds your API key) into
+`%USERPROFILE%\.hermes\` for the length of every run, "so that any component
+started without our environment still finds a working config". No such
+component exists — on Windows the engine falls back to
+`%LOCALAPPDATA%\hermes`, never `~/.hermes`, and the Web UI passes
+`HERMES_HOME` to every Hermes process it starts. The only thing that ever
+read the copy was a Hermes the machine's owner had installed, which then ran
+on your keys, and closing the window with [X] left the copy behind. From
+v0.4.8 nothing is copied. The first launch of v0.4.8 on a machine takes away
+what an older version left there, and `Windows-Menu.bat` → `[8]` does it on
+demand: it removes only the copy those versions made, puts back any files of
+the machine's own that they moved aside, and reports anything else it finds
+rather than assuming it is ours.
 
 **3. Package caches, on builds before this one.** npm and uv cache downloads
 under `%LOCALAPPDATA%` by default, so earlier versions left a few hundred MB

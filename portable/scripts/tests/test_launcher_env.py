@@ -165,11 +165,168 @@ def test_the_engine_reads_that_variable():
             os.environ["HERMES_GATEWAY_LOCK_DIR"] = saved
 
 
+# --- nothing of ours in the host's .hermes ----------------------------------
+# Up to v0.4.7 the launchers copied data\config.yaml and data\.env -- the
+# user's API keys -- into %USERPROFILE%\.hermes (Mac: ~/.hermes) for every
+# run, "for any component started without our env". There is no such
+# component: on Windows the engine falls back to %LOCALAPPDATA%\hermes, and
+# the Web UI hands HERMES_HOME to every Hermes process it starts. The only
+# reader was a Hermes the machine's owner installed, which then ran on the
+# stick owner's keys; and [X] or a pulled stick left the keys behind.
+HOST_HERMES = r'(%USER_HERMES_DIR%|%USERPROFILE%\\\.hermes|\$USER_HERMES_DIR|\$HOME/\.hermes|~/\.hermes)'
+PUTS_THERE = [
+    re.compile(r'\b(?:copy|xcopy|robocopy|cp)\s+.*' + HOST_HERMES, re.I),
+    re.compile(r'>>?\s*"?' + HOST_HERMES, re.I),
+    re.compile(r'>>?\s*"?%MIRROR_MARK%', re.I),
+    re.compile(r'\bmkdir\b.*' + HOST_HERMES, re.I),
+]
+
+
+def test_nothing_of_ours_goes_into_the_hosts_hermes():
+    print("no launcher copies config or keys into the host's .hermes")
+    names = list(launchers())
+    hits = []
+    for name in names:
+        for i, line in enumerate(read_lines(name)):
+            if line.lstrip().startswith(("::", "#", "rem ", "REM ")):
+                continue
+            # Moving the machine's own *.before-u-hermes back is restoring
+            # its files, not putting ours there.
+            if "before-u-hermes" in line:
+                continue
+            if any(r.search(line) for r in PUTS_THERE):
+                hits.append("%s:%d %s" % (name, i + 1, line.strip()))
+    check(not hits, "none of %d launchers writes into the host's .hermes%s"
+          % (len(names), "".join("\n         " + h for h in hits)))
+    check(len(names) >= 5, "(found the launchers)")
+    # The rule itself, on the lines v0.4.7 shipped.
+    shipped = ['copy /Y "%DATA_DIR%\\config.yaml" "%USER_HERMES_DIR%\\config.yaml" >nul 2>&1',
+               'if exist "%DATA_DIR%\\.env" copy /Y "%DATA_DIR%\\.env" "%USER_HERMES_DIR%\\.env" >nul 2>&1',
+               'echo u-hermes> "%MIRROR_MARK%"',
+               'if not exist "%USER_HERMES_DIR%" mkdir "%USER_HERMES_DIR%" 2>nul',
+               'cp -f "$DATA_DIR/config.yaml" "$USER_HERMES_DIR/config.yaml" 2>/dev/null',
+               '[ -f "$DATA_DIR/.env" ] && cp -f "$DATA_DIR/.env" "$USER_HERMES_DIR/.env" 2>/dev/null']
+    check(all(any(r.search(l) for r in PUTS_THERE) for l in shipped),
+          "(the rule catches every line v0.4.7 used to make the copy)")
+
+
+def _routine(name, first, last):
+    """The lines of a batch routine, from the line starting with `first`
+    through the first line equal to `last`."""
+    lines = read_lines(name)
+    a = next(i for i, l in enumerate(lines) if l.startswith(first))
+    z = next(i for i in range(a, len(lines)) if lines[i].strip() == last)
+    return lines[a:z + 1]
+
+
+def _core(lines, data):
+    """What the cleanup does, with the data dir spelled one way."""
+    out = []
+    for l in lines:
+        s = l.strip().replace(data, "<DATA>")
+        if s.startswith(("del ", "move ", "fc ", "rd ", "if exist", "if not errorlevel", "if errorlevel")):
+            out.append(re.sub(r"goto :?\S+", "goto <label>", s))
+    return out
+
+
+def test_the_menu_cleans_up_by_the_same_rules():
+    print("Windows-Menu.bat [8] and the launcher take away the same old copies")
+    start = _routine("Windows-Start.bat", ":remove_old_copy", "goto :eof")
+    menu = _routine("Windows-Menu.bat", ":CLEANUP", 'rd "%USER_HERMES_DIR%" >nul 2>&1')
+    a = _core(start, "%DATA_DIR%")
+    b = _core(menu, "%SCRIPT_DIR%\\data")
+    check(len(a) >= 10 and a == b, "same steps in the same order (%d vs %d)" % (len(a), len(b)))
+    if a != b:
+        for x, y in zip(a, b):
+            if x != y:
+                print("       start: %s\n       menu:  %s" % (x, y))
+
+
+def test_old_copies_are_taken_away():
+    """Run the launcher's own :remove_old_copy against a fake home."""
+    print("an old version's copy is taken away; the machine's own files are not")
+    if os.name != "nt":
+        check(True, "skip: needs cmd.exe")
+        return
+    import shutil
+    import subprocess
+    routine = _routine("Windows-Start.bat", ":: --- Take away a copy", "goto :eof")
+
+    def run(files, data_files):
+        root = tempfile.mkdtemp(prefix="uh-oldcopy-")
+        try:
+            home, data = os.path.join(root, "home"), os.path.join(root, "data")
+            os.makedirs(data)
+            for rel, text in data_files.items():
+                with open(os.path.join(data, rel), "w", encoding="utf-8") as f:
+                    f.write(text)
+            for rel, text in files.items():
+                path = os.path.join(home, ".hermes", rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            bat = os.path.join(root, "harness.bat")
+            body = ["@echo off", "chcp 65001 >nul", "setlocal enabledelayedexpansion",
+                    'set "USERPROFILE=%s"' % home, 'set "DATA_DIR=%s"' % data,
+                    'set "USER_HERMES_DIR=%USERPROFILE%\\.hermes"',
+                    'set "MIRROR_MARK=%USER_HERMES_DIR%\\.u-hermes-mirror"',
+                    "call :remove_old_copy", "echo HARNESS-DONE", "exit /b 0", ""] + routine
+            with open(bat, "wb") as f:
+                f.write(("\r\n".join(body) + "\r\n").encode("utf-8"))
+            r = subprocess.run(["cmd", "/d", "/c", bat], capture_output=True,
+                               stdin=subprocess.DEVNULL, timeout=60)
+            out = (r.stdout + r.stderr).decode("utf-8", errors="replace")
+            left = {}
+            hdir = os.path.join(home, ".hermes")
+            if os.path.isdir(hdir):
+                for dp, _dn, fn in os.walk(hdir):
+                    for n in fn:
+                        p = os.path.join(dp, n)
+                        with open(p, encoding="utf-8") as f:
+                            left[os.path.relpath(p, hdir).replace("\\", "/")] = f.read()
+            return out, os.path.isdir(hdir), left
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    data = {"config.yaml": "model: current\n", ".env": "CURRENT_API_KEY=sk-current\n"}
+
+    out, exists, left = run({".u-hermes-mirror": "u-hermes\n", "config.yaml": "model: old-copy\n",
+                             ".env": "OLD_API_KEY=sk-old-copy\n",
+                             "config.yaml.before-u-hermes": "model: machine-own\n",
+                             ".env.before-u-hermes": "MACHINE_API_KEY=sk-machine\n",
+                             "sessions/keep.json": "{}"}, data)
+    check("HARNESS-DONE" in out, "the routine runs to the end (%s)" % out.strip()[-120:])
+    check(left == {"config.yaml": "model: machine-own\n", ".env": "MACHINE_API_KEY=sk-machine\n",
+                   "sessions/keep.json": "{}"},
+          "a marked copy (v0.4.2-v0.4.7) goes; the machine's own files come back (%s)" % sorted(left))
+    check("sk-old-copy" not in "".join(left.values()), "...and no trace of the old copy's key")
+    check("已删掉旧版本" in out, "...and the user is told")
+
+    out, exists, left = run({".u-hermes-mirror": "u-hermes\n", "config.yaml": "model: old-copy\n",
+                             ".env": "OLD_API_KEY=sk-old-copy\n"}, data)
+    check(not exists, "a marked copy on a machine with no Hermes of its own leaves no folder behind")
+
+    out, exists, left = run({"config.yaml": data["config.yaml"], ".env": data[".env"]}, data)
+    check(not exists, "an unmarked copy byte-identical to ours (v0.3.5-v0.4.1) goes too")
+    check("已删掉旧版本" in out, "...and the user is told")
+
+    own = {"config.yaml": "model: machine-own\n", ".env": "MACHINE_API_KEY=sk-machine\n"}
+    out, exists, left = run(dict(own), data)
+    check(left == own, "a Hermes this machine has of its own is left alone (%s)" % sorted(left))
+    check("已删掉旧版本" not in out, "...and nothing is claimed")
+
+    out, exists, left = run({}, data)
+    check(not exists and "HARNESS-DONE" in out, "a machine that never had one does not get a .hermes folder")
+
+
 if __name__ == "__main__":
     test_each_home_on_the_stick_keeps_its_locks_there_too()
     test_every_launcher_that_runs_the_engine_sets_a_home()
     test_every_way_into_the_engine_prunes_first()
     test_the_engine_reads_that_variable()
+    test_nothing_of_ours_goes_into_the_hosts_hermes()
+    test_the_menu_cleans_up_by_the_same_rules()
+    test_old_copies_are_taken_away()
     print("")
     if FAILURES:
         print("%d check(s) failed" % len(FAILURES))

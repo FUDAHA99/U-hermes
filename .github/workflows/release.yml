@@ -435,6 +435,18 @@ jobs:
             '      port: 8642',
             '      host: 127.0.0.1'
           ) | Set-Content (Join-Path $work "data\config.yaml") -Encoding ascii
+          # A copy of the keys as v0.4.2-v0.4.7 left one on a machine that had
+          # its own Hermes: ours marked, the machine's own config moved aside.
+          # From v0.4.8 the launcher puts nothing into %USERPROFILE%\.hermes and
+          # takes this away. Checked while the Web UI is up: a launcher that
+          # copied the keys and removed them on exit would pass a check made
+          # afterwards.
+          $hostHermes = Join-Path $env:USERPROFILE ".hermes"
+          New-Item -ItemType Directory -Force $hostHermes | Out-Null
+          Set-Content (Join-Path $hostHermes ".u-hermes-mirror") "u-hermes" -Encoding ascii
+          Set-Content (Join-Path $hostHermes "config.yaml") "model: old-copy  # ci-old-copy-not-a-key" -Encoding ascii
+          Set-Content (Join-Path $hostHermes ".env") "OLD_COPY_API_KEY=ci-old-copy-not-a-key" -Encoding ascii
+          Set-Content (Join-Path $hostHermes "config.yaml.before-u-hermes") "model: machine-own" -Encoding ascii
           $startOut = Join-Path $env:RUNNER_TEMP "start.out"
           $startErr = Join-Path $env:RUNNER_TEMP "start.err"
           $noInput = Join-Path $env:RUNNER_TEMP "no-input.txt"
@@ -450,6 +462,16 @@ jobs:
               $r = Invoke-WebRequest -Uri "http://127.0.0.1:8648" -UseBasicParsing -TimeoutSec 3
               if ($r.StatusCode -eq 200) { $up = $true; break }
             } catch {}
+          }
+          $hostProblems = @()
+          if ($up) {
+            $leaked = @(Get-ChildItem $hostHermes -Recurse -File -Force -ErrorAction SilentlyContinue |
+              Select-String -SimpleMatch -Pattern "ci-placeholder-not-a-key", "ci-old-copy-not-a-key" -List)
+            if ($leaked.Count) { $hostProblems += "a key in the host's .hermes while running: " + (($leaked | ForEach-Object { $_.Path }) -join ", ") }
+            if (Test-Path (Join-Path $hostHermes ".u-hermes-mirror")) { $hostProblems += "the old copy's marker is still there" }
+            if (Test-Path (Join-Path $hostHermes ".env")) { $hostProblems += "a .env is there" }
+            $cfg = "$(Get-Content (Join-Path $hostHermes 'config.yaml') -Raw -ErrorAction SilentlyContinue)".Trim()
+            if ($cfg -ne "model: machine-own") { $hostProblems += "the machine's own config.yaml was not put back" }
           }
           # Stop the server the way a user's Ctrl+C does, so the launcher runs
           # its own shutdown path too; then sweep up whatever it started.
@@ -470,7 +492,10 @@ jobs:
             Write-Error "Windows-Start.bat never reached its launch banner"; exit 1
           }
           if (-not $up) { Write-Error "Windows-Start.bat did not bring the Web UI up on 8648 within 120s"; exit 1 }
+          if ($hostProblems.Count) { Write-Error ("%USERPROFILE%\.hermes during the run: " + ($hostProblems -join "; ")); exit 1 }
+          if ($log -notmatch [regex]::Escape("已删掉旧版本")) { Write-Error "Windows-Start.bat did not say it took the old copy away"; exit 1 }
           Write-Host "Windows-Start.bat, as shipped, started the Web UI and shut down cleanly."
+          Write-Host "It put nothing of the user's into %USERPROFILE%\.hermes, and took an old version's copy away."
 
           Write-Host "Packaged artifact verified."
 

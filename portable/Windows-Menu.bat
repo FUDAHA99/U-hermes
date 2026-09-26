@@ -33,7 +33,7 @@ echo   [4] 打开配置页面
 echo   [5] 模型设置 (hermes model)
 echo   [6] 一键诊断
 echo   [7] 清理聊天记录（释放 U 盘空间）
-echo   [8] 清理本机残留（在别人电脑上用完后执行）
+echo   [8] 清理旧版本留在本机的配置副本
 echo   [9] 更新 Hermes
 echo   [0] 退出
 echo.
@@ -217,26 +217,42 @@ pause
 goto MENU
 
 :CLEANUP
+:: From v0.4.8 on, nothing of ours goes into %USERPROFILE%\.hermes, and
+:: Windows-Start.bat takes away what an older version left there each time it
+:: starts. This is the same, on demand -- the same rules, so keep the two in
+:: step: a copy marked .u-hermes-mirror (v0.4.2 to v0.4.7, with this machine's
+:: own files moved aside as *.before-u-hermes) and an unmarked one that is
+:: byte-identical to ours (v0.3.5 to v0.4.1).
 echo.
-echo   正在清理本机 %USERPROFILE%\.hermes 下的配置副本...
+echo   从 v0.4.8 起，U-Hermes 不再往这台电脑放配置和密钥。
+echo   这里清理的是旧版本留在 %USERPROFILE%\.hermes 的副本...
 set "USER_HERMES_DIR=%USERPROFILE%\.hermes"
 set "MIRROR_MARK=%USER_HERMES_DIR%\.u-hermes-mirror"
-if not exist "%MIRROR_MARK%" (
-    echo   [OK] 本机上没有 U-Hermes 留下的副本。
-    echo.
-    pause
-    goto MENU
-)
+set "_OLD_COPY="
+if not exist "%MIRROR_MARK%" goto :CLEANUP_UNMARKED
 del /Q "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
 del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
 if exist "%USER_HERMES_DIR%\config.yaml.before-u-hermes" move /Y "%USER_HERMES_DIR%\config.yaml.before-u-hermes" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
 if exist "%USER_HERMES_DIR%\.env.before-u-hermes" move /Y "%USER_HERMES_DIR%\.env.before-u-hermes" "%USER_HERMES_DIR%\.env" >nul 2>&1
 del /Q "%MIRROR_MARK%" >nul 2>&1
-echo   [OK] 已删除 U-Hermes 放在本机的 config.yaml 和 .env。
+set "_OLD_COPY=1"
+:CLEANUP_UNMARKED
+if not exist "%USER_HERMES_DIR%\config.yaml" goto :CLEANUP_REPORT
+fc /B "%USER_HERMES_DIR%\config.yaml" "%SCRIPT_DIR%\data\config.yaml" >nul 2>&1
+if errorlevel 1 goto :CLEANUP_REPORT
+del /Q "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
+fc /B "%USER_HERMES_DIR%\.env" "%SCRIPT_DIR%\data\.env" >nul 2>&1
+if not errorlevel 1 del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
+set "_OLD_COPY=1"
+:CLEANUP_REPORT
+rd "%USER_HERMES_DIR%" >nul 2>&1
+if defined _OLD_COPY echo   [OK] 已删除旧版本放在本机的 config.yaml 和 .env。
+if not defined _OLD_COPY echo   [OK] 本机上没有 U-Hermes 留下的副本。
 echo.
-:: Only those two files are ours. Anything else in that folder belongs to a
+:: Only those files are ours. Anything else in that folder belongs to a
 :: Hermes this machine had of its own -- deleting it would be destroying
 :: someone else's data -- so report it instead of guessing.
+if not exist "%USER_HERMES_DIR%" goto :CLEANUP_END
 set "_LEFT=0"
 for /f %%N in ('dir /b /a "%USER_HERMES_DIR%" 2^>nul ^| find /c /v ""') do set "_LEFT=%%N"
 if not "%_LEFT%"=="0" (
@@ -245,6 +261,7 @@ if not "%_LEFT%"=="0" (
     echo       如果这台电脑自己装过 Hermes，那些是它的数据；
     echo       确认不需要的话可以手动删掉整个文件夹。
 )
+:CLEANUP_END
 echo.
 pause
 goto MENU
