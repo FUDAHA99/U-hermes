@@ -252,9 +252,14 @@ fi
 # Up to v0.4.7 this copied data/config.yaml and data/.env -- the user's API
 # keys -- over ~/.hermes/config.yaml and ~/.hermes/.env on every run, without
 # setting the machine's own files aside and without ever taking them away.
-# Its premise, that the Web UI's GatewayManager overrode HERMES_HOME, was
-# withdrawn long ago: every process started here gets HERMES_HOME above, and
-# the Web UI hands it on to every Hermes process it starts.
+# On macOS ~/.hermes is the engine's default home, so any Hermes on that Mac
+# then ran on the stick owner's keys. Its premise, that the Web UI's
+# GatewayManager overrode HERMES_HOME, was withdrawn long ago: every process
+# started here gets HERMES_HOME above, and the Web UI hands it on. What older
+# versions left is removed here; the rules are in the script.
+if [ -x "$VENV_PYTHON" ]; then
+    "$VENV_PYTHON" "$SCRIPT_DIR/scripts/remove-old-host-copy.py" "$DATA_DIR" || true
+fi
 
 # --- Step 1: Kill leftover gateway processes ---
 lsof -ti:8642 2>/dev/null | xargs kill -9 2>/dev/null

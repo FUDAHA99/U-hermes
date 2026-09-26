@@ -259,6 +259,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "prune stale files test failed"; exit 1 }
           & $py scripts/tests/test_batch_parse.py
           if ($LASTEXITCODE -ne 0) { Write-Error "batch parse test failed"; exit 1 }
+          & $py scripts/tests/test_remove_old_host_copy.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "remove old host copy test failed"; exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test_protect_config.ps1
           if ($LASTEXITCODE -ne 0) { Write-Error "protect-config test failed"; exit 1 }
           # tools/ is not packaged, but this one guards the target of a sync,
@@ -668,6 +670,7 @@ jobs:
           "$PY" scripts/tests/test_upstream_tweaks.py
           "$PY" scripts/tests/test_launcher_env.py
           "$PY" scripts/tests/test_prune_stale_files.py
+          "$PY" scripts/tests/test_remove_old_host_copy.py
 
           echo "=== [5/5] Web UI server starts and answers HTTP ==="
           SERVER=$(find runtime/node-mac-arm64 -path '*hermes-web-ui/dist/server/index.js' | head -1)

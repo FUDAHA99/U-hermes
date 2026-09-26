@@ -173,12 +173,13 @@ def test_the_engine_reads_that_variable():
 # the Web UI hands HERMES_HOME to every Hermes process it starts. The only
 # reader was a Hermes the machine's owner installed, which then ran on the
 # stick owner's keys; and [X] or a pulled stick left the keys behind.
-HOST_HERMES = r'(%USER_HERMES_DIR%|%USERPROFILE%\\\.hermes|\$USER_HERMES_DIR|\$HOME/\.hermes|~/\.hermes)'
+HOST_HERMES = (r'(%USER_HERMES_DIR%|!USER_HERMES_DIR!|%USERPROFILE%\\\.hermes|!USERPROFILE!\\\.hermes'
+               r'|\$\{?USER_HERMES_DIR\}?|\$\{?HOME\}?/\.hermes|~/\.hermes)')
 PUTS_THERE = [
     re.compile(r'\b(?:copy|xcopy|robocopy|cp)\s+.*' + HOST_HERMES, re.I),
     re.compile(r'>>?\s*"?' + HOST_HERMES, re.I),
     re.compile(r'>>?\s*"?%MIRROR_MARK%', re.I),
-    re.compile(r'\bmkdir\b.*' + HOST_HERMES, re.I),
+    re.compile(r'\b(?:mkdir|md)\b.*' + HOST_HERMES, re.I),
 ]
 
 
@@ -205,118 +206,57 @@ def test_nothing_of_ours_goes_into_the_hosts_hermes():
                'echo u-hermes> "%MIRROR_MARK%"',
                'if not exist "%USER_HERMES_DIR%" mkdir "%USER_HERMES_DIR%" 2>nul',
                'cp -f "$DATA_DIR/config.yaml" "$USER_HERMES_DIR/config.yaml" 2>/dev/null',
-               '[ -f "$DATA_DIR/.env" ] && cp -f "$DATA_DIR/.env" "$USER_HERMES_DIR/.env" 2>/dev/null']
+               '[ -f "$DATA_DIR/.env" ] && cp -f "$DATA_DIR/.env" "$USER_HERMES_DIR/.env" 2>/dev/null',
+               # and spellings a later change might use
+               'md "%USER_HERMES_DIR%"',
+               'copy /Y "%DATA_DIR%\\.env" "!USER_HERMES_DIR!\\.env"',
+               'cp "$DATA_DIR/.env" "${HOME}/.hermes/.env"']
     check(all(any(r.search(l) for r in PUTS_THERE) for l in shipped),
           "(the rule catches every line v0.4.7 used to make the copy)")
 
 
-def _routine(name, first, last):
-    """The lines of a batch routine, from the line starting with `first`
-    through the first line equal to `last`."""
-    lines = read_lines(name)
-    a = next(i for i, l in enumerate(lines) if l.startswith(first))
-    z = next(i for i in range(a, len(lines)) if lines[i].strip() == last)
-    return lines[a:z + 1]
+def _first(lines, needle, start=0):
+    """First line at or after `start` that mentions `needle` outside a comment."""
+    return next((i for i in range(start, len(lines))
+                 if needle in lines[i] and not lines[i].lstrip().startswith(("::", "#", "rem "))),
+                None)
 
 
-def _core(lines, data):
-    """What the cleanup does, with the data dir spelled one way."""
-    out = []
-    for l in lines:
-        s = l.strip().replace(data, "<DATA>")
-        if s.startswith(("del ", "move ", "fc ", "rd ", "if exist", "if not errorlevel", "if errorlevel")):
-            out.append(re.sub(r"goto :?\S+", "goto <label>", s))
-    return out
+def test_old_copies_are_taken_away_first():
+    """Every launcher runs scripts/remove-old-host-copy.py, and the main one
+    runs it before anything can skip it or change what it compares against.
 
+    A first, batch-file version of the cleanup sat after the CLI branch
+    (menu [2] never reached it) and after protect-config.ps1, which rewrites
+    data\\config.yaml -- so an old copy of it no longer matched and stayed.
+    """
+    print("each launcher takes away what older versions left, early enough")
+    script = "remove-old-host-copy.py"
+    start = read_lines("Windows-Start.bat")
+    call = _first(start, script)
+    check(call is not None and not start[call].lstrip().startswith("::"),
+          "Windows-Start.bat runs %s" % script)
+    if call is not None:
+        for needle, what in (("protect-config.ps1", "protect-config.ps1 rewrites data\\config.yaml"),
+                             ('if not "%~1"==""', "the CLI branch (menu [2], shortcuts with arguments)"),
+                             ("setup.ps1", "the first-run install and its early exits"),
+                             ("preflight.py", "the pre-flight exits")):
+            later = _first(start, needle)
+            check(later is not None and call < later, "...before %s" % what)
+        check("(" not in start[call].split(script)[0].split('"%RUNTIME_DIR%')[0],
+              "...on one line, not in a ( ) block a ')' in the install path would break")
+    menu = read_lines("Windows-Menu.bat")
+    at = _first(menu, ":CLEANUP")
+    run = _first(menu, script, at or 0)
+    check(at is not None and run is not None and "--report" in menu[run],
+          "Windows-Menu.bat [8] runs it with --report")
+    body = menu[at:_first(menu, "goto MENU", at)] if at is not None else []
+    check(not any("%USER_HERMES_DIR%" in l or "%USERPROFILE%" in l for l in body
+                  if l.lstrip().lower().startswith("echo")),
+          "...and echoes no path itself (a ')' or '&' in the user name broke that)")
+    mac = read_lines("Mac-Start.command")
+    check(_first(mac, script) is not None, "Mac-Start.command runs it")
 
-def test_the_menu_cleans_up_by_the_same_rules():
-    print("Windows-Menu.bat [8] and the launcher take away the same old copies")
-    start = _routine("Windows-Start.bat", ":remove_old_copy", "goto :eof")
-    menu = _routine("Windows-Menu.bat", ":CLEANUP", 'rd "%USER_HERMES_DIR%" >nul 2>&1')
-    a = _core(start, "%DATA_DIR%")
-    b = _core(menu, "%SCRIPT_DIR%\\data")
-    check(len(a) >= 10 and a == b, "same steps in the same order (%d vs %d)" % (len(a), len(b)))
-    if a != b:
-        for x, y in zip(a, b):
-            if x != y:
-                print("       start: %s\n       menu:  %s" % (x, y))
-
-
-def test_old_copies_are_taken_away():
-    """Run the launcher's own :remove_old_copy against a fake home."""
-    print("an old version's copy is taken away; the machine's own files are not")
-    if os.name != "nt":
-        check(True, "skip: needs cmd.exe")
-        return
-    import shutil
-    import subprocess
-    routine = _routine("Windows-Start.bat", ":: --- Take away a copy", "goto :eof")
-
-    def run(files, data_files):
-        root = tempfile.mkdtemp(prefix="uh-oldcopy-")
-        try:
-            home, data = os.path.join(root, "home"), os.path.join(root, "data")
-            os.makedirs(data)
-            for rel, text in data_files.items():
-                with open(os.path.join(data, rel), "w", encoding="utf-8") as f:
-                    f.write(text)
-            for rel, text in files.items():
-                path = os.path.join(home, ".hermes", rel)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(text)
-            bat = os.path.join(root, "harness.bat")
-            body = ["@echo off", "chcp 65001 >nul", "setlocal enabledelayedexpansion",
-                    'set "USERPROFILE=%s"' % home, 'set "DATA_DIR=%s"' % data,
-                    'set "USER_HERMES_DIR=%USERPROFILE%\\.hermes"',
-                    'set "MIRROR_MARK=%USER_HERMES_DIR%\\.u-hermes-mirror"',
-                    "call :remove_old_copy", "echo HARNESS-DONE", "exit /b 0", ""] + routine
-            with open(bat, "wb") as f:
-                f.write(("\r\n".join(body) + "\r\n").encode("utf-8"))
-            r = subprocess.run(["cmd", "/d", "/c", bat], capture_output=True,
-                               stdin=subprocess.DEVNULL, timeout=60)
-            out = (r.stdout + r.stderr).decode("utf-8", errors="replace")
-            left = {}
-            hdir = os.path.join(home, ".hermes")
-            if os.path.isdir(hdir):
-                for dp, _dn, fn in os.walk(hdir):
-                    for n in fn:
-                        p = os.path.join(dp, n)
-                        with open(p, encoding="utf-8") as f:
-                            left[os.path.relpath(p, hdir).replace("\\", "/")] = f.read()
-            return out, os.path.isdir(hdir), left
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    data = {"config.yaml": "model: current\n", ".env": "CURRENT_API_KEY=sk-current\n"}
-
-    out, exists, left = run({".u-hermes-mirror": "u-hermes\n", "config.yaml": "model: old-copy\n",
-                             ".env": "OLD_API_KEY=sk-old-copy\n",
-                             "config.yaml.before-u-hermes": "model: machine-own\n",
-                             ".env.before-u-hermes": "MACHINE_API_KEY=sk-machine\n",
-                             "sessions/keep.json": "{}"}, data)
-    check("HARNESS-DONE" in out, "the routine runs to the end (%s)" % out.strip()[-120:])
-    check(left == {"config.yaml": "model: machine-own\n", ".env": "MACHINE_API_KEY=sk-machine\n",
-                   "sessions/keep.json": "{}"},
-          "a marked copy (v0.4.2-v0.4.7) goes; the machine's own files come back (%s)" % sorted(left))
-    check("sk-old-copy" not in "".join(left.values()), "...and no trace of the old copy's key")
-    check("已删掉旧版本" in out, "...and the user is told")
-
-    out, exists, left = run({".u-hermes-mirror": "u-hermes\n", "config.yaml": "model: old-copy\n",
-                             ".env": "OLD_API_KEY=sk-old-copy\n"}, data)
-    check(not exists, "a marked copy on a machine with no Hermes of its own leaves no folder behind")
-
-    out, exists, left = run({"config.yaml": data["config.yaml"], ".env": data[".env"]}, data)
-    check(not exists, "an unmarked copy byte-identical to ours (v0.3.5-v0.4.1) goes too")
-    check("已删掉旧版本" in out, "...and the user is told")
-
-    own = {"config.yaml": "model: machine-own\n", ".env": "MACHINE_API_KEY=sk-machine\n"}
-    out, exists, left = run(dict(own), data)
-    check(left == own, "a Hermes this machine has of its own is left alone (%s)" % sorted(left))
-    check("已删掉旧版本" not in out, "...and nothing is claimed")
-
-    out, exists, left = run({}, data)
-    check(not exists and "HARNESS-DONE" in out, "a machine that never had one does not get a .hermes folder")
 
 
 if __name__ == "__main__":
@@ -325,8 +265,7 @@ if __name__ == "__main__":
     test_every_way_into_the_engine_prunes_first()
     test_the_engine_reads_that_variable()
     test_nothing_of_ours_goes_into_the_hosts_hermes()
-    test_the_menu_cleans_up_by_the_same_rules()
-    test_old_copies_are_taken_away()
+    test_old_copies_are_taken_away_first()
     print("")
     if FAILURES:
         print("%d check(s) failed" % len(FAILURES))

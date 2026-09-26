@@ -238,11 +238,14 @@ component exists — on Windows the engine falls back to
 `HERMES_HOME` to every Hermes process it starts. The only thing that ever
 read the copy was a Hermes the machine's owner had installed, which then ran
 on your keys, and closing the window with [X] left the copy behind. From
-v0.4.8 nothing is copied. The first launch of v0.4.8 on a machine takes away
-what an older version left there, and `Windows-Menu.bat` → `[8]` does it on
-demand: it removes only the copy those versions made, puts back any files of
-the machine's own that they moved aside, and reports anything else it finds
-rather than assuming it is ours.
+v0.4.8 nothing is copied. Every launch of v0.4.8 takes away what an older
+version left on that machine (`scripts/remove-old-host-copy.py`), and
+`Windows-Menu.bat` → `[8]` does it on demand. It removes a file only when it
+can prove the file is ours: the old versions' marker says so, or its bytes
+are exactly a config or `.env` this stick has had — now, in `data\backups`,
+or with the block v0.3.5–v0.4.1 appended. It puts back any files of the
+machine's own that those versions moved aside, and a config that merely
+looks like ours is reported, never deleted.
 
 **3. Package caches, on builds before this one.** npm and uv cache downloads
 under `%LOCALAPPDATA%` by default, so earlier versions left a few hundred MB
