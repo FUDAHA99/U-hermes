@@ -215,11 +215,15 @@ def test_nothing_of_ours_goes_into_the_hosts_hermes():
           "(the rule catches every line v0.4.7 used to make the copy)")
 
 
+def _is_comment(line):
+    s = line.lstrip().lower()
+    return s.startswith(("::", "#")) or s == "rem" or s.startswith("rem ")
+
+
 def _first(lines, needle, start=0):
     """First line at or after `start` that mentions `needle` outside a comment."""
     return next((i for i in range(start, len(lines))
-                 if needle in lines[i] and not lines[i].lstrip().startswith(("::", "#", "rem "))),
-                None)
+                 if needle in lines[i] and not _is_comment(lines[i])), None)
 
 
 def test_old_copies_are_taken_away_first():
@@ -243,7 +247,8 @@ def test_old_copies_are_taken_away_first():
                              ("preflight.py", "the pre-flight exits")):
             later = _first(start, needle)
             check(later is not None and call < later, "...before %s" % what)
-        check("(" not in start[call].split(script)[0].split('"%RUNTIME_DIR%')[0],
+        opener = next((l for l in reversed(start[:call]) if l.strip() and not _is_comment(l)), "")
+        check(start[call].lstrip().lower().startswith("if exist") and not opener.rstrip().endswith("("),
               "...on one line, not in a ( ) block a ')' in the install path would break")
     menu = read_lines("Windows-Menu.bat")
     at = _first(menu, ":CLEANUP")
@@ -255,7 +260,24 @@ def test_old_copies_are_taken_away_first():
                   if l.lstrip().lower().startswith("echo")),
           "...and echoes no path itself (a ')' or '&' in the user name broke that)")
     mac = read_lines("Mac-Start.command")
-    check(_first(mac, script) is not None, "Mac-Start.command runs it")
+    at = _first(mac, script)
+    check(at is not None, "Mac-Start.command runs it")
+    if at is not None:
+        for needle, what in (("if [ $# -gt 0 ]", "the CLI branch"),
+                             ("exit 0", "the 'not configured' exit"),
+                             ("setup.sh", "is fine after setup, which it needs")):
+            later = _first(mac, needle)
+            if what.startswith("is fine"):
+                check(later is not None and later < at, "...after setup.sh, whose venv it runs on")
+            else:
+                check(later is not None and at < later, "...before %s" % what)
+    # A bot-only user may never run anything but the gateway launcher.
+    for name in ("Windows-Gateway.bat", "debug.bat"):
+        lines = read_lines(name)
+        at = _first(lines, script)
+        engine = next((i for i, l in enumerate(lines) if ENGINE_CALL.search(l) and not _is_comment(l)), None)
+        check(at is not None and (engine is None or at < engine),
+              "%s runs it before the engine starts" % name)
 
 
 

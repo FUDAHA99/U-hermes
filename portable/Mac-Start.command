@@ -72,6 +72,21 @@ if ! venv_python_works; then
 fi
 
 # ============================================================================
+# Take away the copy of the user's keys an older version left on this Mac
+# ============================================================================
+# Up to v0.4.7 this launcher copied data/config.yaml and data/.env -- the API
+# keys -- over ~/.hermes/config.yaml and ~/.hermes/.env on every run, without
+# setting the machine's own files aside and without ever taking them away. On
+# macOS ~/.hermes is the engine's default home, so any Hermes on that Mac then
+# ran on the stick owner's keys. Its premise, that the Web UI's GatewayManager
+# overrode HERMES_HOME, was withdrawn long ago: every process started here
+# gets HERMES_HOME, and the Web UI hands it on. Nothing is copied any more;
+# this removes what older versions left (the rules are in the script). First
+# thing after the venv is known to work, so the CLI branch and the
+# "not configured" exit below cannot skip it.
+"$VENV_PYTHON" "$SCRIPT_DIR/scripts/remove-old-host-copy.py" "$DATA_DIR" || true
+
+# ============================================================================
 # Fix stale paths in portable venv (first run on new machine)
 # ============================================================================
 
@@ -248,18 +263,7 @@ if [ $# -gt 0 ]; then
     exit $?
 fi
 
-# --- Nothing of ours goes into ~/.hermes ---
-# Up to v0.4.7 this copied data/config.yaml and data/.env -- the user's API
-# keys -- over ~/.hermes/config.yaml and ~/.hermes/.env on every run, without
-# setting the machine's own files aside and without ever taking them away.
-# On macOS ~/.hermes is the engine's default home, so any Hermes on that Mac
-# then ran on the stick owner's keys. Its premise, that the Web UI's
-# GatewayManager overrode HERMES_HOME, was withdrawn long ago: every process
-# started here gets HERMES_HOME above, and the Web UI hands it on. What older
-# versions left is removed here; the rules are in the script.
-if [ -x "$VENV_PYTHON" ]; then
-    "$VENV_PYTHON" "$SCRIPT_DIR/scripts/remove-old-host-copy.py" "$DATA_DIR" || true
-fi
+# Nothing of ours goes into ~/.hermes any more: see the cleanup near the top.
 
 # --- Step 1: Kill leftover gateway processes ---
 lsof -ti:8642 2>/dev/null | xargs kill -9 2>/dev/null

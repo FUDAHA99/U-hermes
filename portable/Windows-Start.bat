@@ -51,9 +51,10 @@ set "WEBUI_SERVER=%NODE_DIR%\node_modules\hermes-web-ui\dist\server\index.js"
 :: our env". No such component exists: on Windows the engine falls back to
 :: %LOCALAPPDATA%\hermes, never ~/.hermes, and the Web UI hands HERMES_HOME
 :: to every Hermes process it starts. The one program that read the copy was
-:: a Hermes the machine's owner installed, running on the stick owner's keys,
-:: and [X] or a pulled stick left it behind. Nothing is copied any more; this
-:: removes what older versions left (the rules are in the script).
+:: a Hermes the machine's owner installed, running on the stick owner's keys.
+:: v0.3.5-v0.4.1 never took the copy away; v0.4.2-v0.4.7 did on a clean exit
+:: but not after [X], a pulled stick or Ctrl+C then Y. Nothing is copied any
+:: more; this removes what older versions left (the rules are in the script).
 ::
 :: First thing, deliberately: before the CLI branch and the early exits below
 :: can skip it, and before protect-config.ps1 rewrites data\config.yaml --

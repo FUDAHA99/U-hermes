@@ -229,23 +229,30 @@ never touch it, and neither does deleting the install folder. The launcher
 prints the path on every start. Your own files are in there, so delete it
 separately, once you are sure.
 
-**2. A config copy left by v0.4.7 or earlier.** Those versions mirrored
+**2. A config copy left by v0.4.7 or earlier.** Those versions copied
 `config.yaml` and `.env` (which holds your API key) into
-`%USERPROFILE%\.hermes\` for the length of every run, "so that any component
-started without our environment still finds a working config". No such
-component exists — on Windows the engine falls back to
+`%USERPROFILE%\.hermes\` (Mac: `~/.hermes/`) on every run, "so that any
+component started without our environment still finds a working config". No
+such component exists — on Windows the engine falls back to
 `%LOCALAPPDATA%\hermes`, never `~/.hermes`, and the Web UI passes
 `HERMES_HOME` to every Hermes process it starts. The only thing that ever
 read the copy was a Hermes the machine's owner had installed, which then ran
-on your keys, and closing the window with [X] left the copy behind. From
-v0.4.8 nothing is copied. Every launch of v0.4.8 takes away what an older
-version left on that machine (`scripts/remove-old-host-copy.py`), and
-`Windows-Menu.bat` → `[8]` does it on demand. It removes a file only when it
-can prove the file is ours: the old versions' marker says so, or its bytes
-are exactly a config or `.env` this stick has had — now, in `data\backups`,
-or with the block v0.3.5–v0.4.1 appended. It puts back any files of the
-machine's own that those versions moved aside, and a config that merely
-looks like ours is reported, never deleted.
+on your keys. Windows v0.3.5–v0.4.1 and every Mac version never took the copy
+away; v0.4.2–v0.4.7 did on a clean exit, but not after [X], a pulled stick,
+or Ctrl+C answered with Y.
+
+From v0.4.8 nothing is copied, and `scripts/remove-old-host-copy.py` takes
+away what older versions left — at the start of `Windows-Start.bat`,
+`Windows-Gateway.bat`, `debug.bat` and `Mac-Start.command`, and on demand
+from `Windows-Menu.bat` → `[8]`. It removes a file only when it can prove the
+file is ours: the old versions' marker vouches for it, or its bytes are
+exactly a config or `.env` this stick has had — now, beside it
+(`config.yaml.*`, `.env.*`), in `data\backups`, or with the block the old
+launchers appended. It puts back the machine's own files those versions moved
+aside, unless they look like ours; keeps the marker, and tries again next
+time, if something cannot be removed; never touches a `~/.hermes` that is
+linked to the stick's own data; and reports, never deletes, a config that
+only looks like ours and any `.env` left beside one.
 
 **3. Package caches, on builds before this one.** npm and uv cache downloads
 under `%LOCALAPPDATA%` by default, so earlier versions left a few hundred MB
