@@ -41,6 +41,27 @@ UNKNOWN = "unknown"
 FIXABLE_IN_CONFIG = (AUTH, NOT_FOUND, BAD_REQUEST)
 
 
+def _package_version():
+    """The VERSION file at the package root ("v0.4.7" -> "0.4.7"), or ""."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+    try:
+        with open(path, encoding="utf-8") as f:
+            found = f.read().strip().lstrip("v")
+    except (OSError, ValueError):
+        return ""
+    return found if re.fullmatch(r"[0-9A-Za-z.+-]{1,32}", found) else ""
+
+
+# Who is asking. urllib's own name, "Python-urllib/3.x", is on Cloudflare's
+# list of bot signatures: opencode.ai (OpenCode Zen and Go) answers it with
+# 403 "error code: 1010" before looking at the key, and the launcher took
+# that for a bad key and refused to start with a key the engine uses fine --
+# the engine's HTTP client never sends urllib's name. On 2026-09-26 the other
+# twelve addresses the config page offers or users run answered this name
+# and urllib's identically.
+USER_AGENT = "U-Hermes/" + (_package_version() or "dev")
+
+
 class Result(object):
     __slots__ = ("ok", "kind", "message", "http_code")
 
@@ -84,6 +105,7 @@ def build_request(base_url, api_key, model):
                 "Content-Type": "application/json",
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
+                "User-Agent": USER_AGENT,
             },
             "content",
         )
@@ -97,6 +119,7 @@ def build_request(base_url, api_key, model):
         {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + (api_key or ""),
+            "User-Agent": USER_AGENT,
         },
         "choices",
     )

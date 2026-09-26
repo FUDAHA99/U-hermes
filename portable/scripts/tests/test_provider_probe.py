@@ -46,6 +46,7 @@ class _Scripted(http.server.BaseHTTPRequestHandler):
     status = 200
     body = b"{}"
     seen = {}
+    banned_agent = ""   # a User-Agent prefix to turn away, as Cloudflare does
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -55,11 +56,15 @@ class _Scripted(http.server.BaseHTTPRequestHandler):
             "headers": {k.lower(): v for k, v in self.headers.items()},
             "body": json.loads(raw.decode("utf-8")) if raw else {},
         }
-        self.send_response(_Scripted.status)
+        status, body = _Scripted.status, _Scripted.body
+        agent = self.headers.get("User-Agent") or ""
+        if _Scripted.banned_agent and agent.startswith(_Scripted.banned_agent):
+            status, body = 403, b"error code: 1010"
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(_Scripted.body)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(_Scripted.body)
+        self.wfile.write(body)
 
     def log_message(self, fmt, *args):
         pass
@@ -694,6 +699,40 @@ def test_env_names_ignore_case_on_windows():
           "of two lines differing only in case the later wins, as in os.environ -- even over an exact-case empty one")
 
 
+def test_the_probe_does_not_call_itself_urllib():
+    """opencode.ai (OpenCode Zen and Go) sits behind Cloudflare, which turns
+    away urllib's default "Python-urllib/3.x" with 403 "error code: 1010"
+    before the key is read. The probe reported that as a bad key, and the
+    launcher refused to start with a key the engine uses fine.
+    """
+    srv, url = serve()
+    try:
+        _Scripted.banned_agent = "Python-urllib"
+        respond(200, GOOD)
+        r = pp.probe(url, "sk-test", "deepseek-v4-pro", timeout=5)
+        agent = _Scripted.seen["headers"].get("user-agent", "")
+        check(r.ok, "a front door that bans urllib's name lets the probe in (%s)" % r.message)
+        check(agent.startswith("U-Hermes/"), "...because it names itself (%s)" % agent)
+        pp.probe(url.replace("/v1", "/anthropic"), "sk-test", "m", timeout=5)
+        check(_Scripted.seen["headers"].get("user-agent") == agent,
+              "the Anthropic surface sends the same name")
+        # The door itself, so the checks above cannot pass by accident.
+        import urllib.error
+        import urllib.request
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                url + "/chat/completions", data=b"{}", method="POST"), timeout=5)
+            refused = False
+        except urllib.error.HTTPError as e:
+            refused = e.code == 403
+        check(refused, "(the test server does turn urllib's own name away)")
+    finally:
+        _Scripted.banned_agent = ""
+        srv.shutdown()
+    check(re.fullmatch(r"U-Hermes/[0-9A-Za-z.+-]+", pp.USER_AGENT) is not None,
+          "the name is plain ASCII with a version or 'dev' (%s)" % pp.USER_AGENT)
+
+
 def test_a_key_is_sent_the_way_the_engine_sends_it():
     # A zero-width space pasted in with the key, or a Chinese note after it:
     # the engine strips non-ASCII from keys on load, and the SDK encodes the
@@ -723,6 +762,7 @@ if __name__ == "__main__":
                test_an_empty_value_in_env_hides_the_process_one,
                test_a_working_provider,
                test_an_anthropic_surface_is_probed_differently,
+               test_the_probe_does_not_call_itself_urllib,
                test_every_status_gets_its_own_answer,
                test_400_used_to_be_a_shrug,
                test_the_key_never_comes_back_out,
