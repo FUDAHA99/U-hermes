@@ -439,6 +439,10 @@ jobs:
           ) | Set-Content (Join-Path $work "data\config.yaml") -Encoding ascii
           # A copy of the keys as v0.4.2-v0.4.7 left one on a machine that had
           # its own Hermes: ours marked, the machine's own config moved aside.
+          # Those launchers copied .env only when the stick had one, so this
+          # stick gets one too (a line that is no key at all); a marked .env on
+          # a stick that never had one is reported, not deleted.
+          Set-Content (Join-Path $work "data\.env") "CI_UNUSED=1" -Encoding ascii
           # From v0.4.8 the launcher puts nothing into %USERPROFILE%\.hermes and
           # takes this away. Checked while the Web UI is up: a launcher that
           # copied the keys and removed them on exit would pass a check made

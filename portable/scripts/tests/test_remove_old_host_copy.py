@@ -3,10 +3,11 @@
 Up to v0.4.7 every launch copied data\\config.yaml and data\\.env -- the API
 keys -- into %USERPROFILE%\\.hermes (Mac: ~/.hermes). v0.4.8 stopped, and
 scripts/remove-old-host-copy.py takes away what was left. Every case here is
-one two rounds of review found, reproduced, in an earlier version:
+one three rounds of review found, reproduced, in an earlier version:
 
-  * v0.3.5-v0.4.1 appended a platforms block to the copy, so it never
-    matched, and the .env with the keys was only looked at if it did;
+  * v0.3.5-v0.4.1 appended a platforms block to the copy when the config had
+    no platforms: line, so it often did not match -- and the .env with the
+    keys was only looked at if it did;
   * protect-config.ps1 rewrites data\\config.yaml before the cleanup ran;
   * v0.4.2-v0.4.7 stashed such a copy as "the machine's own" and the cleanup
     put it back, while saying it had removed it;
@@ -266,9 +267,10 @@ def test_a_copy_that_cannot_be_removed_keeps_its_marker():
 def test_a_marker_does_not_take_a_env_the_stick_never_had():
     print("marker, but the stick has never had a .env: the machine's .env stays")
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": OWN_ENV}, no_env=True)
-    code, out = c.run()
+    code, out = c.run("--report")
     check(c.left() == {".env": OWN_ENV}, "only the config goes (%s)" % sorted(c.left()))
-    check("[!]" not in out, "and the machine's .env is not called ours")
+    check("[!]" in out and ".env" in out.split("[!]", 1)[1] and "[OK]" not in out,
+          "but the .env is named: another stick may have left it")
     c.done()
 
 
@@ -398,6 +400,187 @@ def test_a_failure_does_not_stop_the_launch():
     check(r.returncode == 0, "exit %d (%s)" % (r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace").strip()[-80:]))
 
 
+def _readonly(path):
+    os.chmod(path, stat.S_IREAD)
+
+
+def _writable(path):
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+
+
+def _ro_blocks_delete(c):
+    probe = os.path.join(c.root, "ro-probe")
+    c.write(probe, b"x")
+    _readonly(probe)
+    try:
+        os.remove(probe)
+        return False
+    except OSError:
+        _writable(probe)
+        return True
+
+
+def test_the_env_stashed_with_a_proven_config_is_not_put_back():
+    print("config stash proven ours, .env stash beside it unprovable")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
+              "config.yaml.before-u-hermes": CONFIG_BEFORE_PROTECT + V041_TAIL,
+              ".env.before-u-hermes": OLD_ENV},
+             backups={"config.yaml.good.1": CONFIG_BEFORE_PROTECT})
+    code, out = c.run("--report")
+    check(c.left() == {".env.before-u-hermes": OLD_ENV}, "the old key is not made live again (%s)" % sorted(c.left()))
+    check(".env.before-u-hermes" in out and "放回原处" not in out and "[OK]" not in out, "it is reported instead")
+    c.done()
+
+
+def test_nothing_goes_back_while_the_marker_stays():
+    print("the marker itself cannot be removed: nothing is put back")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
+              "config.yaml.before-u-hermes": OWN_CONFIG})
+    if not _ro_blocks_delete(c):
+        check(True, "skip: this OS deletes read-only files anyway")
+        c.done()
+        return
+    _readonly(os.path.join(c.host, ".u-hermes-mirror"))
+    code, out = c.run()
+    check(c.left() == {".u-hermes-mirror": MARK, "config.yaml.before-u-hermes": OWN_CONFIG},
+          "copies gone, machine's config still set aside (%s)" % sorted(c.left()))
+    check("放回原处" not in out and "删不掉" in out, "and the user is told")
+    _writable(os.path.join(c.host, ".u-hermes-mirror"))
+    c.run()
+    check(c.left() == {"config.yaml": OWN_CONFIG}, "the next run puts it back (%s)" % sorted(c.left()))
+    c.done()
+
+
+def test_nothing_goes_back_while_a_proven_stash_is_stuck():
+    print("a proven .env stash cannot be removed: the machine's config waits too")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
+              "config.yaml.before-u-hermes": OWN_CONFIG, ".env.before-u-hermes": ENV})
+    if not _ro_blocks_delete(c):
+        check(True, "skip: this OS deletes read-only files anyway")
+        c.done()
+        return
+    _readonly(os.path.join(c.host, ".env.before-u-hermes"))
+    code, out = c.run()
+    check("config.yaml" not in c.left() and os.path.exists(os.path.join(c.host, ".u-hermes-mirror")),
+          "nothing restored, marker kept (%s)" % sorted(c.left()))
+    _writable(os.path.join(c.host, ".env.before-u-hermes"))
+    c.run()
+    check(c.left() == {"config.yaml": OWN_CONFIG}, "the next run finishes (%s)" % sorted(c.left()))
+    c.done()
+
+
+def test_a_kept_marker_vouches_only_for_what_is_left():
+    print("run 1 keeps the marker for a stuck .env; the machine writes a config; run 2")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
+    if not _ro_blocks_delete(c):
+        check(True, "skip: this OS deletes read-only files anyway")
+        c.done()
+        return
+    _readonly(os.path.join(c.host, ".env"))
+    c.run()
+    c.write(os.path.join(c.host, "config.yaml"), OWN_CONFIG)
+    _writable(os.path.join(c.host, ".env"))
+    c.run()
+    check(c.left() == {"config.yaml": OWN_CONFIG}, "the new config survives, the .env goes (%s)" % sorted(c.left()))
+    c.done()
+
+
+def test_the_old_block_alone_is_reported():
+    print("a copy with the old launchers' block that no longer matches anything")
+    c = Case({"config.yaml": b"model: long-gone\r\n" + V041_TAIL, ".env": OLD_ENV})
+    code, out = c.run("--report")
+    check(c.left() == {"config.yaml": b"model: long-gone\r\n" + V041_TAIL, ".env": OLD_ENV}, "nothing deleted")
+    check("config.yaml" in out and ".env" in out and "[OK]" not in out, "both reported, PC not called clean")
+    c.done()
+
+
+def test_a_lone_marker_is_not_called_a_key_copy():
+    print("only the marker is left")
+    c = Case({".u-hermes-mirror": MARK})
+    code, out = c.run()
+    check(not os.path.exists(c.host), "gone, folder too")
+    check("标记文件" in out and "密钥副本" not in out, "and described as what it was")
+    c.done()
+
+
+def test_the_report_counts_only_what_it_cannot_place():
+    print("[8] with a stuck copy and a stash of the machine's own")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
+              "config.yaml.before-u-hermes": OWN_CONFIG, "state.db": b"machine"})
+    if not _ro_blocks_delete(c):
+        check(True, "skip: this OS deletes read-only files anyway")
+        c.done()
+        return
+    _readonly(os.path.join(c.host, ".env"))
+    code, out = c.run("--report")
+    check("其余 1 项" in out, "only state.db counts as unplaced (%s)" % out.strip()[-160:])
+    check("别删" in out and "整个文件夹" not in out, "and the whole folder is not offered for deletion")
+    _writable(os.path.join(c.host, ".env"))
+    c.done()
+
+
+def test_no_content_even_when_restoring_or_stuck():
+    print("no file content when files are restored, stuck or flagged")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": b"K=sk-secret-stuck\n",
+              "config.yaml.before-u-hermes": b"api_key: sk-secret-machine\n"})
+    stuck = False
+    if _ro_blocks_delete(c):
+        _readonly(os.path.join(c.host, ".env"))
+        stuck = True
+    code, out1 = c.run("--report")
+    if stuck:
+        _writable(os.path.join(c.host, ".env"))
+    code, out2 = c.run("--report")
+    check("sk-" not in out1 + out2, "no key in any output")
+    c.done()
+
+
+def test_a_link_to_the_stick_spelled_differently_is_still_the_stick():
+    print("~/.hermes linked to the stick's data under a different case")
+    if os.name != "nt":
+        check(True, "skip: case-insensitive paths are tested on Windows")
+        return
+    c = Case({})
+    other_case = os.path.join(os.path.dirname(c.data), os.path.basename(c.data).upper())
+    if not junction(c.host, other_case):
+        check(True, "skip: could not create a junction here")
+        c.done()
+        return
+    c.run("--report")
+    check(c.left(c.data).get(".env") == ENV and c.left(c.data).get("config.yaml") == CONFIG,
+          "the stick's files are untouched")
+    os.rmdir(c.host)
+    c.done()
+
+
+def test_a_marked_env_alone_on_a_stick_without_one_is_named():
+    print("marker and a .env, no config, and this stick has never had a .env")
+    c = Case({".u-hermes-mirror": MARK, ".env": OWN_ENV}, no_env=True)
+    code, out = c.run("--report")
+    check(c.left() == {".env": OWN_ENV}, "kept (%s)" % sorted(c.left()))
+    check("[!]" in out and ".env" in out.split("[!]", 1)[1], "and named")
+    c.done()
+
+
+def test_the_stick_is_recognised_however_its_path_is_spelled():
+    print("the data dir given in another case, ~/.hermes linked to it")
+    if os.name != "nt":
+        check(True, "skip: case-insensitive paths are tested on Windows")
+        return
+    c = Case({})
+    if not junction(c.host, c.data):
+        check(True, "skip: could not create a junction here")
+        c.done()
+        return
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc.main(["remove-old-host-copy.py", c.data.upper(), "--home", c.home])
+    check(c.left(c.data).get(".env") == ENV and c.left(c.data).get("config.yaml") == CONFIG,
+          "the stick's files are untouched")
+    os.rmdir(c.host)
+    c.done()
+
+
 if __name__ == "__main__":
     for fn in (test_the_tails_are_what_the_old_launchers_wrote,
                test_a_marked_copy_goes_and_the_machines_own_comes_back,
@@ -421,6 +604,17 @@ if __name__ == "__main__":
                test_a_junction_is_never_removed,
                test_a_junction_to_the_sticks_own_data_is_left_alone,
                test_it_never_prints_a_key,
+               test_the_env_stashed_with_a_proven_config_is_not_put_back,
+               test_nothing_goes_back_while_the_marker_stays,
+               test_nothing_goes_back_while_a_proven_stash_is_stuck,
+               test_a_kept_marker_vouches_only_for_what_is_left,
+               test_the_old_block_alone_is_reported,
+               test_a_lone_marker_is_not_called_a_key_copy,
+               test_the_report_counts_only_what_it_cannot_place,
+               test_no_content_even_when_restoring_or_stuck,
+               test_a_link_to_the_stick_spelled_differently_is_still_the_stick,
+               test_a_marked_env_alone_on_a_stick_without_one_is_named,
+               test_the_stick_is_recognised_however_its_path_is_spelled,
                test_a_failure_does_not_stop_the_launch):
         fn()
     print()

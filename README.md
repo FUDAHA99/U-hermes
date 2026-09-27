@@ -249,8 +249,9 @@ file is ours: the old versions' marker vouches for it, or its bytes are
 exactly a config or `.env` this stick has had — now, beside it
 (`config.yaml.*`, `.env.*`), in `data\backups`, or with the block the old
 launchers appended. It puts back the machine's own files those versions moved
-aside, unless they look like ours; keeps the marker, and tries again next
-time, if something cannot be removed; never touches a `~/.hermes` that is
+aside, unless they look like ours -- and only once the marker is gone; keeps
+the marker, vouching only for what is left, and tries again next time, if
+something cannot be removed; never touches a `~/.hermes` that is
 linked to the stick's own data; and reports, never deletes, a config that
 only looks like ours and any `.env` left beside one.
 

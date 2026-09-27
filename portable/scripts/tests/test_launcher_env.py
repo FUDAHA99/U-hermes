@@ -216,8 +216,24 @@ def test_nothing_of_ours_goes_into_the_hosts_hermes():
 
 
 def _is_comment(line):
-    s = line.lstrip().lower()
+    s = line.lstrip().lower().lstrip("@")
     return s.startswith(("::", "#")) or s == "rem" or s.startswith("rem ")
+
+
+def _block_depth(lines, idx):
+    """How many ( ) blocks are open at line `idx`, by the layout these
+    launchers use: a block opens on a line ending in "(" and closes on a line
+    starting with ")" (test_batch_parse reads them the same way)."""
+    depth = 0
+    for line in lines[:idx]:
+        s = line.strip()
+        if not s or _is_comment(line):
+            continue
+        if s.startswith(")"):
+            depth -= 1
+        if s.endswith("("):
+            depth += 1
+    return depth
 
 
 def _first(lines, needle, start=0):
@@ -247,8 +263,7 @@ def test_old_copies_are_taken_away_first():
                              ("preflight.py", "the pre-flight exits")):
             later = _first(start, needle)
             check(later is not None and call < later, "...before %s" % what)
-        opener = next((l for l in reversed(start[:call]) if l.strip() and not _is_comment(l)), "")
-        check(start[call].lstrip().lower().startswith("if exist") and not opener.rstrip().endswith("("),
+        check(start[call].lstrip().lower().startswith("if exist") and _block_depth(start, call) == 0,
               "...on one line, not in a ( ) block a ')' in the install path would break")
     menu = read_lines("Windows-Menu.bat")
     at = _first(menu, ":CLEANUP")
@@ -278,6 +293,13 @@ def test_old_copies_are_taken_away_first():
         engine = next((i for i, l in enumerate(lines) if ENGINE_CALL.search(l) and not _is_comment(l)), None)
         check(at is not None and (engine is None or at < engine),
               "%s runs it before the engine starts" % name)
+        check(at is not None and _block_depth(lines, at) == 0, "...outside any ( ) block")
+    check(run is not None and _block_depth(menu, run) == 0, "Windows-Menu.bat [8] runs it outside any ( ) block")
+    # The rules themselves, on what a later edit might do.
+    wrapped = ['if exist "%DATA_DIR%" (', "    echo.", '    "python.exe" "scripts\\remove-old-host-copy.py" "data"', ")"]
+    check(_block_depth(wrapped, 2) == 1, "(a call wrapped in a multi-line block is seen as inside one)")
+    check(_first(['@rem "python.exe" remove-old-host-copy.py', "REM x remove-old-host-copy.py"], script) is None,
+          "(a call behind @rem or REM does not count as a call)")
 
 
 
