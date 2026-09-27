@@ -165,11 +165,151 @@ def test_the_engine_reads_that_variable():
             os.environ["HERMES_GATEWAY_LOCK_DIR"] = saved
 
 
+# --- nothing of ours in the host's .hermes ----------------------------------
+# Up to v0.4.7 the launchers copied data\config.yaml and data\.env -- the
+# user's API keys -- into %USERPROFILE%\.hermes (Mac: ~/.hermes) for every
+# run, "for any component started without our env". There is no such
+# component: on Windows the engine falls back to %LOCALAPPDATA%\hermes, and
+# the Web UI hands HERMES_HOME to every Hermes process it starts. The only
+# reader was a Hermes the machine's owner installed, which then ran on the
+# stick owner's keys; and [X] or a pulled stick left the keys behind.
+HOST_HERMES = (r'(%USER_HERMES_DIR%|!USER_HERMES_DIR!|%USERPROFILE%\\\.hermes|!USERPROFILE!\\\.hermes'
+               r'|\$\{?USER_HERMES_DIR\}?|\$\{?HOME\}?/\.hermes|~/\.hermes)')
+PUTS_THERE = [
+    re.compile(r'\b(?:copy|xcopy|robocopy|cp)\s+.*' + HOST_HERMES, re.I),
+    re.compile(r'>>?\s*"?' + HOST_HERMES, re.I),
+    re.compile(r'>>?\s*"?%MIRROR_MARK%', re.I),
+    re.compile(r'\b(?:mkdir|md)\b.*' + HOST_HERMES, re.I),
+]
+
+
+def test_nothing_of_ours_goes_into_the_hosts_hermes():
+    print("no launcher copies config or keys into the host's .hermes")
+    names = list(launchers())
+    hits = []
+    for name in names:
+        for i, line in enumerate(read_lines(name)):
+            if line.lstrip().startswith(("::", "#", "rem ", "REM ")):
+                continue
+            # Moving the machine's own *.before-u-hermes back is restoring
+            # its files, not putting ours there.
+            if "before-u-hermes" in line:
+                continue
+            if any(r.search(line) for r in PUTS_THERE):
+                hits.append("%s:%d %s" % (name, i + 1, line.strip()))
+    check(not hits, "none of %d launchers writes into the host's .hermes%s"
+          % (len(names), "".join("\n         " + h for h in hits)))
+    check(len(names) >= 5, "(found the launchers)")
+    # The rule itself, on the lines v0.4.7 shipped.
+    shipped = ['copy /Y "%DATA_DIR%\\config.yaml" "%USER_HERMES_DIR%\\config.yaml" >nul 2>&1',
+               'if exist "%DATA_DIR%\\.env" copy /Y "%DATA_DIR%\\.env" "%USER_HERMES_DIR%\\.env" >nul 2>&1',
+               'echo u-hermes> "%MIRROR_MARK%"',
+               'if not exist "%USER_HERMES_DIR%" mkdir "%USER_HERMES_DIR%" 2>nul',
+               'cp -f "$DATA_DIR/config.yaml" "$USER_HERMES_DIR/config.yaml" 2>/dev/null',
+               '[ -f "$DATA_DIR/.env" ] && cp -f "$DATA_DIR/.env" "$USER_HERMES_DIR/.env" 2>/dev/null',
+               # and spellings a later change might use
+               'md "%USER_HERMES_DIR%"',
+               'copy /Y "%DATA_DIR%\\.env" "!USER_HERMES_DIR!\\.env"',
+               'cp "$DATA_DIR/.env" "${HOME}/.hermes/.env"']
+    check(all(any(r.search(l) for r in PUTS_THERE) for l in shipped),
+          "(the rule catches every line v0.4.7 used to make the copy)")
+
+
+def _is_comment(line):
+    s = line.lstrip().lower().lstrip("@")
+    return s.startswith(("::", "#")) or s == "rem" or s.startswith("rem ")
+
+
+def _block_depth(lines, idx):
+    """How many ( ) blocks are open at line `idx`, by the layout these
+    launchers use: a block opens on a line ending in "(" and closes on a line
+    starting with ")" (test_batch_parse reads them the same way)."""
+    depth = 0
+    for line in lines[:idx]:
+        s = line.strip()
+        if not s or _is_comment(line):
+            continue
+        if s.startswith(")"):
+            depth -= 1
+        if s.endswith("("):
+            depth += 1
+    return depth
+
+
+def _first(lines, needle, start=0):
+    """First line at or after `start` that mentions `needle` outside a comment."""
+    return next((i for i in range(start, len(lines))
+                 if needle in lines[i] and not _is_comment(lines[i])), None)
+
+
+def test_old_copies_are_taken_away_first():
+    """Every launcher runs scripts/remove-old-host-copy.py, and the main one
+    runs it before anything can skip it or change what it compares against.
+
+    A first, batch-file version of the cleanup sat after the CLI branch
+    (menu [2] never reached it) and after protect-config.ps1, which rewrites
+    data\\config.yaml -- so an old copy of it no longer matched and stayed.
+    """
+    print("each launcher takes away what older versions left, early enough")
+    script = "remove-old-host-copy.py"
+    start = read_lines("Windows-Start.bat")
+    call = _first(start, script)
+    check(call is not None and not start[call].lstrip().startswith("::"),
+          "Windows-Start.bat runs %s" % script)
+    if call is not None:
+        for needle, what in (("protect-config.ps1", "protect-config.ps1 rewrites data\\config.yaml"),
+                             ('if not "%~1"==""', "the CLI branch (menu [2], shortcuts with arguments)"),
+                             ("setup.ps1", "the first-run install and its early exits"),
+                             ("preflight.py", "the pre-flight exits")):
+            later = _first(start, needle)
+            check(later is not None and call < later, "...before %s" % what)
+        check(start[call].lstrip().lower().startswith("if exist") and _block_depth(start, call) == 0,
+              "...on one line, not in a ( ) block a ')' in the install path would break")
+    menu = read_lines("Windows-Menu.bat")
+    at = _first(menu, ":CLEANUP")
+    run = _first(menu, script, at or 0)
+    check(at is not None and run is not None and "--report" in menu[run],
+          "Windows-Menu.bat [8] runs it with --report")
+    body = menu[at:_first(menu, "goto MENU", at)] if at is not None else []
+    check(not any("%USER_HERMES_DIR%" in l or "%USERPROFILE%" in l for l in body
+                  if l.lstrip().lower().startswith("echo")),
+          "...and echoes no path itself (a ')' or '&' in the user name broke that)")
+    mac = read_lines("Mac-Start.command")
+    at = _first(mac, script)
+    check(at is not None, "Mac-Start.command runs it")
+    if at is not None:
+        for needle, what in (("if [ $# -gt 0 ]", "the CLI branch"),
+                             ("exit 0", "the 'not configured' exit"),
+                             ("setup.sh", "is fine after setup, which it needs")):
+            later = _first(mac, needle)
+            if what.startswith("is fine"):
+                check(later is not None and later < at, "...after setup.sh, whose venv it runs on")
+            else:
+                check(later is not None and at < later, "...before %s" % what)
+    # A bot-only user may never run anything but the gateway launcher.
+    for name in ("Windows-Gateway.bat", "debug.bat"):
+        lines = read_lines(name)
+        at = _first(lines, script)
+        engine = next((i for i, l in enumerate(lines) if ENGINE_CALL.search(l) and not _is_comment(l)), None)
+        check(at is not None and (engine is None or at < engine),
+              "%s runs it before the engine starts" % name)
+        check(at is not None and _block_depth(lines, at) == 0, "...outside any ( ) block")
+    check(run is not None and _block_depth(menu, run) == 0, "Windows-Menu.bat [8] runs it outside any ( ) block")
+    # The rules themselves, on what a later edit might do.
+    wrapped = ['if exist "%DATA_DIR%" (', "    echo.", '    "python.exe" "scripts\\remove-old-host-copy.py" "data"', ")"]
+    check(_block_depth(wrapped, 2) == 1, "(a call wrapped in a multi-line block is seen as inside one)")
+    check(_first(['@rem "python.exe" remove-old-host-copy.py', "REM x remove-old-host-copy.py"], script) is None,
+          "(a call behind @rem or REM does not count as a call)")
+
+
+
 if __name__ == "__main__":
     test_each_home_on_the_stick_keeps_its_locks_there_too()
     test_every_launcher_that_runs_the_engine_sets_a_home()
     test_every_way_into_the_engine_prunes_first()
     test_the_engine_reads_that_variable()
+    test_nothing_of_ours_goes_into_the_hosts_hermes()
+    test_old_copies_are_taken_away_first()
     print("")
     if FAILURES:
         print("%d check(s) failed" % len(FAILURES))

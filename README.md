@@ -229,17 +229,34 @@ never touch it, and neither does deleting the install folder. The launcher
 prints the path on every start. Your own files are in there, so delete it
 separately, once you are sure.
 
-**2. A config copy on every machine it has run on.** While running, U-Hermes
-mirrors `config.yaml` and `.env` (which holds your API key) into
-`%USERPROFILE%\.hermes\`, so that any component started without our
-environment still finds a working config. A clean exit removes both, and so
-does the next launch on that machine — but only if you answer **N** to
-cmd's `终止批处理操作吗(Y/N)?` after Ctrl+C. Answering **Y** ends the batch
-file at that prompt, so the cleanup it was about to run never happens, and
-closing the window with [X] skips it too. Either way the next launch on that
-machine clears it, and `Windows-Menu.bat` → `[8] 清理本机残留` does it on
-demand: it deletes exactly those two files and reports anything else it
-finds rather than assuming it is ours.
+**2. A config copy left by v0.4.7 or earlier.** Those versions copied
+`config.yaml` and `.env` (which holds your API key) into
+`%USERPROFILE%\.hermes\` (Mac: `~/.hermes/`) on every run, "so that any
+component started without our environment still finds a working config". No
+such component exists — on Windows the engine falls back to
+`%LOCALAPPDATA%\hermes`, never `~/.hermes`, and the Web UI passes
+`HERMES_HOME` to every Hermes process it starts. The only thing that ever
+read the copy was a Hermes the machine's owner had installed, which then ran
+on your keys. Windows v0.3.5–v0.4.1 and every Mac version never took the copy
+away; v0.4.2–v0.4.7 did on a clean exit, but not after [X], a pulled stick,
+or Ctrl+C answered with Y.
+
+From v0.4.8 nothing is copied, and `scripts/remove-old-host-copy.py` takes
+away what older versions left — at the start of `Windows-Start.bat`,
+`Windows-Gateway.bat`, `debug.bat` and `Mac-Start.command`, and on demand
+from `Windows-Menu.bat` → `[8]`. It removes a file only when it can prove the
+file is ours: the old versions' marker vouches for it, or its bytes are
+exactly a config or `.env` this stick has had — now, beside it
+(`config.yaml.*`, `.env.*`), in `data\backups`, or with the block the old
+launchers appended. It puts back the machine's own files those versions moved
+aside, unless they look like ours -- and only once the old marker is gone and
+nothing is left to delete (otherwise the marker stays and the next start runs
+the same steps); never touches a `~/.hermes` that is linked to the stick's own
+data; and reports, never deletes, a config that only looks like ours and any
+`.env` left beside one. It keeps no state of its own: every run decides from
+what is on disk, so a warning may be given once and not repeated, and
+`[8]` never calls the machine clean -- it says what it removed and what it
+could not place.
 
 **3. Package caches, on builds before this one.** npm and uv cache downloads
 under `%LOCALAPPDATA%` by default, so earlier versions left a few hundred MB

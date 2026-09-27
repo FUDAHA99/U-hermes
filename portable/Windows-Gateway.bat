@@ -59,6 +59,9 @@ echo.
 if exist "%SCRIPT_DIR%\hermes\manifests" if exist "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" (
     "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\prune-stale-files.py" "%SCRIPT_DIR%\."
 )
+:: And take away the copy of the user's keys an older version left in
+:: %USERPROFILE%\.hermes (see Windows-Start.bat) -- for the same reason.
+if exist "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\remove-old-host-copy.py" "%SCRIPT_DIR%\data"
 
 "%VENV_PYTHON%" -m hermes_cli.main gateway start
 

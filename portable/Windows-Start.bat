@@ -44,6 +44,24 @@ set "NODE_EXE=%NODE_DIR%\node.exe"
 set "WEBUI_SERVER=%NODE_DIR%\node_modules\hermes-web-ui\dist\server\index.js"
 
 :: ============================================================================
+:: Take away the copy of the user's keys an older version left on this PC
+:: ============================================================================
+:: Up to v0.4.7 every launch copied data\config.yaml and data\.env -- the
+:: API keys -- into %USERPROFILE%\.hermes, "for any component started without
+:: our env". No such component exists: on Windows the engine falls back to
+:: %LOCALAPPDATA%\hermes, never ~/.hermes, and the Web UI hands HERMES_HOME
+:: to every Hermes process it starts. The one program that read the copy was
+:: a Hermes the machine's owner installed, running on the stick owner's keys.
+:: v0.3.5-v0.4.1 never took the copy away; v0.4.2-v0.4.7 did on a clean exit
+:: but not after [X], a pulled stick or Ctrl+C then Y. Nothing is copied any
+:: more; this removes what older versions left (the rules are in the script).
+::
+:: First thing, deliberately: before the CLI branch and the early exits below
+:: can skip it, and before protect-config.ps1 rewrites data\config.yaml --
+:: the script recognises an old copy by comparing it with the stick's files.
+if exist "%RUNTIME_DIR%\python-win-x64\python.exe" "%RUNTIME_DIR%\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\remove-old-host-copy.py" "%DATA_DIR%"
+
+:: ============================================================================
 :: Pre-flight checks
 :: ============================================================================
 
@@ -364,47 +382,6 @@ echo     %UH_TITLE%
 echo   ============================================
 echo.
 
-:: --- Pre-launch: mirror the config into ~/.hermes ---
-:: HERMES_HOME IS honoured by both the Web UI and the gateway (verified), so
-:: this is a fallback, not a workaround for an override: it keeps a working
-:: config in the default location for any component started without our env.
-set "USER_HERMES_DIR=%USERPROFILE%\.hermes"
-set "MIRROR_MARK=%USER_HERMES_DIR%\.u-hermes-mirror"
-if not exist "%USER_HERMES_DIR%" mkdir "%USER_HERMES_DIR%" 2>nul
-
-:: A previous run that was Ctrl+C'd or had its window closed never reached
-:: its own cleanup, so its copy of the keys is still sitting here. Clear it
-:: before doing anything else, so at worst the keys survive until the next
-:: launch on this machine rather than indefinitely.
-call :restore_mirror quiet
-
-:: If this machine already has its own Hermes, move its files aside rather
-:: than overwriting them, and put them back on the way out. The marker says
-:: "the config.yaml and .env in here are ours" -- it survives a hard kill, so
-:: a second run will not stash a mirror on top of a mirror.
-if exist "%MIRROR_MARK%" goto :mirror_ready
-
-:: A copy that is byte-identical to ours is a mirror an older version of this
-:: launcher left behind, from before the marker existed. Preserving it would
-:: mean restoring our own keys onto this machine on the way out.
-if not exist "%USER_HERMES_DIR%\config.yaml" goto :mirror_stashed
-fc /B "%USER_HERMES_DIR%\config.yaml" "%DATA_DIR%\config.yaml" >nul 2>&1
-if not errorlevel 1 goto :mirror_stashed
-move /Y "%USER_HERMES_DIR%\config.yaml" "%USER_HERMES_DIR%\config.yaml.before-u-hermes" >nul 2>&1
-if exist "%USER_HERMES_DIR%\.env" move /Y "%USER_HERMES_DIR%\.env" "%USER_HERMES_DIR%\.env.before-u-hermes" >nul 2>&1
-
-:mirror_stashed
-echo u-hermes> "%MIRROR_MARK%"
-
-:mirror_ready
-
-:: The platforms block used to be appended here with key: '' when missing,
-:: which handed the gateway an empty key and stopped it starting. It is not
-:: needed any more: protect-config.ps1 has already put a real one in the
-:: source config above, so a byte copy is correct.
-copy /Y "%DATA_DIR%\config.yaml" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
-if exist "%DATA_DIR%\.env" copy /Y "%DATA_DIR%\.env" "%USER_HERMES_DIR%\.env" >nul 2>&1
-
 :: --- Step 1: Kill leftover gateway processes ---
 for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":8642.*LISTENING"') do (
     taskkill /F /PID %%P >nul 2>&1
@@ -426,9 +403,7 @@ echo.
 echo   -----------------------------------------------
 echo     浏览器地址: http://127.0.0.1:8648
 if defined AGENT_CWD echo     智能体工作区: !AGENT_CWD!
-echo     停止服务: 按 Ctrl+C，问「终止批处理操作吗」时选 N
-echo     （选 N 才会顺带清掉本机上的配置副本；选 Y 或直接点 X
-echo       也能停，只是清理要留到下次启动、或用菜单 [8]）
+echo     停止服务: 按 Ctrl+C（问「终止批处理操作吗」时选 Y 或 N 都行）
 echo   -----------------------------------------------
 echo.
 
@@ -468,28 +443,9 @@ for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":8642.*LISTENING"') d
     taskkill /F /PID %%P >nul 2>&1
 )
 
-call :restore_mirror
-
 :check_exit
 echo.
 echo   Hermes 已停止。
 echo.
 pause
 exit /b 0
-
-:: --- Take the copy of the user's keys off this machine ---------------------
-:: "数据不出U盘" has to survive running on someone else's computer, and the
-:: mirror contains their API keys in plain text. Only files we put there are
-:: removed; anything this machine had is moved back.
-::
-:: Called both on the way out and at the start of the next run, because
-:: neither Ctrl+C nor closing the window with [X] reaches the exit path.
-:restore_mirror
-if not exist "%MIRROR_MARK%" goto :eof
-del /Q "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
-del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
-if exist "%USER_HERMES_DIR%\config.yaml.before-u-hermes" move /Y "%USER_HERMES_DIR%\config.yaml.before-u-hermes" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
-if exist "%USER_HERMES_DIR%\.env.before-u-hermes" move /Y "%USER_HERMES_DIR%\.env.before-u-hermes" "%USER_HERMES_DIR%\.env" >nul 2>&1
-del /Q "%MIRROR_MARK%" >nul 2>&1
-if not "%~1"=="quiet" echo   已清理本机上的配置副本。
-goto :eof

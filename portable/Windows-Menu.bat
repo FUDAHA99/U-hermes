@@ -33,7 +33,7 @@ echo   [4] 打开配置页面
 echo   [5] 模型设置 (hermes model)
 echo   [6] 一键诊断
 echo   [7] 清理聊天记录（释放 U 盘空间）
-echo   [8] 清理本机残留（在别人电脑上用完后执行）
+echo   [8] 清理旧版本留在本机的配置副本
 echo   [9] 更新 Hermes
 echo   [0] 退出
 echo.
@@ -217,34 +217,21 @@ pause
 goto MENU
 
 :CLEANUP
+:: From v0.4.8 on, nothing of ours goes into %USERPROFILE%\.hermes, and
+:: Windows-Start.bat takes away what an older version left there each time it
+:: starts. This is the same script, on demand, with a report of what is left.
+:: The report is printed by the script, not echoed here: a user name with ")"
+:: or "&" in it broke the ( ) block and the echo this used to have.
 echo.
-echo   正在清理本机 %USERPROFILE%\.hermes 下的配置副本...
-set "USER_HERMES_DIR=%USERPROFILE%\.hermes"
-set "MIRROR_MARK=%USER_HERMES_DIR%\.u-hermes-mirror"
-if not exist "%MIRROR_MARK%" (
-    echo   [OK] 本机上没有 U-Hermes 留下的副本。
-    echo.
-    pause
-    goto MENU
-)
-del /Q "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
-del /Q "%USER_HERMES_DIR%\.env" >nul 2>&1
-if exist "%USER_HERMES_DIR%\config.yaml.before-u-hermes" move /Y "%USER_HERMES_DIR%\config.yaml.before-u-hermes" "%USER_HERMES_DIR%\config.yaml" >nul 2>&1
-if exist "%USER_HERMES_DIR%\.env.before-u-hermes" move /Y "%USER_HERMES_DIR%\.env.before-u-hermes" "%USER_HERMES_DIR%\.env" >nul 2>&1
-del /Q "%MIRROR_MARK%" >nul 2>&1
-echo   [OK] 已删除 U-Hermes 放在本机的 config.yaml 和 .env。
+echo   从 v0.4.8 起，U-Hermes 不再往这台电脑放配置和密钥。
+echo   这里清理的是旧版本留下的副本……
 echo.
-:: Only those two files are ours. Anything else in that folder belongs to a
-:: Hermes this machine had of its own -- deleting it would be destroying
-:: someone else's data -- so report it instead of guessing.
-set "_LEFT=0"
-for /f %%N in ('dir /b /a "%USER_HERMES_DIR%" 2^>nul ^| find /c /v ""') do set "_LEFT=%%N"
-if not "%_LEFT%"=="0" (
-    echo   [i] 该文件夹里还剩 %_LEFT% 项，不是 U-Hermes 放的，没有动：
-    echo       %USER_HERMES_DIR%
-    echo       如果这台电脑自己装过 Hermes，那些是它的数据；
-    echo       确认不需要的话可以手动删掉整个文件夹。
-)
+if exist "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" goto :CLEANUP_RUN
+echo   [X] 找不到自带的 Python（runtime\python-win-x64），清理不了。
+goto :CLEANUP_END
+:CLEANUP_RUN
+"%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\remove-old-host-copy.py" "%SCRIPT_DIR%\data" --report
+:CLEANUP_END
 echo.
 pause
 goto MENU
