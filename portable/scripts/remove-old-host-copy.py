@@ -39,11 +39,16 @@ and does only what it can prove safe in that run:
     .env are ours by the marker's promise, the machine's own files go back,
     the marker goes. .env only if this stick has or had one, since those
     launchers copied it only `if exist`. Three guards on top: a stash that is
-    provably ours is removed, not put back; a stash pair whose config carries
-    U-Hermes' fingerprints stays where it is and is reported; and the marker
-    goes before anything goes back -- if it cannot, or if any copy cannot be
-    removed, nothing goes back and the marker stays, so the next start runs
-    the same steps again.
+    provably ours is removed, not put back; if either half of the stashed
+    pair is a U-Hermes copy -- provably ours, carrying U-Hermes'
+    fingerprints, or the very bytes the marker's copy held -- the other half
+    is taken for the rest of that copy and stays where it is, reported, with
+    how to rename it back if it is the machine's own after all (v0.4.2-v0.4.7
+    stashed a v0.4.1 copy as "the machine's own" whenever the stick's config
+    had changed, and putting it back would make old keys live); and the
+    marker goes before anything goes back -- if it cannot, or if any copy
+    cannot be removed, nothing goes back and the marker stays, so the next
+    start runs the same steps again.
   * Without the marker a file is ours only if its bytes are exactly a file
     this stick has had: data\\config.yaml or data\\.env as they are now, the
     earlier ones the stick keeps (data\\config.yaml.*, data\\.env.*, anything
@@ -242,6 +247,10 @@ def clean(data_dir, home):
     marked = os.path.exists(at(MARKER))
     to_restore = []
     if marked:
+        # What the marker's copies held, before they go: a stash with the same
+        # bytes is the same copy one generation older (v0.4.1 left it, a
+        # later version stashed it as "the machine's own"), not the machine's.
+        copied = dict((n, _read(at(n))) for n in OURS if os.path.exists(at(n)))
         for name in OURS:
             if not os.path.exists(at(name)) or _inside(at(name), data_dir):
                 continue
@@ -253,8 +262,19 @@ def clean(data_dir, home):
                 continue
             proven.add(name)
             remove(name)
-        stash_is_ours = os.path.exists(at(config_stash)) and ours(config_stash)
-        held_pair = not stash_is_ours and _fingerprinted(at(config_stash))
+        def copy_like(stash):
+            """This stash is a U-Hermes copy, or looks like one: provably ours,
+            carrying U-Hermes' fingerprints, or the very bytes the marker's
+            copy held (the same copy, one generation older)."""
+            data = _read(at(stash))
+            return _meaningful(data) and (ours(stash) or _fingerprinted(at(stash))
+                                          or data == copied.get(kind(stash)))
+
+        # The two were stashed together. If either is a U-Hermes copy, so is
+        # the pair -- v0.4.2-v0.4.7 stashed a v0.4.1 copy as "the machine's
+        # own" whenever the stick's config had changed in between -- and
+        # putting the other back would make old keys or config live.
+        pair_is_copy = any(os.path.exists(at(n + STASH)) and copy_like(n + STASH) for n in OURS)
         for name in OURS:
             stash = name + STASH
             if not os.path.exists(at(stash)):
@@ -262,9 +282,7 @@ def clean(data_dir, home):
             if ours(stash):
                 proven.add(stash)
                 remove(stash)
-            elif (held_pair or (name == ".env" and stash_is_ours)) and _meaningful(_read(at(stash))):
-                # Stashed with a config that is ours, or looks it: the pair
-                # was a U-Hermes copy. Putting it back would make old keys live.
+            elif pair_is_copy and _meaningful(_read(at(stash))):
                 flag(stash)
             elif not os.path.exists(at(name)):
                 to_restore.append(name)
@@ -363,6 +381,9 @@ def main(argv):
         print("  [!] %s 里的 %s 看起来也是 U-Hermes 旧版本留下的，里面可能有密钥，"
               % (host, "、".join(out.suspicious)))
         print("      但证明不了，所以没有自动删。确认这台电脑自己的 Hermes 不在用它们，可以手动删掉。")
+        for name in out.suspicious:
+            if name.endswith(STASH):
+                print("      如果 %s 其实是这台电脑自己的，把它改回 %s 就行。" % (name, name[:-len(STASH)]))
     if report:
         if out.skipped_reason == "stick":
             print("  [i] %s 就是这个 U 盘自己的数据文件夹（链接过去的），没有动。" % host)

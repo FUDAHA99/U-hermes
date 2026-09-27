@@ -468,7 +468,7 @@ def test_nothing_goes_back_while_the_marker_stays():
 
 
 def test_nothing_goes_back_while_a_proven_stash_is_stuck():
-    print("a proven .env stash cannot be removed: the machine's config waits too")
+    print("a proven .env stash cannot be removed; the config stashed with it")
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
               "config.yaml.before-u-hermes": OWN_CONFIG, ".env.before-u-hermes": ENV})
     if not _ro_blocks_delete(c):
@@ -480,8 +480,12 @@ def test_nothing_goes_back_while_a_proven_stash_is_stuck():
     check("config.yaml" not in c.left() and os.path.exists(os.path.join(c.host, ".u-hermes-mirror")),
           "nothing restored, the marker stays (%s)" % sorted(c.left()))
     _writable(os.path.join(c.host, ".env.before-u-hermes"))
-    c.run()
-    check(c.left() == {"config.yaml": OWN_CONFIG}, "the next run finishes (%s)" % sorted(c.left()))
+    code, out = c.run()
+    # Stashed together with our .env, the config is taken for half of the same
+    # old copy: not made live, reported, and the user told how to undo that.
+    check(c.left() == {"config.yaml.before-u-hermes": OWN_CONFIG}, "the next run removes ours, keeps the other (%s)"
+          % sorted(c.left()))
+    check("改回 config.yaml" in out, "and says how to take it back if it is the machine's own")
     c.done()
 
 
@@ -750,6 +754,33 @@ def test_an_unmarked_env_stash_beside_a_proven_config_is_named():
     c.done()
 
 
+def test_a_stash_with_the_bytes_of_the_marked_copy_is_not_put_back():
+    print("v0.4.1 copy, stashed by v0.4.7 as the machine's own, then the key rotated on the stick")
+    stale_config = b"model: stale\nplatforms:\n  api_server:\n    enabled: true\n"
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": OLD_ENV,
+              "config.yaml.before-u-hermes": stale_config, ".env.before-u-hermes": OLD_ENV})
+    code, out = c.run("--report")
+    check(c.left() == {".env.before-u-hermes": OLD_ENV, "config.yaml.before-u-hermes": stale_config},
+          "neither half of the old pair is made live again (%s)" % sorted(c.left()))
+    warned = out.split("看起来也是")[0].split("[!]")[-1] if "看起来也是" in out else ""
+    check(".env.before-u-hermes" in warned and "config.yaml.before-u-hermes" in warned and "放回原处" not in out,
+          "it is reported, not called the machine's own")
+    c.done()
+
+
+def test_a_stash_with_the_bytes_of_a_flagged_env_is_flagged_too():
+    print("the stick has no .env; another stick's .env was copied and stashed with the same bytes")
+    other = b"OPENAI_API_KEY=sk-other-stick\n"
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": other,
+              "config.yaml.before-u-hermes": OWN_CONFIG, ".env.before-u-hermes": other}, no_env=True)
+    code, out = c.run("--report")
+    warned = out.split("看起来也是")[0].split("[!]")[-1] if "看起来也是" in out else ""
+    check(".env" in warned and ".env.before-u-hermes" in warned, "both are named (%s)" % warned.strip()[-60:])
+    check("这台电脑自己的文件" not in out.replace("旧版本挪开的、这台电脑自己的 Hermes 文件已放回原处：config.yaml", ""),
+          "and the stash is not called the machine's own")
+    c.done()
+
+
 if __name__ == "__main__":
     for fn in (test_the_tails_are_what_the_old_launchers_wrote,
                test_a_marked_copy_goes_and_the_machines_own_comes_back,
@@ -795,6 +826,8 @@ if __name__ == "__main__":
                test_a_failed_restore_says_what_to_do,
                test_a_read_only_copy_is_still_removed,
                test_an_unmarked_env_stash_beside_a_proven_config_is_named,
+               test_a_stash_with_the_bytes_of_the_marked_copy_is_not_put_back,
+               test_a_stash_with_the_bytes_of_a_flagged_env_is_flagged_too,
                test_a_failure_does_not_stop_the_launch):
         fn()
     print()
