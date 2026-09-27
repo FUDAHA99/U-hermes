@@ -250,13 +250,13 @@ exactly a config or `.env` this stick has had — now, beside it
 (`config.yaml.*`, `.env.*`), in `data\backups`, or with the block the old
 launchers appended. It puts back the machine's own files those versions moved
 aside, unless they look like ours -- and only once the old marker is gone and
-nothing is left to delete; never touches a `~/.hermes` that is linked to the
-stick's own data; and reports, never deletes, a config that only looks like
-ours and any `.env` left beside one -- on every run, not just the first.
-What has to outlive a run (a file it could not delete, one it keeps
-reporting, files still waiting to go back) is written to
-`%USERPROFILE%\.hermes\.u-hermes-pending` -- file names only, no contents --
-until it is resolved.
+nothing is left to delete (otherwise the marker stays and the next start runs
+the same steps); never touches a `~/.hermes` that is linked to the stick's own
+data; and reports, never deletes, a config that only looks like ours and any
+`.env` left beside one. It keeps no state of its own: every run decides from
+what is on disk, so a warning may be given once and not repeated, and
+`[8]` never calls the machine clean -- it says what it removed and what it
+could not place.
 
 **3. Package caches, on builds before this one.** npm and uv cache downloads
 under `%LOCALAPPDATA%` by default, so earlier versions left a few hundred MB

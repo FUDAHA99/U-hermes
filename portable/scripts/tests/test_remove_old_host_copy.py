@@ -3,7 +3,7 @@
 Up to v0.4.7 every launch copied data\\config.yaml and data\\.env -- the API
 keys -- into %USERPROFILE%\\.hermes (Mac: ~/.hermes). v0.4.8 stopped, and
 scripts/remove-old-host-copy.py takes away what was left. Every case here is
-one three rounds of review found, reproduced, in an earlier version:
+one six rounds of review found, reproduced, in an earlier version:
 
   * v0.3.5-v0.4.1 appended a platforms block to the copy when the config had
     no platforms: line, so it often did not match -- and the .env with the
@@ -113,7 +113,7 @@ class Case(object):
             code = rc.main(["remove-old-host-copy.py", self.data, "--home", self.home] + list(extra))
         return code, out.getvalue()
 
-    def left(self, where=None, state=False):
+    def left(self, where=None):
         where = where or self.host
         found = {}
         if os.path.isdir(where):
@@ -122,15 +122,12 @@ class Case(object):
                     p = os.path.join(dp, n)
                     with open(p, "rb") as f:
                         found[os.path.relpath(p, where).replace("\\", "/")] = f.read()
-        if not state:
-            found.pop(rc.PENDING, None)
         return found
 
-    def state(self):
-        path = os.path.join(self.host, rc.PENDING)
-        return rc.read_pending(path) if os.path.exists(path) else None
-
     def done(self):
+        for handle in list(_HELD.values()):
+            handle.close()
+        _HELD.clear()
         for dp, dn, fn in os.walk(self.root):
             for n in fn:
                 try:
@@ -259,11 +256,10 @@ def test_a_copy_that_cannot_be_removed_keeps_its_marker():
     code, out = c.run()
     can_block = os.path.exists(ro)
     if not can_block:
-        check(True, "skip: this OS deletes read-only files anyway")
+        check(True, "skip: an open file blocks deletion only on Windows")
         c.done()
         return
-    st = c.state()
-    check(st is not None and st[0] == (".env",), "the state file keeps vouching for the .env, and only it (%s)" % (st,))
+    check(os.path.exists(os.path.join(c.host, ".u-hermes-mirror")), "the marker stays, so the next start tries again")
     check("删不掉" in out, "and the user is told which file")
     os.chmod(ro, stat.S_IWRITE | stat.S_IREAD)
     c.run()
@@ -317,7 +313,7 @@ def test_a_machines_own_hermes_is_left_alone():
     check(c.left() == {"config.yaml": OWN_CONFIG, ".env": OWN_ENV}, "untouched")
     check(out.strip() == "", "and nothing printed at launch")
     code, out = c.run("--report")
-    check("[OK]" in out and "其余 2 项" in out, "[8] says it found nothing it recognises (%s)" % out.strip()[:80])
+    check("没有找到能确认" in out and "其余 2 项" in out, "[8] says it found nothing it recognises (%s)" % out.strip()[:80])
     c.done()
 
 
@@ -407,24 +403,25 @@ def test_a_failure_does_not_stop_the_launch():
     check(r.returncode == 0, "exit %d (%s)" % (r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace").strip()[-80:]))
 
 
+# A file another program holds open -- an AV scan, a backup tool, an editor.
+# On Windows that is what stops a delete: the script clears a read-only
+# attribute before deleting, as it should for a copy of the user's keys.
+_HELD = {}
+
+
 def _readonly(path):
-    os.chmod(path, stat.S_IREAD)
+    """Make `path` impossible to delete for now: hold it open."""
+    _HELD[path] = open(path, "rb")
 
 
 def _writable(path):
-    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    handle = _HELD.pop(path, None)
+    if handle:
+        handle.close()
 
 
 def _ro_blocks_delete(c):
-    probe = os.path.join(c.root, "ro-probe")
-    c.write(probe, b"x")
-    _readonly(probe)
-    try:
-        os.remove(probe)
-        return False
-    except OSError:
-        _writable(probe)
-        return True
+    return os.name == "nt"
 
 
 def test_the_env_stashed_with_a_proven_config_is_not_put_back():
@@ -443,10 +440,10 @@ def test_a_read_only_marker_is_still_cleared():
     print("a read-only marker is made writable and removed")
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
               "config.yaml.before-u-hermes": OWN_CONFIG})
-    _readonly(os.path.join(c.host, ".u-hermes-mirror"))
+    os.chmod(os.path.join(c.host, ".u-hermes-mirror"), stat.S_IREAD)
     c.run()
-    check(c.left(state=True) == {"config.yaml": OWN_CONFIG}, "copies gone, the machine's config back (%s)"
-          % sorted(c.left(state=True)))
+    check(c.left() == {"config.yaml": OWN_CONFIG}, "copies gone, the machine's config back (%s)"
+          % sorted(c.left()))
     c.done()
 
 
@@ -462,43 +459,12 @@ def test_nothing_goes_back_while_the_marker_stays():
     check(c.left() == {".u-hermes-mirror": MARK, "config.yaml.before-u-hermes": OWN_CONFIG},
           "copies gone, machine's config still set aside (%s)" % sorted(c.left()))
     check("放回原处" not in out and "删不掉" in out, "and the user is told")
-    st = c.state()
-    check(st is not None and st[0] == () and st[2], "the state file vouches for nothing and says a restore is due (%s)" % (st,))
-    c.write(os.path.join(c.host, "config.yaml"), b"model: written-by-the-machine\n")
-    os.remove(os.path.join(c.host, "config.yaml"))
     c.run()
-    check(c.left(state=True) == {"config.yaml": OWN_CONFIG}, "the next run puts it back and clears up (%s)"
-          % sorted(c.left(state=True)))
+    check(c.left() == {"config.yaml": OWN_CONFIG}, "the next run puts it back and clears up (%s)"
+          % sorted(c.left()))
     c.done()
 
 
-def test_a_marker_that_stays_does_not_vouch_for_new_files():
-    print("the old marker cannot be removed; the machine writes a config; the next run")
-    if os.name != "nt":
-        check(True, "skip: an open file blocks deletion only on Windows")
-        return
-    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
-    with open(os.path.join(c.host, ".u-hermes-mirror"), "rb"):
-        c.run()
-        c.write(os.path.join(c.host, "config.yaml"), OWN_CONFIG)
-        c.run()
-    check(c.left().get("config.yaml") == OWN_CONFIG, "the machine's new config survives (%s)" % sorted(c.left()))
-    c.done()
-
-
-def test_a_restore_that_fails_is_tried_again():
-    print("the machine's stash is held open when it should go back")
-    if os.name != "nt":
-        check(True, "skip: an open file blocks renaming only on Windows")
-        return
-    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
-              "config.yaml.before-u-hermes": OWN_CONFIG})
-    with open(os.path.join(c.host, "config.yaml.before-u-hermes"), "rb"):
-        code, out = c.run("--report")
-    check("下次启动会再试" in out and "会自动放回" in out and "[OK]" not in out, "a retry is promised")
-    c.run()
-    check(c.left(state=True) == {"config.yaml": OWN_CONFIG}, "and kept (%s)" % sorted(c.left(state=True)))
-    c.done()
 
 
 def test_nothing_goes_back_while_a_proven_stash_is_stuck():
@@ -506,33 +472,18 @@ def test_nothing_goes_back_while_a_proven_stash_is_stuck():
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
               "config.yaml.before-u-hermes": OWN_CONFIG, ".env.before-u-hermes": ENV})
     if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
+        check(True, "skip: an open file blocks deletion only on Windows")
         c.done()
         return
     _readonly(os.path.join(c.host, ".env.before-u-hermes"))
     code, out = c.run()
-    check("config.yaml" not in c.left() and c.state() is not None and c.state()[2],
-          "nothing restored, a restore still due (%s)" % sorted(c.left()))
+    check("config.yaml" not in c.left() and os.path.exists(os.path.join(c.host, ".u-hermes-mirror")),
+          "nothing restored, the marker stays (%s)" % sorted(c.left()))
     _writable(os.path.join(c.host, ".env.before-u-hermes"))
     c.run()
     check(c.left() == {"config.yaml": OWN_CONFIG}, "the next run finishes (%s)" % sorted(c.left()))
     c.done()
 
-
-def test_a_kept_marker_vouches_only_for_what_is_left():
-    print("run 1 keeps the marker for a stuck .env; the machine writes a config; run 2")
-    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
-    if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
-        c.done()
-        return
-    _readonly(os.path.join(c.host, ".env"))
-    c.run()
-    c.write(os.path.join(c.host, "config.yaml"), OWN_CONFIG)
-    _writable(os.path.join(c.host, ".env"))
-    c.run()
-    check(c.left() == {"config.yaml": OWN_CONFIG}, "the new config survives, the .env goes (%s)" % sorted(c.left()))
-    c.done()
 
 
 def test_the_old_block_alone_is_reported():
@@ -540,7 +491,8 @@ def test_the_old_block_alone_is_reported():
     c = Case({"config.yaml": b"model: long-gone\r\n" + V041_TAIL, ".env": OLD_ENV})
     code, out = c.run("--report")
     check(c.left() == {"config.yaml": b"model: long-gone\r\n" + V041_TAIL, ".env": OLD_ENV}, "nothing deleted")
-    check("config.yaml" in out and ".env" in out and "[OK]" not in out, "both reported, PC not called clean")
+    warned = out.split("看起来也是")[0].split("[!]")[-1] if "看起来也是" in out else ""
+    check("config.yaml" in warned and ".env" in warned, "both named in the warning (%s)" % warned.strip()[-60:])
     c.done()
 
 
@@ -558,7 +510,7 @@ def test_the_report_counts_only_what_it_cannot_place():
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
               "config.yaml.before-u-hermes": OWN_CONFIG, "state.db": b"machine"})
     if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
+        check(True, "skip: an open file blocks deletion only on Windows")
         c.done()
         return
     _readonly(os.path.join(c.host, ".env"))
@@ -631,32 +583,12 @@ def test_the_stick_is_recognised_however_its_path_is_spelled():
     c.done()
 
 
-def test_what_was_flagged_is_still_flagged_next_time():
-    print("a flagged file is reported on every later run, not just the first")
-    for label, host, kw in (
-            ("marked .env on a stick without one", {".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": OWN_ENV},
-             {"no_env": True}),
-            (".env stash beside a proven config stash",
-             {".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
-              "config.yaml.before-u-hermes": CONFIG_BEFORE_PROTECT, ".env.before-u-hermes": OLD_ENV},
-             {"backups": {"config.yaml.good.1": CONFIG_BEFORE_PROTECT}}),
-            (".env beside an unmarked copy proven ours", {"config.yaml": CONFIG + V041_TAIL, ".env": OLD_ENV}, {})):
-        c = Case(host, **kw)
-        c.run()
-        code, out = c.run("--report")
-        check("[!]" in out and "[OK]" not in out and "别删" not in out, "%s: still reported on the next run" % label)
-        for n in list(c.left()):
-            os.remove(os.path.join(c.host, n))
-        code, out = c.run("--report")
-        check(not os.path.exists(c.host), "%s: once the user deletes it, the state goes too" % label)
-        c.done()
-
 
 def test_a_failed_env_is_tried_once_per_run():
     print("a stuck .env is reported once")
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
     if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
+        check(True, "skip: an open file blocks deletion only on Windows")
         c.done()
         return
     _readonly(os.path.join(c.host, ".env"))
@@ -671,7 +603,7 @@ def test_a_failed_delete_keeps_the_restore_promise():
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
               "config.yaml.before-u-hermes": OWN_CONFIG, ".env.before-u-hermes": OWN_ENV})
     if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
+        check(True, "skip: an open file blocks deletion only on Windows")
         c.done()
         return
     for n in ("config.yaml", ".env"):
@@ -680,80 +612,21 @@ def test_a_failed_delete_keeps_the_restore_promise():
     for n in ("config.yaml", ".env"):
         _writable(os.path.join(c.host, n))
     code, out = c.run()
-    check(c.left(state=True) == {"config.yaml": OWN_CONFIG, ".env": OWN_ENV},
-          "both of the machine's files are back, nothing left over (%s)" % sorted(c.left(state=True)))
+    check(c.left() == {"config.yaml": OWN_CONFIG, ".env": OWN_ENV},
+          "both of the machine's files are back, nothing left over (%s)" % sorted(c.left()))
     check("[!]" not in out, "and the machine's .env is not called a leftover")
     c.done()
 
 
-def test_a_pending_delete_does_not_take_a_replaced_file():
-    print("a stuck .env is replaced by the machine's own before the next run")
-    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
-    if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
-        c.done()
-        return
-    _readonly(os.path.join(c.host, ".env"))
-    c.run()
-    _writable(os.path.join(c.host, ".env"))
-    os.remove(os.path.join(c.host, ".env"))
-    c.write(os.path.join(c.host, ".env"), OWN_ENV)
-    c.run()
-    check(c.left().get(".env") == OWN_ENV, "the machine's new .env survives (%s)" % sorted(c.left()))
-    c.done()
 
 
-def test_the_state_is_rewritten_every_run():
-    print("marker held open throughout; a stuck config is freed, then the machine writes one")
-    if os.name != "nt":
-        check(True, "skip: an open file blocks deletion only on Windows")
-        return
-    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
-    with open(os.path.join(c.host, ".u-hermes-mirror"), "rb"):
-        _readonly(os.path.join(c.host, "config.yaml"))
-        c.run()
-        _writable(os.path.join(c.host, "config.yaml"))
-        c.run()
-        c.write(os.path.join(c.host, "config.yaml"), OWN_CONFIG)
-        c.run()
-    check(c.left().get("config.yaml") == OWN_CONFIG, "the machine's config survives (%s)" % sorted(c.left()))
-    st = c.state()
-    check(st is not None and st[0] == (), "and the state vouches for nothing (%s)" % (st,))
-    c.done()
-
-
-def test_a_report_line_does_not_follow_a_new_file():
-    print("a flagged .env is deleted by the user; the machine writes its own")
-    c = Case({"config.yaml": CONFIG + V041_TAIL, ".env": OLD_ENV})
-    c.run()
-    os.remove(os.path.join(c.host, ".env"))
-    c.write(os.path.join(c.host, ".env"), OWN_ENV)
-    code, out = c.run("--report")
-    check("[!]" not in out, "the machine's .env is not called a leftover")
-    check(c.state() is None, "and the state is gone")
-    c.done()
-
-
-def test_a_new_old_marker_after_a_state_file_is_honoured():
-    print("an old version runs again after this script left a state file")
-    c = Case({"config.yaml": CONFIG + V041_TAIL, ".env": OLD_ENV})
-    c.run()
-    check(c.state() is not None, "(a state file is there, for the flagged .env)")
-    # What v0.4.2-v0.4.7 then does: marker, its own copies over ours.
-    for rel, data in {".u-hermes-mirror": MARK, "config.yaml": b"model: another-stick\n",
-                      ".env": b"OTHER_API_KEY=sk-another-stick\n"}.items():
-        c.write(os.path.join(c.host, rel), data)
-    c.run()
-    check(not os.path.exists(c.host), "its copies go on the marker's word, and nothing is left (%s)"
-          % sorted(c.left(state=True)))
-    c.done()
 
 
 def test_a_stuck_fingerprinted_config_is_reported_once():
     print("a marked config carrying U-Hermes' fingerprint cannot be removed")
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
     if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
+        check(True, "skip: an open file blocks deletion only on Windows")
         c.done()
         return
     _readonly(os.path.join(c.host, "config.yaml"))
@@ -770,7 +643,7 @@ def test_the_machines_env_stash_is_not_flagged_while_it_waits():
     c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
               "config.yaml.before-u-hermes": OWN_CONFIG, ".env.before-u-hermes": OWN_ENV})
     if not _ro_blocks_delete(c):
-        check(True, "skip: this OS deletes read-only files anyway")
+        check(True, "skip: an open file blocks deletion only on Windows")
         c.done()
         return
     _readonly(os.path.join(c.host, ".env"))
@@ -779,8 +652,101 @@ def test_the_machines_env_stash_is_not_flagged_while_it_waits():
           "the stash is called the machine's own, waiting -- not a leftover")
     _writable(os.path.join(c.host, ".env"))
     c.run()
-    check(c.left(state=True) == {"config.yaml": OWN_CONFIG, ".env": OWN_ENV},
-          "and the next run puts both back (%s)" % sorted(c.left(state=True)))
+    check(c.left() == {"config.yaml": OWN_CONFIG, ".env": OWN_ENV},
+          "and the next run puts both back (%s)" % sorted(c.left()))
+    c.done()
+
+
+def test_a_env_beside_a_stuck_proven_config_is_named():
+    print("a proven config copy cannot be removed; the unprovable .env beside it")
+    c = Case({"config.yaml": CONFIG + V041_TAIL, ".env": OLD_ENV})
+    if not _ro_blocks_delete(c):
+        check(True, "skip: an open file blocks deletion only on Windows")
+        c.done()
+        return
+    _readonly(os.path.join(c.host, "config.yaml"))
+    code, out = c.run()
+    check("删不掉" in out and "[!]" in out and ".env" in out.split("看起来也是")[0].split("[!]")[-1],
+          "the .env is named even though the config could not go")
+    _writable(os.path.join(c.host, "config.yaml"))
+    c.done()
+
+
+def test_a_stuck_proven_stash_is_not_called_the_machines():
+    print("a stash proven ours cannot be removed")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
+              "config.yaml.before-u-hermes": CONFIG_BEFORE_PROTECT},
+             backups={"config.yaml.good.1": CONFIG_BEFORE_PROTECT})
+    if not _ro_blocks_delete(c):
+        check(True, "skip: an open file blocks deletion only on Windows")
+        c.done()
+        return
+    _readonly(os.path.join(c.host, "config.yaml.before-u-hermes"))
+    code, out = c.run("--report")
+    check("删不掉" in out and "这台电脑自己的文件" not in out, "it is reported as stuck, not as the machine's own")
+    check(os.path.exists(os.path.join(c.host, ".u-hermes-mirror")), "and the marker stays for the next try")
+    _writable(os.path.join(c.host, "config.yaml.before-u-hermes"))
+    c.run()
+    check(not os.path.exists(c.host), "the next run finishes (%s)" % sorted(c.left()))
+    c.done()
+
+
+def test_a_stash_whose_name_is_taken_is_not_put_over_it():
+    print("the machine's stash, but a config.yaml the stick cannot account for sits in its place")
+    c = Case({".u-hermes-mirror": MARK, ".env": ENV, "config.yaml.before-u-hermes": OWN_CONFIG,
+              ".env.before-u-hermes": OWN_ENV}, no_env=True)
+    c.write(os.path.join(c.data, ".env"), b"")   # the stick "had" a .env: an empty one
+    os.remove(os.path.join(c.data, ".env"))
+    code, out = c.run("--report")
+    check(c.left().get(".env.before-u-hermes") == OWN_ENV and c.left().get(".env") == ENV,
+          "nothing is overwritten (%s)" % sorted(c.left()))
+    check("原来的位置已经有同名文件" in out, "and the user is told why it was not put back")
+    c.done()
+
+
+def test_the_report_never_calls_the_pc_clean():
+    print("[8] says what it found, never that the PC is clean")
+    for label, host in (("nothing there", {}),
+                        ("a machine's own Hermes", {"config.yaml": OWN_CONFIG, ".env": OWN_ENV}),
+                        ("an old key it cannot prove", {".env": OLD_ENV})):
+        c = Case(host)
+        code, out = c.run("--report")
+        check("[OK]" not in out and "干净" not in out, "%s: no clean bill of health (%s)" % (label, out.strip()[:60]))
+        if host:
+            check("也可能是你当时的配置和密钥" in out, "%s: and the leftovers are described honestly" % label)
+        c.done()
+
+
+def test_a_failed_restore_says_what_to_do():
+    print("the machine's stash cannot be renamed back")
+    if os.name != "nt":
+        check(True, "skip: an open file blocks renaming only on Windows")
+        return
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV,
+              "config.yaml.before-u-hermes": OWN_CONFIG})
+    with open(os.path.join(c.host, "config.yaml.before-u-hermes"), "rb"):
+        code, out = c.run()
+    check("没能放回原处" in out and "改名为 config.yaml" in out, "the user is told to rename it")
+    check(c.left() == {"config.yaml.before-u-hermes": OWN_CONFIG}, "and nothing else happened to it")
+    c.done()
+
+
+def test_a_read_only_copy_is_still_removed():
+    print("a marked copy with the read-only attribute set")
+    c = Case({".u-hermes-mirror": MARK, "config.yaml": CONFIG, ".env": ENV})
+    os.chmod(os.path.join(c.host, ".env"), stat.S_IREAD)
+    c.run()
+    check(not os.path.exists(c.host), "the attribute does not keep the keys there (%s)" % sorted(c.left()))
+    c.done()
+
+
+def test_an_unmarked_env_stash_beside_a_proven_config_is_named():
+    print("no marker; config proven ours; an .env stash that is not")
+    c = Case({"config.yaml": CONFIG + V041_TAIL, ".env.before-u-hermes": OLD_ENV})
+    code, out = c.run()
+    warned = out.split("看起来也是")[0].split("[!]")[-1] if "看起来也是" in out else ""
+    check(".env.before-u-hermes" in warned, "it is named (%s)" % warned.strip()[-60:])
+    check(c.left() == {".env.before-u-hermes": OLD_ENV}, "and left alone")
     c.done()
 
 
@@ -810,12 +776,8 @@ if __name__ == "__main__":
                test_the_env_stashed_with_a_proven_config_is_not_put_back,
                test_a_read_only_marker_is_still_cleared,
                test_nothing_goes_back_while_the_marker_stays,
-               test_a_marker_that_stays_does_not_vouch_for_new_files,
-               test_a_restore_that_fails_is_tried_again,
-               test_what_was_flagged_is_still_flagged_next_time,
                test_a_failed_env_is_tried_once_per_run,
                test_nothing_goes_back_while_a_proven_stash_is_stuck,
-               test_a_kept_marker_vouches_only_for_what_is_left,
                test_the_old_block_alone_is_reported,
                test_a_lone_marker_is_not_called_a_key_copy,
                test_the_report_counts_only_what_it_cannot_place,
@@ -824,12 +786,15 @@ if __name__ == "__main__":
                test_a_marked_env_alone_on_a_stick_without_one_is_named,
                test_the_stick_is_recognised_however_its_path_is_spelled,
                test_a_failed_delete_keeps_the_restore_promise,
-               test_a_pending_delete_does_not_take_a_replaced_file,
-               test_the_state_is_rewritten_every_run,
-               test_a_report_line_does_not_follow_a_new_file,
-               test_a_new_old_marker_after_a_state_file_is_honoured,
                test_a_stuck_fingerprinted_config_is_reported_once,
                test_the_machines_env_stash_is_not_flagged_while_it_waits,
+               test_a_env_beside_a_stuck_proven_config_is_named,
+               test_a_stuck_proven_stash_is_not_called_the_machines,
+               test_a_stash_whose_name_is_taken_is_not_put_over_it,
+               test_the_report_never_calls_the_pc_clean,
+               test_a_failed_restore_says_what_to_do,
+               test_a_read_only_copy_is_still_removed,
+               test_an_unmarked_env_stash_beside_a_proven_config_is_named,
                test_a_failure_does_not_stop_the_launch):
         fn()
     print()
