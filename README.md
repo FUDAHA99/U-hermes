@@ -249,11 +249,14 @@ file is ours: the old versions' marker vouches for it, or its bytes are
 exactly a config or `.env` this stick has had — now, beside it
 (`config.yaml.*`, `.env.*`), in `data\backups`, or with the block the old
 launchers appended. It puts back the machine's own files those versions moved
-aside, unless they look like ours -- and only once the marker is gone; keeps
-the marker, vouching only for what is left, and tries again next time, if
-something cannot be removed; never touches a `~/.hermes` that is
-linked to the stick's own data; and reports, never deletes, a config that
-only looks like ours and any `.env` left beside one.
+aside, unless they look like ours -- and only once the old marker is gone and
+nothing is left to delete; never touches a `~/.hermes` that is linked to the
+stick's own data; and reports, never deletes, a config that only looks like
+ours and any `.env` left beside one -- on every run, not just the first.
+What has to outlive a run (a file it could not delete, one it keeps
+reporting, files still waiting to go back) is written to
+`%USERPROFILE%\.hermes\.u-hermes-pending` -- file names only, no contents --
+until it is resolved.
 
 **3. Package caches, on builds before this one.** npm and uv cache downloads
 under `%LOCALAPPDATA%` by default, so earlier versions left a few hundred MB

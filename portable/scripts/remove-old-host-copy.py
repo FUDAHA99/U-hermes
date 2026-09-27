@@ -25,17 +25,17 @@ keys in someone else's home folder. This removes it.
                             took them away.
 
 Deleting someone else's file is worse than leaving ours, so every doubt
-resolves to "leave it -- and say so":
+resolves to "leave it -- and say so, every time":
 
   * Nothing is touched when ~/.hermes is, or is inside, the stick's own data
     folder (a junction someone made on purpose): every file there would
     match "a file this stick has had", and they are the live ones. Compared
     by file identity, not by spelling.
-  * With the marker, config.yaml is ours by the marker's own promise -- the
-    rule the old versions' own cleanup used, whichever stick wrote it -- and
-    so is .env, provided this stick has or had one: those launchers copied
-    .env only `if exist`. A marked .env this stick cannot account for is
-    reported instead.
+  * With the old marker, config.yaml is ours by the marker's own promise --
+    the rule the old versions' own cleanup used, whichever stick wrote it --
+    and so is .env, provided this stick has or had one: those launchers
+    copied .env only `if exist`. A marked .env this stick cannot account for
+    is reported instead.
   * Otherwise a file is ours only if its bytes are exactly a file this stick
     has had: data\\config.yaml or data\\.env as they are now, the earlier
     ones the stick keeps (data\\config.yaml.*, data\\.env.*, anything under
@@ -48,34 +48,42 @@ resolves to "leave it -- and say so":
     stashed a v0.4.1 copy as "the machine's own" whenever the stick's config
     had changed in between. A proven one is removed. The .env stashed beside
     a proven config stash, and both files of a pair whose config carries
-    U-Hermes' fingerprints, are left where they are and reported -- putting
+    U-Hermes' fingerprints, stay where they are and are reported -- putting
     them back would make the stick owner's old keys live.
-  * Removals first, then the marker, then -- only once the marker is gone --
-    the machine's own files go back: a marker left standing over a restored
-    file would have the next run delete it on the marker's word. If anything
-    cannot be removed (read-only, in use), the marker stays, rewritten to
-    vouch only for what is still there, and nothing goes back until a later
-    start finishes the job.
+  * Nothing goes back while anything marked for deletion is still there, or
+    while the old marker stands: a marker left over a restored file would
+    have the next run delete it on the marker's word.
   * A file with nothing but whitespace is never ours by byte-equality: it
     holds nothing, and it may be the machine's.
-  * The folder goes only if this run removed something, it is left empty,
+  * The folder goes only if this run cleared something, it is left empty,
     and it is a real folder -- rd on a junction removes the link, whatever
     is behind it.
 
+What has to outlive one run -- files still to delete (read-only, in use),
+files to keep reporting (the proof that flagged them may be gone by the next
+run), and whether the machine's own files are still waiting to go back -- is
+written to .u-hermes-pending. A new name on purpose: the old launchers read
+.u-hermes-mirror as "config.yaml and .env here are ours" and would act on it.
+When .u-hermes-pending exists it, not the old marker, says what may be
+deleted.
+
 What cannot be proven is reported, never deleted: a config.yaml carrying
-U-Hermes' fingerprints or the old launchers' platforms block, and any .env
-left beside a config that was ours or looks it. Never prints the contents of any file. Always exits 0: a failed
-cleanup must not stop the launch.
+U-Hermes' fingerprints or the old launchers' platforms block, any .env left
+beside a config that was ours or looks it, and a marked .env this stick
+cannot account for. Never prints the contents of any file. Always exits 0:
+a failed cleanup must not stop the launch.
 
 Run:  python remove-old-host-copy.py <data_dir> [--home DIR] [--report]
 """
 import os
+import stat
 import sys
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 MARKER = ".u-hermes-mirror"
+PENDING = ".u-hermes-pending"
 STASH = ".before-u-hermes"
 OURS = ("config.yaml", ".env")
 
@@ -88,14 +96,12 @@ WINDOWS_TAIL = (b"\r\nplatforms:\r\n  api_server:\r\n    extra:\r\n      port: 8
                 b"    cors_origins: '*'\r\n")
 MAC_TAIL = WINDOWS_TAIL.replace(b"\r\n", b"\n")
 
-# Only ever grounds for reporting (and for not putting a stash back), never
-# for deleting.
-FINGERPRINTS = ("U-Hermes".encode("utf-8"), b"skills-cn")
+# Grounds for reporting a config (and for not putting a stash back), never
+# for deleting one. The block itself, without the blank line before it,
+# counts as well.
+FINGERPRINTS = ("U-Hermes".encode("utf-8"), b"skills-cn", WINDOWS_TAIL.strip(), MAC_TAIL.strip())
 
 MAX_BYTES = 4 * 1024 * 1024
-
-# First line of a marker this script had to keep; the lines after it name the
-# files it still vouches for.
 PENDING_HEADER = "u-hermes pending"
 
 
@@ -113,14 +119,9 @@ def _meaningful(data):
     return data is not None and data.strip() != b""
 
 
-# The block itself, without the blank line before it, also marks a config as
-# one of ours -- enough to report it, never enough to delete it.
-TAIL_BLOCKS = (WINDOWS_TAIL.strip(), MAC_TAIL.strip())
-
-
 def _fingerprinted(path):
     data = _read(path)
-    return _meaningful(data) and any(f in data for f in FINGERPRINTS + TAIL_BLOCKS)
+    return _meaningful(data) and any(f in data for f in FINGERPRINTS)
 
 
 def _inside(path, root):
@@ -143,24 +144,6 @@ def _inside(path, root):
             p = parent
     except (OSError, ValueError):
         return False
-
-
-def _marker_names(path):
-    """What a marker vouches for. The old versions wrote "u-hermes" and
-    meant both files; one this script had to keep lists what is still due."""
-    data = _read(path) or b""
-    lines = [l.strip() for l in data.decode("utf-8", "replace").splitlines() if l.strip()]
-    if lines and lines[0] == PENDING_HEADER:
-        return tuple(n for n in lines[1:] if n in OURS)
-    return OURS
-
-
-def _keep_marker(path, names):
-    try:
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(PENDING_HEADER + "\n" + "".join(n + "\n" for n in names))
-    except OSError:
-        pass  # the old marker stays as it was, vouching for more -- the next run retries
 
 
 def stick_history(data_dir):
@@ -192,13 +175,43 @@ def stick_history(data_dir):
     return configs, envs, had_env[0]
 
 
+def read_pending(path):
+    """(delete, report, restore) from a state file, or None if it is unreadable."""
+    data = _read(path)
+    if data is None:
+        return None
+    lines = [l.strip() for l in data.decode("utf-8", "replace").splitlines() if l.strip()]
+    if not lines or lines[0] != PENDING_HEADER:
+        return None
+    delete = tuple(l.split(" ", 1)[1] for l in lines[1:] if l.startswith("delete ") and l.split(" ", 1)[1] in OURS)
+    report = tuple(l.split(" ", 1)[1] for l in lines[1:] if l.startswith("report "))
+    return delete, report, "restore" in lines[1:]
+
+
+def write_pending(path, delete, report, restore):
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(PENDING_HEADER + "\n")
+            f.write("".join("delete %s\n" % n for n in delete))
+            f.write("".join("report %s\n" % n for n in report))
+            f.write("restore\n" if restore else "")
+        return True
+    except OSError:
+        return False
+
+
 def _is_link(path):
     isjunction = getattr(os.path, "isjunction", None)
     return os.path.islink(path) or bool(isjunction and isjunction(path))
 
 
-def _remove(path):
+def _remove(path, force=False):
     try:
+        if force:
+            try:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            except OSError:
+                pass
         os.remove(path)
         return True
     except OSError:
@@ -209,7 +222,8 @@ class Outcome(object):
     def __init__(self, host):
         self.host = host
         self.removed, self.restored, self.failed, self.suspicious = [], [], [], []
-        self.marker_removed = False
+        self.awaiting = []          # stashes of the machine's own, still to go back
+        self.state_cleared = False  # the old marker or our state file went
         self.skipped_reason = ""
         self.left = False
 
@@ -242,15 +256,22 @@ def clean(data_dir, home):
         else:
             out.failed.append(name)
 
-    def flag(name):
-        if name not in out.suspicious and os.path.exists(at(name)) and _meaningful(_read(at(name))):
-            out.suspicious.append(name)
+    flagged = []
 
-    # 1. Removals only. Nothing is put back until the marker is gone: a
-    #    marker left standing over a restored file would have the next run
-    #    delete the machine's own config on its word.
-    marked = os.path.exists(at(MARKER))
-    vouched = _marker_names(at(MARKER)) if marked else ()
+    def flag(name):
+        if name not in flagged and os.path.exists(at(name)) and _meaningful(_read(at(name))):
+            flagged.append(name)
+
+    old_marker = os.path.exists(at(MARKER))
+    state = read_pending(at(PENDING)) if os.path.exists(at(PENDING)) else None
+    if state is not None:
+        vouched, reported, restore_due = state
+    else:
+        vouched, reported, restore_due = (OURS if old_marker else ()), (), old_marker
+    for name in reported:
+        flag(name)
+
+    # 1. Removals only.
     for name in vouched:
         if not os.path.exists(at(name)) or _inside(at(name), data_dir):
             continue
@@ -264,7 +285,7 @@ def clean(data_dir, home):
 
     config_stash = "config.yaml" + STASH
     config_stash_ours = os.path.exists(at(config_stash)) and ours(config_stash, "config.yaml")
-    held_pair = marked and not config_stash_ours and _fingerprinted(at(config_stash))
+    held_pair = restore_due and not config_stash_ours and _fingerprinted(at(config_stash))
     to_restore = []
     for name in OURS:
         stash = name + STASH
@@ -272,45 +293,65 @@ def clean(data_dir, home):
             continue
         if ours(stash, name):
             remove(stash)
+        elif stash in flagged:
+            pass
         elif (held_pair or (name == ".env" and config_stash_ours)) and _meaningful(_read(at(stash))):
             # Stashed together with a config that is ours, or looks it: the
             # pair was a U-Hermes copy, not the machine's own files. (An empty
             # one holds nothing either way, and goes back like any other.)
             flag(stash)
-        elif marked and not os.path.exists(at(name)):
+        elif restore_due and not os.path.exists(at(name)):
             to_restore.append(name)
 
     for name in OURS:
-        if os.path.exists(at(name)) and name not in out.removed and ours(name, name):
+        if os.path.exists(at(name)) and name not in out.removed and name not in out.failed \
+                and name not in flagged and ours(name, name):
             remove(name)
 
-    # 2. The marker, then -- only once it is gone -- the machine's own files.
-    if marked:
-        if out.failed:
-            # The next start tries again, vouching only for what is left.
-            _keep_marker(at(MARKER), [n for n in out.failed if n in OURS])
-        elif _remove(at(MARKER)):
-            out.marker_removed = True
-            for name in to_restore:
-                try:
-                    os.replace(at(name + STASH), at(name))
-                    out.restored.append(name)
-                except OSError:
-                    out.failed.append(name + STASH)
-        else:
-            out.failed.append(MARKER)
-
-    # 3. What cannot be proven, but must not pass in silence.
+    # 2. What cannot be proven, but must not pass in silence.
     config_was_ours = any(n.startswith("config.yaml") for n in out.removed)
     for name in ("config.yaml", config_stash):
         if os.path.exists(at(name)) and _fingerprinted(at(name)):
             flag(name)
-    if config_was_ours or any(n.startswith("config.yaml") for n in out.suspicious):
+    if config_was_ours or any(n.startswith("config.yaml") for n in flagged):
         for name in (".env", ".env" + STASH):
-            if name not in out.failed and name not in out.restored:
+            if name not in out.failed and name not in to_restore and name[:-len(STASH)] not in to_restore:
                 flag(name)
 
-    if (out.removed or out.marker_removed) and not _is_link(host):
+    # 3. State for the next run, then the old marker, then -- only with no
+    #    marker left standing and nothing left to delete -- the machine's own
+    #    files go back. The state file is written first, so nothing is lost
+    #    if what follows fails.
+    still_to_delete = [n for n in out.failed if n in OURS]
+    blocked = bool(out.failed)
+    write_pending(at(PENDING), still_to_delete, flagged, restore_due and bool(to_restore)) \
+        if (blocked or flagged or (restore_due and to_restore)) else None
+    if old_marker:
+        if _remove(at(MARKER), force=True):
+            out.state_cleared = True
+        else:
+            out.failed.append(MARKER)
+            blocked = True
+    if blocked:
+        out.awaiting = [n + STASH for n in to_restore]
+        if not os.path.exists(at(PENDING)):
+            write_pending(at(PENDING), still_to_delete, flagged, restore_due and bool(to_restore))
+    else:
+        for name in to_restore:
+            try:
+                os.replace(at(name + STASH), at(name))
+                out.restored.append(name)
+            except OSError:
+                out.failed.append(name + STASH)
+                out.awaiting.append(name + STASH)
+        if out.awaiting or flagged:
+            write_pending(at(PENDING), [], flagged, bool(out.awaiting))
+        elif os.path.exists(at(PENDING)):
+            if _remove(at(PENDING), force=True):
+                out.state_cleared = True
+
+    out.suspicious = [n for n in flagged if os.path.exists(at(n))]
+    if (out.removed or out.state_cleared) and not _is_link(host):
         try:
             os.rmdir(host)
         except OSError:
@@ -338,7 +379,7 @@ def main(argv):
     if out.removed:
         print("  [i] 已删掉旧版本 U-Hermes 留在这台电脑上的配置和密钥副本：")
         print("      %s（%s）" % (host, "、".join(out.removed)))
-    elif out.marker_removed:
+    elif out.state_cleared and not out.restored:
         print("  [i] 已清掉旧版本 U-Hermes 留在 %s 的标记文件。" % host)
     if out.restored:
         print("  [i] 旧版本挪开的、这台电脑自己的 Hermes 文件已放回原处：%s" % "、".join(out.restored))
@@ -348,29 +389,31 @@ def main(argv):
     if out.suspicious:
         print("  [!] %s 里的 %s 看起来也是 U-Hermes 旧版本留下的，里面可能有密钥，"
               % (host, "、".join(out.suspicious)))
-        print("      但和这个 U 盘现在或以前的配置、密钥都对不上，所以没有自动删。")
+        print("      但证明不了是这个 U 盘的，所以没有自动删。")
         print("      确认这台电脑自己的 Hermes 不在用它们，可以手动删掉。")
     if report:
         if out.skipped_reason == "stick":
             print("  [i] %s 就是这个 U 盘自己的数据文件夹（链接过去的），没有动。" % host)
-        elif not (out.removed or out.marker_removed or out.failed or out.suspicious):
+        elif not (out.removed or out.state_cleared or out.failed or out.suspicious or out.awaiting):
             print("  [OK] 本机上没有认得出是 U-Hermes 旧版本留下的副本。")
         if out.left and out.skipped_reason != "stick":
             try:
                 names = os.listdir(host)
             except OSError:
                 names = []
-            ours_or_flagged = set(out.suspicious) | set(out.failed) | {MARKER}
-            rest = [n for n in names if n not in ours_or_flagged and not n.endswith(STASH)]
-            stashed = [n for n in names if n.endswith(STASH) and n not in ours_or_flagged]
+            known = set(out.suspicious) | set(out.failed) | set(out.awaiting) | {MARKER, PENDING}
+            rest = [n for n in names if n not in known and not n.endswith(STASH)]
+            unknown_stash = [n for n in names if n.endswith(STASH) and n not in known]
+            if out.awaiting:
+                print("  [i] %s 是旧版本挪开的这台电脑自己的文件，等上面的问题解决后会自动放回，别删。"
+                      % "、".join(out.awaiting))
+            if unknown_stash:
+                print("  [i] %s 是旧版本挪开的文件，认不出是谁的，没有动。" % "、".join(unknown_stash))
             if rest:
                 print("  [i] %s 里其余 %d 项认不出是 U-Hermes 放的，没有动；" % (host, len(rest)))
                 print("      如果这台电脑自己装过 Hermes，那些多半是它的数据。")
-            if stashed:
-                print("  [i] %s 是旧版本挪开的这台电脑自己的文件，等上面的问题解决后会自动放回，"
-                      "别删。" % "、".join(stashed))
-            elif rest and not (out.failed or out.suspicious):
-                print("      确认不需要的话，可以手动删掉整个文件夹。")
+                if not (out.failed or out.suspicious or out.awaiting or unknown_stash):
+                    print("      确认不需要的话，可以手动删掉整个文件夹。")
     return 0
 
 
