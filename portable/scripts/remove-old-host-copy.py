@@ -64,8 +64,13 @@ files to keep reporting (the proof that flagged them may be gone by the next
 run), and whether the machine's own files are still waiting to go back -- is
 written to .u-hermes-pending. A new name on purpose: the old launchers read
 .u-hermes-mirror as "config.yaml and .env here are ours" and would act on it.
-When .u-hermes-pending exists it, not the old marker, says what may be
-deleted.
+Every file it names carries the hash of the bytes it was about, so a later
+file of the same name -- the machine's own Hermes writing a config -- is
+judged afresh, never deleted or reported on its word; it is rewritten whole
+on every run. An old marker that cannot be removed is recorded by mtime and
+size: while it stands, the state file, not the marker, says what may be
+deleted; a marker it does not know is a new one, left by an older version
+that ran here since, and is taken at its word like any other.
 
 What cannot be proven is reported, never deleted: a config.yaml carrying
 U-Hermes' fingerprints or the old launchers' platforms block, any .env left
@@ -75,6 +80,7 @@ a failed cleanup must not stop the launch.
 
 Run:  python remove-old-host-copy.py <data_dir> [--home DIR] [--report]
 """
+import hashlib
 import os
 import stat
 import sys
@@ -175,29 +181,71 @@ def stick_history(data_dir):
     return configs, envs, had_env[0]
 
 
-def read_pending(path):
-    """(delete, report, restore) from a state file, or None if it is unreadable."""
+def _digest(path):
     data = _read(path)
-    if data is None:
-        return None
-    lines = [l.strip() for l in data.decode("utf-8", "replace").splitlines() if l.strip()]
-    if not lines or lines[0] != PENDING_HEADER:
-        return None
-    delete = tuple(l.split(" ", 1)[1] for l in lines[1:] if l.startswith("delete ") and l.split(" ", 1)[1] in OURS)
-    report = tuple(l.split(" ", 1)[1] for l in lines[1:] if l.startswith("report "))
-    return delete, report, "restore" in lines[1:]
+    return hashlib.sha256(data).hexdigest() if data is not None else ""
 
 
-def write_pending(path, delete, report, restore):
+def _marker_id(path):
     try:
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(PENDING_HEADER + "\n")
-            f.write("".join("delete %s\n" % n for n in delete))
-            f.write("".join("report %s\n" % n for n in report))
-            f.write("restore\n" if restore else "")
-        return True
+        st = os.stat(path)
+        return "%d-%d" % (st.st_mtime_ns, st.st_size)
     except OSError:
-        return False
+        return ""
+
+
+class State(object):
+    """What .u-hermes-pending remembers. Every file it names carries the hash
+    of the bytes it was about: a later file of the same name -- the
+    machine's own Hermes writing a config, the user replacing a key -- is not
+    the one it meant, and is judged afresh."""
+
+    def __init__(self):
+        self.delete, self.report = {}, {}
+        self.restore = False
+        self.marker = ""   # identity of an old marker that could not be removed
+
+    @classmethod
+    def read(cls, path):
+        data = _read(path)
+        if data is None:
+            return None
+        lines = [l.strip() for l in data.decode("utf-8", "replace").splitlines() if l.strip()]
+        if not lines or lines[0] != PENDING_HEADER:
+            return None
+        st = cls()
+        for line in lines[1:]:
+            parts = line.split(" ")
+            if parts[0] == "delete" and len(parts) == 3 and parts[1] in OURS:
+                st.delete[parts[1]] = parts[2]
+            elif parts[0] == "report" and len(parts) == 3 and parts[1] in OURS + tuple(n + STASH for n in OURS):
+                st.report[parts[1]] = parts[2]
+            elif parts == ["restore"]:
+                st.restore = True
+            elif parts[0] == "marker" and len(parts) == 2:
+                st.marker = parts[1]
+        return st
+
+    def write(self, path):
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(PENDING_HEADER + "\n")
+                f.write("".join("delete %s %s\n" % kv for kv in sorted(self.delete.items())))
+                f.write("".join("report %s %s\n" % kv for kv in sorted(self.report.items())))
+                f.write("restore\n" if self.restore else "")
+                f.write("marker %s\n" % self.marker if self.marker else "")
+            return True
+        except OSError:
+            return False
+
+    def empty(self):
+        return not (self.delete or self.report or self.restore or self.marker)
+
+
+def read_pending(path):
+    """(delete, report, restore) names from a state file, or None -- for tests."""
+    st = State.read(path)
+    return None if st is None else (tuple(sorted(st.delete)), tuple(sorted(st.report)), st.restore)
 
 
 def _is_link(path):
@@ -263,19 +311,27 @@ def clean(data_dir, home):
             flagged.append(name)
 
     old_marker = os.path.exists(at(MARKER))
-    state = read_pending(at(PENDING)) if os.path.exists(at(PENDING)) else None
+    state = State.read(at(PENDING)) if os.path.exists(at(PENDING)) else None
+    fresh_marker = old_marker and (state is None or state.marker != _marker_id(at(MARKER)))
+    # A marker the state file does not know about is new: an older version ran
+    # here after this script last did. It is taken at its word, as always.
+    vouched = dict((n, None) for n in OURS) if fresh_marker else {}
+    restore_due = fresh_marker
     if state is not None:
-        vouched, reported, restore_due = state
-    else:
-        vouched, reported, restore_due = (OURS if old_marker else ()), (), old_marker
-    for name in reported:
-        flag(name)
+        for name, digest in state.delete.items():
+            vouched.setdefault(name, digest)
+        restore_due = restore_due or state.restore
+        for name, digest in state.report.items():
+            if os.path.exists(at(name)) and _digest(at(name)) == digest:
+                flag(name)
 
     # 1. Removals only.
-    for name in vouched:
+    for name, digest in sorted(vouched.items()):
         if not os.path.exists(at(name)) or _inside(at(name), data_dir):
             continue
-        if name == ".env" and not had_env:
+        if digest is not None and _digest(at(name)) != digest:
+            continue  # not the file that was vouched for: judged afresh below
+        if name == ".env" and not had_env and digest is None:
             # Those launchers copied .env only `if exist`, and this stick has
             # none -- but another stick may have left it. Not ours to delete;
             # not something to pass over in silence either.
@@ -311,44 +367,52 @@ def clean(data_dir, home):
     # 2. What cannot be proven, but must not pass in silence.
     config_was_ours = any(n.startswith("config.yaml") for n in out.removed)
     for name in ("config.yaml", config_stash):
-        if os.path.exists(at(name)) and _fingerprinted(at(name)):
+        if name not in out.failed and os.path.exists(at(name)) and _fingerprinted(at(name)):
             flag(name)
     if config_was_ours or any(n.startswith("config.yaml") for n in flagged):
-        for name in (".env", ".env" + STASH):
-            if name not in out.failed and name not in to_restore and name[:-len(STASH)] not in to_restore:
-                flag(name)
+        if ".env" not in out.failed:
+            flag(".env")
+        if not restore_due:
+            # Under a marker an unpaired .env stash is the machine's own,
+            # waiting to go back; without one nobody vouches for it.
+            flag(".env" + STASH)
 
-    # 3. State for the next run, then the old marker, then -- only with no
-    #    marker left standing and nothing left to delete -- the machine's own
-    #    files go back. The state file is written first, so nothing is lost
-    #    if what follows fails.
-    still_to_delete = [n for n in out.failed if n in OURS]
-    blocked = bool(out.failed)
-    write_pending(at(PENDING), still_to_delete, flagged, restore_due and bool(to_restore)) \
-        if (blocked or flagged or (restore_due and to_restore)) else None
+    # 3. The state for the next run is written before anything irreversible
+    #    happens to the old marker; then the marker; then -- only with no
+    #    marker standing and nothing left to delete -- the machine's own files
+    #    go back; then the state is written again as it ended up. Every run
+    #    rewrites it whole, so nothing it says outlives what it was about.
+    def state_now(marker_id):
+        st = State()
+        st.delete = dict((n, _digest(at(n))) for n in out.failed if n in OURS and os.path.exists(at(n)))
+        st.report = dict((n, _digest(at(n))) for n in flagged if os.path.exists(at(n)))
+        waiting = [n for n in OURS if os.path.exists(at(n + STASH)) and n + STASH not in flagged]
+        st.restore = restore_due and bool(waiting)
+        st.marker = marker_id
+        return st
+
     if old_marker:
+        state_now(_marker_id(at(MARKER))).write(at(PENDING))
         if _remove(at(MARKER), force=True):
             out.state_cleared = True
         else:
             out.failed.append(MARKER)
-            blocked = True
-    if blocked:
-        out.awaiting = [n + STASH for n in to_restore]
-        if not os.path.exists(at(PENDING)):
-            write_pending(at(PENDING), still_to_delete, flagged, restore_due and bool(to_restore))
-    else:
+    stuck_marker = _marker_id(at(MARKER)) if os.path.exists(at(MARKER)) else ""
+    if not out.failed:
         for name in to_restore:
             try:
                 os.replace(at(name + STASH), at(name))
                 out.restored.append(name)
             except OSError:
                 out.failed.append(name + STASH)
-                out.awaiting.append(name + STASH)
-        if out.awaiting or flagged:
-            write_pending(at(PENDING), [], flagged, bool(out.awaiting))
-        elif os.path.exists(at(PENDING)):
-            if _remove(at(PENDING), force=True):
-                out.state_cleared = True
+    final = state_now(stuck_marker)
+    if final.restore:
+        out.awaiting = [n + STASH for n in OURS if os.path.exists(at(n + STASH)) and n + STASH not in flagged]
+    if not final.empty():
+        final.write(at(PENDING))
+    elif os.path.exists(at(PENDING)):
+        if _remove(at(PENDING), force=True):
+            out.state_cleared = True
 
     out.suspicious = [n for n in flagged if os.path.exists(at(n))]
     if (out.removed or out.state_cleared) and not _is_link(host):
