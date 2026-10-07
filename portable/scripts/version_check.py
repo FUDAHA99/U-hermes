@@ -22,9 +22,18 @@ Warns; never blocks. An end user unpacking a release has matching versions by
 construction, and a component this cannot read is reported as unknown rather
 than guessed at.
 
-Usage:  version_check.py [--quiet]
+Usage:  version_check.py [--quiet] [--unpinned KEY]...
 Exit 0  everything matched, or nothing could be determined
+Exit 2  --unpinned named a key this script does not check
 Exit 3  at least one component differs from the pin
+
+--unpinned KEY  still show KEY, but do not fail on it. For builds that skip a
+                pin on purpose: the weekly canary takes upstream's latest
+                engine and Web UI, so those two cannot match the pins by
+                design, while Node, Python and uv still come from the pins
+                and are still enforced. Failing on the expected difference
+                kept the canary red every week, and a check that is always
+                red tells nobody anything.
 """
 import io
 import json
@@ -203,19 +212,45 @@ def report(rows, say=None):
     return len(bad)
 
 
-def main(argv):
-    rows = survey()
+def parse_unpinned(argv):
+    """The keys named by --unpinned, or None if the arguments are unusable."""
+    known = {key for _l, key, _r in COMPONENTS}
+    keys = set()
+    args = iter(argv)
+    for arg in args:
+        if arg != "--unpinned":
+            continue
+        key = next(args, None)
+        # A misspelt key would exempt nothing and look like it worked;
+        # refuse it instead.
+        if key not in known:
+            print("version_check.py: --unpinned needs one of: %s (got %r)"
+                  % (", ".join(sorted(known)), key))
+            return None
+        keys.add(key)
+    return keys
+
+
+def main(argv, portable=PORTABLE):
+    unpinned = parse_unpinned(argv)
+    if unpinned is None:
+        return 2
+    rows = survey(portable)
     if "--quiet" not in argv:
         print()
         print("  %-10s %-18s %-18s" % ("组件", "钉住", "已安装"))
         print("  " + "-" * 50)
-        for label, _key, pinned, installed, ok in rows:
-            mark = "OK" if ok else ("?" if ok is UNKNOWN else "不一致")
+        for label, key, pinned, installed, ok in rows:
+            if key in unpinned:
+                mark = "本次不钉"
+            else:
+                mark = "OK" if ok else ("?" if ok is UNKNOWN else "不一致")
             print("  %-10s %-18s %-18s %s"
                   % (label, pinned or "?",
                      installed if installed is not UNKNOWN else "读不到", mark))
         print()
-    return 3 if drifted(rows) else 0
+    enforced = [r for r in drifted(rows) if r[1] not in unpinned]
+    return 3 if enforced else 0
 
 
 if __name__ == "__main__":
