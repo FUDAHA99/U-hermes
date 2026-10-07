@@ -336,6 +336,11 @@ on demand with the `canary` checkbox on a manual run.
 To take a newer engine: run the canary, and if it is green, bump
 `HERMES_AGENT_REF` (and any other pin) and tag a release.
 
+Upstream main has been Python 3.14-only since right after v2026.9.24 (0.21.5),
+so the canary currently fails at its first import step on our Python 3.13. Moving
+the engine past 0.21.5 means moving `PYTHON_EMBED_VERSION` to 3.14 in the same
+change; see the note in `versions.env`.
+
 Note that GitHub disables scheduled workflows after 60 days without repository
 activity; re-enable it from the Actions tab if the project goes quiet.
 

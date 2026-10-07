@@ -7,8 +7,12 @@ on:
   # Canary: upstream is a fast-moving target, so build against its latest every
   # week. A breaking change then shows up as a failed scheduled run within days,
   # instead of surfacing months later when someone finally cuts a release.
+  # Off the hour on purpose: GitHub delays scheduled runs under load and drops
+  # some outright, and the top of the hour is its busiest time. The ':00'
+  # schedule this replaced ran 5-6 hours late twice, then not at all on
+  # 2026-10-05.
   schedule:
-    - cron: '0 2 * * 1'  # Mondays 02:00 UTC
+    - cron: '23 2 * * 1'  # Mondays 02:23 UTC
   workflow_dispatch:
     inputs:
       canary:
@@ -226,7 +230,14 @@ jobs:
           # an earlier one from setup installing @latest instead of the pin.
           # If a future change reintroduces either, this fails the build
           # rather than shipping a package nobody has tested.
-          & $py scripts/version_check.py
+          # A canary takes upstream's latest engine and Web UI on purpose, so
+          # those two are shown but not enforced there; failing on them kept
+          # every canary red. Node, Python and uv are still pinned and checked.
+          if ($env:CANARY -eq "true") {
+            & $py scripts/version_check.py --unpinned HERMES_AGENT_REF --unpinned HERMES_WEB_UI_VERSION
+          } else {
+            & $py scripts/version_check.py
+          }
           if ($LASTEXITCODE -ne 0) { Write-Error "the build does not match versions.env"; exit 1 }
 
           Write-Host "=== [4/5] regression tests ==="
@@ -506,7 +517,9 @@ jobs:
           Write-Host "Packaged artifact verified."
 
       - name: Upload to Release
-        if: github.ref_type == 'tag'
+        # Never from a canary: one dispatched on a tag ref would otherwise put
+        # an untested upstream-latest build into that tag's release.
+        if: github.ref_type == 'tag' && env.CANARY != 'true'
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
@@ -659,7 +672,13 @@ jobs:
           "$PY" -m py_compile scripts/config-server.py scripts/diagnose.py scripts/preflight.py scripts/wait-for.py scripts/first-login.py scripts/db-maintenance.py scripts/provider_probe.py scripts/version_check.py
 
           echo "=== [3.5/5] the build matches versions.env ==="
-          "$PY" scripts/version_check.py
+          # Canary: engine and Web UI are upstream's latest on purpose (see the
+          # Windows job); everything else is still held to the pins.
+          if [ "$CANARY" = "true" ]; then
+            "$PY" scripts/version_check.py --unpinned HERMES_AGENT_REF --unpinned HERMES_WEB_UI_VERSION
+          else
+            "$PY" scripts/version_check.py
+          fi
 
           echo "=== [4/5] regression tests ==="
           "$PY" scripts/tests/test_config_merge.py
@@ -740,7 +759,9 @@ jobs:
           echo "Packaged artifact verified."
 
       - name: Upload to Release
-        if: github.ref_type == 'tag'
+        # Never from a canary: one dispatched on a tag ref would otherwise put
+        # an untested upstream-latest build into that tag's release.
+        if: github.ref_type == 'tag' && env.CANARY != 'true'
         uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.ARTIFACT }}

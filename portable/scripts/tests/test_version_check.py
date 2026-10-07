@@ -16,9 +16,11 @@ which is the fastest way to get a check deleted.
 
 Run:  python portable/scripts/tests/test_version_check.py
 """
+import contextlib
 import importlib.util
 import io
 import os
+import re
 import shutil
 import sys
 
@@ -213,6 +215,144 @@ def test_every_pinned_key_is_actually_checked():
           % ", ".join(sorted(missing)))
 
 
+def _main_quietly(argv, root):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = vc.main(argv, portable=root)
+    return rc, out.getvalue()
+
+
+CANARY_DRIFT = dict(
+    HERMES_AGENT_REF="v2026.9.24-37-g781334eea",
+    HERMES_WEB_UI_VERSION="0.7.31",
+    NODE_VERSION="v24.21.0",
+)
+PINS = {
+    "HERMES_AGENT_REF": "v2026.9.21",
+    "HERMES_WEB_UI_VERSION": "0.7.24",
+    "NODE_VERSION": "v24.21.0",
+}
+CANARY_ARGS = ["--unpinned", "HERMES_AGENT_REF",
+               "--unpinned", "HERMES_WEB_UI_VERSION"]
+
+
+def test_without_unpinned_drift_fails_the_build():
+    """The release path: unchanged, any drift is exit 3."""
+    original = with_readers(**CANARY_DRIFT)
+    try:
+        root = fake_tree(PINS)
+        rc, _ = _main_quietly(["--quiet"], root)
+        check(rc == 3, "drift with no --unpinned still fails (exit 3)")
+        shutil.rmtree(root, ignore_errors=True)
+    finally:
+        vc.COMPONENTS = original
+
+
+def test_unpinned_components_show_but_do_not_fail():
+    """The canary builds upstream's latest engine and Web UI on purpose.
+
+    Failing on that expected difference made the canary red every week,
+    which is the same as having no canary: the 2026-10-07 run that actually
+    caught upstream going 3.14-only looked like every other red week.
+    """
+    original = with_readers(**CANARY_DRIFT)
+    try:
+        root = fake_tree(PINS)
+        rc, out = _main_quietly(CANARY_ARGS, root)
+        check(rc == 0, "the two components a canary unpins do not fail it")
+        check("0.7.31" in out and "0.7.24" in out,
+              "...but the table still shows what was built against what")
+        check(out.count("本次不钉") == 2,
+              "...and marks exactly those two rows as deliberately unpinned")
+        shutil.rmtree(root, ignore_errors=True)
+    finally:
+        vc.COMPONENTS = original
+
+
+def test_a_pinned_component_still_fails_beside_unpinned_ones():
+    """Node, Python and uv still come from the pins on a canary build.
+
+    If setup ever slipped back to @latest for one of those, the canary is
+    the run most likely to show it, so --unpinned must not become a
+    blanket pass.
+    """
+    original = with_readers(**dict(CANARY_DRIFT, NODE_VERSION="v25.0.0"))
+    try:
+        root = fake_tree(PINS)
+        rc, out = _main_quietly(CANARY_ARGS, root)
+        check(rc == 3, "Node drift fails a canary build that unpins only the other two")
+        check("不一致" in out, "...and is marked as a mismatch")
+        shutil.rmtree(root, ignore_errors=True)
+    finally:
+        vc.COMPONENTS = original
+
+
+def test_a_misspelt_unpinned_key_is_refused():
+    """A typo would exempt nothing and look like it worked."""
+    original = with_readers(**CANARY_DRIFT)
+    try:
+        root = fake_tree(PINS)
+        rc, out = _main_quietly(["--unpinned", "HERMES_WEBUI_VERSION"], root)
+        check(rc == 2, "an unknown key is a usage error (exit 2), not a silent no-op")
+        check("HERMES_WEB_UI_VERSION" in out, "...and the message lists the real keys")
+        rc, _ = _main_quietly(["--unpinned"], root)
+        check(rc == 2, "--unpinned with nothing after it is refused too")
+        shutil.rmtree(root, ignore_errors=True)
+    finally:
+        vc.COMPONENTS = original
+
+
+def test_ci_unpins_only_what_the_canary_leaves_unpinned():
+    """release.yml must not grow into "unpin everything".
+
+    The canary swaps exactly two things for upstream's latest: the engine
+    clone and the Web UI npm spec. Anything else passed to --unpinned would
+    hide real drift on every canary run.
+    """
+    repo = os.path.dirname(os.path.dirname(SCRIPTS))
+    if not (os.path.isfile(os.path.join(repo, ".gitattributes"))
+            and os.path.isdir(os.path.join(repo, ".github"))):
+        # Shipped in the release zip too; there is no workflow to read there.
+        print("  skip  not a source checkout")
+        return
+    lines = io.open(os.path.join(repo, ".github", "workflows", "release.yml"),
+                    encoding="utf-8").read().split(NL)
+    # The calls themselves -- not py_compile, not the zip file list.
+    call = re.compile(r'(\$py|"\$PY")\s+scripts/version_check\.py\b(.*)$')
+    calls = [(i, m.group(2)) for i, l in enumerate(lines)
+             for m in [call.search(l)] if m]
+    canary = [(i, rest) for i, rest in calls if "--unpinned" in rest]
+    release = [(i, rest) for i, rest in calls if "--unpinned" not in rest]
+
+    check(len(canary) == 2, "each job passes --unpinned on its canary call (found %d)"
+          % len(canary))
+    want = {"HERMES_AGENT_REF", "HERMES_WEB_UI_VERSION"}
+    for i, rest in canary:
+        keys = set(re.findall(r"--unpinned\s+([A-Z_]+)", rest))
+        check(keys == want, "line %d unpins exactly the engine and the Web UI (found: %s)"
+              % (i + 1, ", ".join(sorted(keys))))
+        guard = NL.join(lines[max(0, i - 2):i])
+        check("CANARY" in guard, "line %d is only reached on a canary run" % (i + 1))
+    check(len(release) == 2, "each job still has a call that enforces every pin (found %d)"
+          % len(release))
+    stray = [i + 1 for i, l in enumerate(lines)
+             if "--unpinned" in l and not call.search(l)]
+    check(not stray, "--unpinned appears nowhere but on those calls (lines: %s)"
+          % ", ".join(map(str, stray)))
+
+    # The flip side of letting a canary through: it must never publish. A
+    # canary dispatched on a tag ref used to reach the upload step, and the
+    # version check was only an accidental barrier in front of it -- one
+    # that held when npm's latest Web UI differed from the pin, and was
+    # gone the moment they matched.
+    uploads = [i for i, l in enumerate(lines) if "name: Upload to Release" in l]
+    check(len(uploads) == 2, "both jobs have an upload step (found %d)" % len(uploads))
+    for i in uploads:
+        cond = next((l for l in lines[i + 1:i + 6] if l.strip().startswith("if:")), "")
+        check("env.CANARY != 'true'" in cond,
+              "the upload step at line %d is skipped on canary runs" % (i + 1))
+
+
 if __name__ == "__main__":
     for fn in (test_pins_are_parsed,
                test_the_v_prefix_is_not_a_difference,
@@ -221,7 +361,12 @@ if __name__ == "__main__":
                test_drift_is_reported_and_named,
                test_everything_matching_says_nothing,
                test_the_python_pin_only_applies_where_a_python_is_bundled,
-               test_every_pinned_key_is_actually_checked):
+               test_every_pinned_key_is_actually_checked,
+               test_without_unpinned_drift_fails_the_build,
+               test_unpinned_components_show_but_do_not_fail,
+               test_a_pinned_component_still_fails_beside_unpinned_ones,
+               test_a_misspelt_unpinned_key_is_refused,
+               test_ci_unpins_only_what_the_canary_leaves_unpinned):
         print(fn.__name__)
         fn()
     print()
