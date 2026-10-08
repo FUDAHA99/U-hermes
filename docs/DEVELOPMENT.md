@@ -65,6 +65,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\sync-to-instance.ps1 -
 
 > **引擎升过 v2026.9.24（0.21.5）时，必须同时把 Python 换成 3.14。** 上游打完 0.21.5 的标签后，main 就只支持 3.14 了：所有核心依赖都带上了 `; python_version >= '3.14'`，在我们的 3.13 上引擎能装上，但核心依赖一个都不装（只有 extras 带进来的那些），一 import 就报 `No module named 'ruamel'`。0.21.5 自己又要求 `<3.14`，两边没有共同的版本，只能在同一次改动里一起升。3.14 有嵌入版（3.14.8）。在这之前，**哨兵构建会一直红在冒烟测试第 1 步，原因就是这个**，不是噪音。
 
+**版本机器人**：每周二 03:47 UTC，`.github/workflows/update-pins.yml` 会查五个组件的上游新版本，把能升的改进 `versions.env`，在 `auto/update-pins` 分支上开（或刷新）一个 PR，并自动开始构建。PR 里带着范围内的全部更新日志，涉及网关、默认设置、端口、登录、运行时、更新、中转等关键词的条目会挑到最上面。**它从不合并。** 规则写在 `tools/update_pins.py` 开头：网页界面跟 npm 最新；引擎取最新的、在我们的 Python 上能跑的正式版（只看 requires-python 不够，上游用依赖标记把 3.13 挡在外面过）；Node 只在当前大版本内升；uv 只在当前 0.x 线内升；Python 只升补丁版本，而且必须已经有嵌入版。其余新版本只写在「没有自动升级的」里。任何一项查询失败，这周就什么都不提，免得提议因为网络问题而变样。
+
+- **构建结果不显示在 PR 页面上**（机器人触发的构建不挂在 PR 上），PR 正文里有链接。
+- **U 盘实测要真的装上新版本**：同步脚本不碰 `runtime\` 和 `hermes\`，同步完还要在 U 盘上跑 `setup.ps1 -Force`。PR 正文里的清单写了完整步骤。
+- **拒绝**：关掉 PR（issue 模式下关掉那个 issue）。完全相同的一组版本不会再提；但只要上游任何一个组件又出新版本，新的一组（可能还包括这次的某些版本）会重新提议。查询 GitHub 出错时，这一步会直接失败，而不是当成「没拒绝过」。
+- **在那个分支上改东西**：只要 PR 还开着，机器人就不会动它（按作者、提交者和改动的文件判断）。PR 关掉或合并后，它会从 main 重新开始；如果你的提交没有任何 PR 保存着，它会停下并在运行记录里给出警告。
+- **中途失败也能补上**：每次都会把 PR（或 issue）的说明更新到最新；每个提交只构建一次，没构建过的才会触发。
+- **仓库设置**：目前 GitHub Actions 不能开 PR（Settings → Actions → General → Allow GitHub Actions to create and approve pull requests 没勾）。这种情况下机器人会推好分支，再开一个标题为「[自动] 上游有新版本，等你开 PR」的 issue。里面一键开 PR 的链接带着准确的标题，从它开出来的 PR 和机器人自己开的一样，关掉就算拒绝。机器人只认自己开的 issue，别人用同样标题开的不会被改。
+- **测 U 盘前拉最新**：`git fetch origin` 后用 `git checkout -B auto/update-pins origin/auto/update-pins`。直接 `git checkout` 会停在上周拉下来的旧提议上，而版本检查对着的也是那份旧的，照样全是 OK。
+- 手动运行：Actions → Update pinned versions → Run workflow（只能从 main 跑）。本地预演：`python tools\update_pins.py`（只打印，不改文件）。
+
 **哨兵（canary）**：每周一 02:23 UTC 自动跑一次，也可以手动运行时勾选 `canary`。它用上游 main 的引擎和最新的网页界面构建，Node、Python、uv 仍按 pin。GitHub 的定时任务常常晚几个小时，偶尔会整个丢掉（10/5 那次就没跑），所以别默认它每周都有。日志保留 30 天，2026-10-07 之前只有 1 天，那时失败了也查不到原因。
 
 > **macOS job 会红，这是故意的。** 它卡在「校验压缩包」，正是为了拦住那个打不开的 Mac 包（见下）。Windows 照常发布。
