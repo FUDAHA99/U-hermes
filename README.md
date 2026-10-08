@@ -336,6 +336,15 @@ on demand with the `canary` checkbox on a manual run.
 To take a newer engine: run the canary, and if it is green, bump
 `HERMES_AGENT_REF` (and any other pin) and tag a release.
 
+Bumping is proposed automatically: every Tuesday
+[`update-pins.yml`](.github/workflows/update-pins.yml) pushes `auto/update-pins`
+with whatever can safely move, opens (or refreshes) a pull request carrying the
+notes of every upstream release in range with the lines that touch what U-Hermes
+depends on listed first, and starts a build of it. It never merges; the rules for
+what it moves on its own are at the top of [`tools/update_pins.py`](tools/update_pins.py).
+If the repository does not allow Actions to open pull requests, it opens an issue
+with a one-click link instead.
+
 Upstream main has been Python 3.14-only since right after v2026.9.24 (0.21.5),
 so the canary currently fails at its first import step on our Python 3.13. Moving
 the engine past 0.21.5 means moving `PYTHON_EMBED_VERSION` to 3.14 in the same

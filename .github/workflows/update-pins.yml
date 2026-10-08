@@ -1,0 +1,192 @@
+name: Update pinned versions
+
+# Once a week: look at what upstream has released and open -- or refresh --
+# one pull request that moves portable/versions.env forward, carrying the
+# notes of every release in range with the lines that touch what we depend on
+# pulled to the top. It never merges. A person reads the PR, checks the build
+# and the USB stick, and decides; tools/update_pins.py says what moves on its
+# own and what is only reported.
+
+on:
+  schedule:
+    - cron: '47 3 * * 2'  # Tuesdays 03:47 UTC -- off the hour, see release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write       # push the proposal branch
+  pull-requests: write  # open / refresh the pull request
+  issues: write         # fallback when Actions may not open pull requests
+  actions: write        # start the build on the proposal branch
+
+concurrency:
+  group: update-pins
+  cancel-in-progress: false
+
+env:
+  BRANCH: auto/update-pins
+  BOT_NAME: github-actions[bot]
+  BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+
+jobs:
+  propose:
+    # Only from main. Run from another branch, the proposal would be built on
+    # that branch and carry its unreviewed commits under this PR's title.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Self-test
+        run: |
+          python tools/tests/test_update_pins.py
+          python tools/tests/test_update_pins_workflow.py
+
+      - name: Look for upstream updates
+        id: plan
+        run: |
+          python tools/update_pins.py --write \
+            --body "$RUNNER_TEMP/body.md" \
+            --commit-msg "$RUNNER_TEMP/commit.txt" \
+            --github-output "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or refresh the pull request
+        if: steps.plan.outputs.changed == 'true'
+        env:
+          # Through the environment, never ${{ }} inside the script: the title
+          # is built from upstream data.
+          TITLE: ${{ steps.plan.outputs.title }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/body.md"
+          helper="python tools/update_pins.py issue"
+          # Every gh call is captured into a variable first and filtered after:
+          # `gh ... | grep || true` would turn an API error into "no match" --
+          # and, in the decline check, into re-offering what a person declined.
+
+          # Only pull requests from this repository's own branch. A fork can
+          # name its branch auto/update-pins too, and --head alone matches it.
+          same_repo='[.[] | select(.isCrossRepository | not)]'
+          # Issues this workflow opened (the helper also checks the author).
+          # `--author 'github-actions[bot]'`, not `--app github-actions`: gh
+          # turns --app into an author filter GitHub matches to nothing, so
+          # every week would have opened another issue and a closed one would
+          # never have counted as "no". With Issues switched off in the repo,
+          # gh issue list fails outright; there are no bot issues then.
+          issues_on=$(gh repo view --json hasIssuesEnabled --jq .hasIssuesEnabled)
+          bot_issues() {
+            if [ "$issues_on" != "true" ]; then echo "[]"; return; fi
+            gh issue list --state "$1" --author 'github-actions[bot]' --limit 100 --json number,title,body,author
+          }
+
+          open_prs=$(gh pr list --head "$BRANCH" --state open --json number,isCrossRepository \
+            --jq "$same_repo | .[].number")
+          pr=$(printf '%s\n' "$open_prs" | head -n 1)
+
+          if [ -z "$pr" ]; then
+            # Turned down already? Closing the PR is how a person says no to
+            # this set of versions; the title names every version, so the same
+            # title is the same offer. Where Actions may not open PRs, the
+            # offer is an issue, and closing that issue is the "no".
+            closed_titles=$(gh pr list --head "$BRANCH" --state closed --json title,mergedAt,isCrossRepository \
+              --jq "$same_repo | .[] | select(.mergedAt == null) | .title")
+            declined=$(printf '%s\n' "$closed_titles" | grep -x -F "$TITLE" || true)
+            closed_issues=$(bot_issues closed)
+            declined_issue=$(printf '%s' "$closed_issues" | $helper find --proposing "$TITLE")
+            if [ -n "$declined$declined_issue" ]; then
+              echo "::notice::This exact set of versions was proposed before and declined; not offering it again."
+              exit 0
+            fi
+          fi
+
+          push=1
+          lease=""
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git fetch -q origin "$BRANCH"
+            tip=$(git rev-parse "origin/$BRANCH")
+            # Work by a person on the proposal -- adapting the launcher to a new
+            # Web UI, say. Committer as well as author: an amend or fixup keeps
+            # the bot as author. And any file besides versions.env is not ours.
+            people=$(git log --format='%ae%n%ce' "origin/main..origin/$BRANCH" \
+              | grep -v -x -F "$BOT_EMAIL" || true)
+            files=$(git diff --name-only "origin/main...origin/$BRANCH" \
+              | grep -v -x -F portable/versions.env || true)
+            if [ -n "$people$files" ]; then
+              if [ -n "$pr" ]; then
+                echo "::notice::$BRANCH has work by a person and PR #$pr is open; not touching it."
+                exit 0
+              fi
+              # No open PR. If a closed or merged PR had this exact tip, GitHub
+              # keeps those commits under refs/pull/N/head, so starting over
+              # loses nothing. Otherwise the work exists only on this branch:
+              # stop, and say so loudly instead of going quiet every week.
+              heads=$(gh pr list --head "$BRANCH" --state all --json headRefOid,isCrossRepository \
+                --jq "$same_repo | .[].headRefOid")
+              kept=$(printf '%s\n' "$heads" | grep -x -F "$tip" || true)
+              if [ -z "$kept" ]; then
+                echo "::warning::$BRANCH has commits by a person that no pull request keeps. Open a PR from it, or delete the branch, and the weekly proposals resume."
+                exit 0
+              fi
+            elif git diff --quiet "origin/$BRANCH" -- portable/versions.env \
+                && ! git merge-base --is-ancestor "$tip" origin/main; then
+              # Already carries exactly these versions. Do not push again, but
+              # still bring the PR text and the build up to date: a run that
+              # failed after its push would otherwise stay stuck on old text
+              # and no build, every week, behind this very check. (A tip that
+              # main already contains -- merged, then reverted there -- is not
+              # a proposal; that case starts over from main below.)
+              push=0
+            fi
+            lease="--force-with-lease=refs/heads/$BRANCH:$tip"
+          fi
+
+          if [ "$push" = 1 ]; then
+            git config user.name "$BOT_NAME"
+            git config user.email "$BOT_EMAIL"
+            git checkout -q -B "$BRANCH"
+            git add portable/versions.env
+            git commit -q -F "$RUNNER_TEMP/commit.txt"
+            git push $lease origin "HEAD:refs/heads/$BRANCH"
+            tip=$(git rev-parse HEAD)
+          fi
+
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$TITLE" --body-file "$body"
+          elif ! gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "$body"; then
+            # The repository does not let Actions open pull requests
+            # (Settings > Actions > General). The branch is pushed; put a
+            # one-click link where it will be seen instead.
+            if [ "$issues_on" != "true" ]; then
+              echo "::error::Could not open the pull request, and Issues are off, so there is nowhere to post the proposal. The branch $BRANCH is pushed."
+              exit 1
+            fi
+            $helper body --body-file "$body" > "$RUNNER_TEMP/issue.md"
+            open_issues=$(bot_issues open)
+            num=$(printf '%s' "$open_issues" | $helper find)
+            if [ -n "$num" ]; then
+              gh issue edit "$num" --body-file "$RUNNER_TEMP/issue.md"
+            else
+              gh issue create --title "$($helper title)" --body-file "$RUNNER_TEMP/issue.md"
+            fi
+          fi
+
+          # Build and test exactly what is proposed -- once per commit. A push
+          # made with this workflow's token starts no other workflow; a
+          # dispatch does. Its result does not show on the PR page, so the PR
+          # text links to it.
+          runs=$(gh run list --workflow release.yml --branch "$BRANCH" --limit 50 --json headSha \
+            --jq '.[].headSha')
+          built=$(printf '%s\n' "$runs" | grep -x -F "$tip" || true)
+          if [ -z "$built" ]; then
+            gh workflow run release.yml --ref "$BRANCH"
+          fi
