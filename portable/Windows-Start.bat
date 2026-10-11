@@ -200,6 +200,12 @@ if exist "%DATA_DIR%\.env" (
     )
 )
 
+:: The Web UI keeps the logins, the chat list and the Ekko agent's data under
+:: HERMES_WEB_UI_HOME. It stays data\webui whatever data\.env says: Menu [9],
+:: setup.ps1, first-login.py and the diagnostics all look there, and an
+:: override could put the user's chats on the PC instead of the stick.
+set "HERMES_WEB_UI_HOME=%DATA_DIR%\webui"
+
 :: ============================================================================
 :: Make sure there is a config to repair, then repair it
 :: ============================================================================
@@ -430,14 +436,16 @@ for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":8642.*LISTENING"') d
 :: HERMES_WEB_UI_HOME only in production mode. Otherwise they go to
 :: packages\server\data under the current directory and into the npm package,
 :: where every reinstall deletes them. prepare-webui.py moves what an older
-:: version left there, turns the message gateway on (Web UI 0.7.26 made it
-:: opt-in) and makes new chats start on Hermes; the reasons are in the script.
-:: Production mode only once the data is in place: switching while it is
-:: still in the old place would show an empty chat list. Set after data\.env,
-:: and cleared first, so no line there can move where the data goes.
+:: version left there (both or neither), turns the message gateway on (Web UI
+:: 0.7.26 made it opt-in) and makes new chats start on Hermes; the reasons
+:: are in the script. Production mode when it exits exactly 0 -- a Ctrl+C
+:: gives a negative code, which "not errorlevel 1" alone would take for 0 --
+:: or when the chat database is already in data\webui: once that has moved,
+:: the old mode would show the chat list empty. Set after data\.env, and
+:: cleared first, so no line there can change where the data goes.
 set "NODE_ENV="
 "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\prepare-webui.py" "%SCRIPT_DIR%\." "%HERMES_WEB_UI_HOME%" "%NODE_DIR%\node_modules\hermes-web-ui"
-if not errorlevel 1 set "NODE_ENV=production"
+if errorlevel 0 if not errorlevel 1 set "NODE_ENV=production"
 if exist "%HERMES_WEB_UI_HOME%\hermes-web-ui.db" set "NODE_ENV=production"
 
 :: Where the agent will read and write files. It sits outside the install
@@ -478,8 +486,9 @@ start /B "" "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\first-login.py" http://127.0.0
 :: Run Web UI server in foreground (blocks until Ctrl+C or close)
 ::
 :: From the install directory, deliberately. When prepare-webui.py could not
-:: move old data this time, NODE_ENV stays unset and the Web UI resolves its
-:: account database as cwd + "packages/server/data". Without this cd the
+:: move old data this time (and none had moved before), NODE_ENV stays unset
+:: and the Web UI resolves its account database as cwd +
+:: "packages/server/data", where that old data still is. Without this cd the
 :: login store would then land wherever the user happened to launch from --
 :: a different database on every machine, and on C: rather than the stick
 :: when the shortcut starts elsewhere. setlocal at the top of this script

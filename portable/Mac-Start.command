@@ -152,6 +152,8 @@ if [ -f "$DATA_DIR/.env" ]; then
     source "$DATA_DIR/.env"
     set +a
 fi
+# The Web UI's data stays on the stick whatever data/.env says (Windows-Start.bat).
+export HERMES_WEB_UI_HOME="$DATA_DIR/webui"
 
 # Remove quarantine flags (macOS Gatekeeper)
 if [ "$OS" = "Darwin" ]; then
@@ -234,6 +236,15 @@ if [ ! -f "$WEBUI_SERVER" ]; then
         _v=$(grep -E "^HERMES_WEB_UI_VERSION=" "$SCRIPT_DIR/versions.env" | cut -d= -f2)
         [ -n "$_v" ] && WEBUI_SPEC="hermes-web-ui@${_v}"
     fi
+    # npm replaces the whole package folder; get the Ekko agent's data out
+    # first, and stop rather than let npm delete it (Windows-Start.bat).
+    "$VENV_PYTHON" "$SCRIPT_DIR/scripts/prepare-webui.py" "$SCRIPT_DIR" "$HERMES_WEB_UI_HOME" "$NODE_DIR/lib/node_modules/hermes-web-ui" --move-only
+    if [ -d "$NODE_DIR/lib/node_modules/hermes-web-ui/.ekko" ]; then
+        echo "  [X] The Web UI needs reinstalling, but the Ekko agent's data is still inside it"
+        echo "      and could not be moved out first (see above). Close other U-Hermes windows and retry."
+        read -p "  Press Enter to exit..."
+        exit 1
+    fi
     npm_config_cache="$RUNTIME_DIR/.npm-cache"         npm install -g "$WEBUI_SPEC" --prefix "$NODE_DIR"
     rm -rf "$RUNTIME_DIR/.npm-cache"
     if [ ! -f "$WEBUI_SERVER" ]; then
@@ -281,11 +292,15 @@ lsof -ti:8642 2>/dev/null | xargs kill -9 2>/dev/null
 # Web UI data under data/webui (production mode), once whatever an older
 # version left elsewhere has moved there; new chats on Hermes. The reasons
 # are in scripts/prepare-webui.py and Windows-Start.bat. After data/.env, so
-# no line there can move where the data goes. The cd keeps a run that could
-# not move the data (NODE_ENV unset) writing its account database on the
-# stick: without it, a Finder double-click put it in ~/packages on the Mac.
+# no line there can move where the data goes. Earlier versions of this
+# script never cd'd, so a Finder double-click left the account database in
+# ~/packages on the Mac itself: that one is brought onto the stick too. The
+# cd keeps a run that could not move anything (NODE_ENV unset) writing its
+# account database on the stick.
 unset NODE_ENV
-"$VENV_PYTHON" "$SCRIPT_DIR/scripts/prepare-webui.py" "$SCRIPT_DIR" "$HERMES_WEB_UI_HOME" "$NODE_DIR/lib/node_modules/hermes-web-ui"
+UH_LEGACY=""
+[ -f "$HOME/packages/server/data/hermes-web-ui.db" ] && UH_LEGACY="$HOME/packages/server/data/hermes-web-ui.db"
+"$VENV_PYTHON" "$SCRIPT_DIR/scripts/prepare-webui.py" "$SCRIPT_DIR" "$HERMES_WEB_UI_HOME" "$NODE_DIR/lib/node_modules/hermes-web-ui" ${UH_LEGACY:+--legacy-db "$UH_LEGACY"}
 UH_PREPARED=$?
 if [ "$UH_PREPARED" -eq 0 ] || [ -f "$HERMES_WEB_UI_HOME/hermes-web-ui.db" ]; then
     export NODE_ENV=production

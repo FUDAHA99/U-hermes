@@ -157,16 +157,42 @@ def check_port(port):
         return False
 
 
-def gateway_autostart_off():
-    """True when the user switched off "start the gateway with the Web UI"
-    (data/webui/config.json, Web UI 0.7.26+). A missing or unreadable file is
-    not "off": the launcher turns it on unless the user chose."""
+def _names(value):
+    return [str(x).strip() for x in value if str(x).strip()] if isinstance(value, list) else None
+
+
+def gateway_autostart_off(env=None, cfg=None):
+    """True when the user set things up so that the Web UI starts no
+    gateway (Web UI 0.7.26+), mirroring how it picks profiles: switched off,
+    or a whitelist/blacklist that leaves none it would start. A missing or
+    unreadable data/webui/config.json is not "off": the launcher turns it on
+    unless the user chose."""
+    env = env if env is not None else {}
+    if str(env.get("HERMES_WEB_UI_DISABLE_GATEWAY_AUTOSTART", "")).strip().lower() in ("1", "true", "yes", "on"):
+        return True
     try:
         with open(os.path.join(DATA_DIR, "webui", "config.json"), encoding="utf-8-sig") as f:
             policy = json.load(f).get("gatewayAutoStart")
     except (OSError, ValueError, AttributeError):
         return False
-    return isinstance(policy, dict) and policy.get("enabled") is False
+    if not isinstance(policy, dict):
+        return False
+    if policy.get("enabled") is False:
+        return True
+    include, exclude = _names(policy.get("include")), set(_names(policy.get("exclude")) or [])
+    if include is None:
+        profiles = os.path.join(DATA_DIR, "profiles")
+        include = ["default"] + (sorted(os.listdir(profiles)) if os.path.isdir(profiles) else [])
+    selected = [n for n in include if n not in exclude]
+    if not selected:
+        return True
+    cfg = cfg or {}
+    unified = policy.get("management") == "unified" or any(
+        str(v).strip().lower() in ("1", "true", "yes", "on")
+        for v in (cfg.get("multiplex_profiles"), (cfg.get("gateway") or {}).get("multiplex_profiles")
+                  if isinstance(cfg.get("gateway"), dict) else None))
+    # Unified: any selection is served by the default gateway on 8642.
+    return "default" not in selected and not unified
 
 
 def call_provider(base_url, api_key, model):
@@ -278,15 +304,16 @@ def main():
     # Web chat does not go through the gateway: it serves bots, Hermes cron
     # jobs and the 8642 API. Since Web UI 0.7.26 it starts only when
     # data/webui/config.json allows it, so a closed 8642 can be a choice.
+    switched_off = gateway_autostart_off(load_env(), cfg)
     if gateway_up:
         print("  %s 消息网关 (端口 8642): 运行中" % OK)
-    elif gateway_autostart_off():
-        print("  [i]  消息网关 (端口 8642): 已在网页界面设置里关掉（网页聊天不需要它，机器人和定时任务需要）")
+    elif switched_off:
+        print("  [i]  消息网关 (端口 8642): 按网页界面「Gateway 自动启动」的设置没有启动（网页聊天不需要它，机器人和定时任务需要）")
     else:
         print("  %s 消息网关 (端口 8642): 未运行（机器人和定时任务要用它，网页聊天不受影响）" % WARN)
     if not webui_up:
         problems.append("Web 界面没在运行，请双击 Windows-Start.bat。")
-    elif not gateway_up and not gateway_autostart_off():
+    elif not gateway_up and not switched_off:
         problems.append("消息网关没有起来：机器人不回消息、定时任务不执行。关掉 U-Hermes 再双击 Windows-Start.bat 试一次。")
 
     # 4. API 连通性

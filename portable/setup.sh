@@ -387,7 +387,18 @@ if [ ! -f "$WEBUI_SERVER" ]; then
         # this file with no China mirror behind it, so failing is the LIKELY
         # case for this audience -- and an abort would skip the cache
         # cleanup, the retry message, and initialize_data below it.
-        if npm_config_cache="$RUNTIME_DIR/.npm-cache"            "$NPM_CMD" install -g "$WEBUI_SPEC" --prefix "$NODE_DIR"; then
+        #
+        # npm replaces the whole package folder; the Ekko agent's data may
+        # still be inside it (Web UI 0.7.x outside production mode). Move it
+        # to data/webui first, and skip the install rather than let npm
+        # delete it (scripts/prepare-webui.py).
+        _py="$SCRIPT_DIR/hermes/.venv/bin/python"
+        if [ -x "$_py" ]; then
+            "$_py" "$SCRIPT_DIR/scripts/prepare-webui.py" "$SCRIPT_DIR" "$DATA_DIR/webui" "$NODE_DIR/lib/node_modules/hermes-web-ui" --move-only || true
+        fi
+        if [ -d "$NODE_DIR/lib/node_modules/hermes-web-ui/.ekko" ]; then
+            warn "The Ekko agent's data is still inside the Web UI package; not reinstalling it, so npm cannot delete that data."
+        elif npm_config_cache="$RUNTIME_DIR/.npm-cache"            "$NPM_CMD" install -g "$WEBUI_SPEC" --prefix "$NODE_DIR"; then
             :
         fi
         rm -rf "$RUNTIME_DIR/.npm-cache"

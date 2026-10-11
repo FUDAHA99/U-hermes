@@ -21,21 +21,33 @@ while the Web UI is not running yet. Three jobs, in this order:
    both live under HERMES_WEB_UI_HOME instead, which is how upstream's own
    CLI and desktop app run the server. Switching without moving them first
    would greet an upgraded stick with an empty chat list and a fresh
-   admin/123456, so this moves them, and the launcher sets NODE_ENV only
-   when this says the move is done.
+   admin/123456, so this moves them first; the launcher turns production
+   mode on when this exits 0, or when the chat database is already in
+   data\\webui (a previous run moved it, and the old mode would show it empty).
 
-   Moves are renames: one step on the same drive, so a database travels with
-   its side files and .ekko with its skill-cleanup marker (without that
-   marker, Ekko's next start quarantines and deletes the skills folder).
-   Nothing is ever overwritten or merged. When both places hold data, the one
-   in data\\webui is kept, unless it holds no conversations and the old one
-   does; the other is renamed aside next to it, never deleted. When the move
-   cannot happen now -- the Web UI is already running, a file is in use --
-   nothing moves and the exit code says so.
+   Both move, or neither does. Every database is settled first (SQLite rolls
+   back a hot journal, folds a WAL in) and the move is deferred while any of
+   them still has side files. Then .ekko goes first -- it is the one an open
+   Explorer window or a leftover process in its workspace can lock -- and the
+   database after it; if anything fails half way, every rename done so far
+   is undone. Moves are renames: one step on the same drive, so a database
+   travels with whatever SQLite needs and .ekko with its skill-cleanup marker
+   (without that marker, Ekko's next start quarantines and deletes the skills
+   folder). Nothing is ever overwritten or merged. When both places hold
+   data, the one in data\\webui is kept, unless it holds nothing of the
+   user's and the old one does; the other is renamed aside next to it, never
+   deleted. "Nothing of the user's" means: for the chat database, no
+   conversations; for .ekko, no memory, no skill the user added, no file in
+   its workspace -- not ekko.db's own sessions table, which the Web UI never
+   writes (Ekko chats live in the chat database).
 
    Ekko records each conversation's working folder as an absolute path into
    .ekko, in both databases. Paths that still point into the npm package are
-   pointed at the moved folder, on every run, until none are left.
+   pointed at wherever the old .ekko went, on every run, until none are left.
+
+   Windows refuses to rename a file or folder that is open, so a database in
+   use cannot move there; macOS does not refuse, and there only the port
+   check below stands between a running Web UI and the move.
 
 2. Turn on starting the gateway with the Web UI, unless the user chose.
    From Web UI 0.7.26 the Web UI starts the Hermes gateway -- messaging bots,
@@ -43,13 +55,19 @@ while the Web UI is not running yet. Three jobs, in this order:
    gatewayAutoStart.enabled is true, and nothing migrates the old default,
    which was "on unless switched off". No environment variable can turn it
    on. So: missing or not a true/false means on; a true or false the settings
-   page wrote is left alone. When the key is missing it is seeded with
-   include: ["default"]: engine 0.21.5 runs one gateway per computer that
-   serves every profile, and refuses a separate gateway for a named profile
-   (exit 78), which the Web UI would otherwise retry for each profile before
-   the page loads. The file must stay BOM-less: Node's JSON.parse rejects a
-   BOM, and the Web UI then ignores, and on its next save drops, every setting
-   in it. A BOM found there is removed.
+   page wrote is left alone. A BOM found there is removed: Node's JSON.parse
+   rejects it, and the Web UI then ignores, and on its next save drops,
+   every setting in the file.
+
+   Turning it on also means the Web UI restarts the gateway after settings
+   saves, per profile unless config.yaml says the gateway is unified -- and
+   engine 0.21.5 parks a named profile that gets `gateway stop` while the
+   default gateway serves it. That cannot happen here: the engine writes
+   `gateway.multiplex_profiles: true` itself whenever it decides to serve
+   every profile from one gateway, and the Web UI then sends every restart
+   to the default one. Writing that key ahead of the engine would be worse:
+   an explicit true skips the engine's own check for two profiles sharing a
+   bot's credentials.
 
 3. Make new chats start on Hermes.
    Web UI 0.7.30 lists Ekko first on the new-chat page, and from 0.7.32 the
@@ -64,13 +82,17 @@ Steps 2 and 3 never stop a launch; they report and carry on.
 Exit codes:
   0   the Web UI's data is where production mode looks for it
       (or there was none): start it with NODE_ENV=production
-  10  there was data to move and it could not be moved this time; nothing was
-      lost, start the old way and try again next launch
+  10  there was data to move and it could not be moved this time; nothing
+      moved, start the old way and try again next launch
   2   bad arguments
 
-Run:  python prepare-webui.py <install-dir> <webui-home> <package-dir> [--move-only]
+Run:  python prepare-webui.py <install-dir> <webui-home> <package-dir>
+                              [--move-only] [--legacy-db PATH]...
   --move-only   step 1 only; for Menu [9] and setup.ps1, before npm reinstalls
                 the package
+  --legacy-db   another place an older launcher left the chat database
+                (Mac-Start.command passes ~/packages/server/data/..., where a
+                Finder double-click with no cd put it)
 """
 import errno
 import io
@@ -79,6 +101,7 @@ import os
 import shutil
 import socket
 import sqlite3
+import stat
 import sys
 import time
 
@@ -93,6 +116,7 @@ EKKO = ".ekko"
 SIDE_FILES = ("-journal", "-wal", "-shm")
 # Where a dev-mode Ekko workspace path points: <package>\.ekko\workspace\...
 OLD_EKKO_SUFFIXES = ("\\node_modules\\hermes-web-ui\\.ekko", "/node_modules/hermes-web-ui/.ekko")
+BUILTIN_SKILLS = ".ekko-builtin-skills.json"
 
 CONFIG_NAME = "config.json"
 SEEDED_POLICY = {"enabled": True, "include": ["default"]}
@@ -127,6 +151,22 @@ def _cross_drive(err):
     return getattr(err, "winerror", None) == 17 or err.errno == errno.EXDEV
 
 
+def _writable_then_retry(func, path, _exc):
+    """rmtree helper: git and some tools leave read-only files behind."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        raise
+
+
+def _rmtree(path):
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_writable_then_retry)
+    else:
+        shutil.rmtree(path, onerror=_writable_then_retry)
+
+
 def move(src, dst):
     """Rename src to dst; copy then delete when they are on different drives.
     Never overwrites: os.rename would on macOS."""
@@ -138,90 +178,161 @@ def move(src, dst):
     except OSError as e:
         if not _cross_drive(e):
             raise
-    # HERMES_WEB_UI_HOME moved to another drive in data\.env. Complete copy
-    # first, under a name nothing reads, then one rename; the source goes last.
+    # data\ is a link to another drive (or HERMES_WEB_UI_HOME points there).
+    # Complete copy first, under a name nothing reads, then one rename; the
+    # source goes last. Copies an earlier interrupted run left are ours and
+    # incomplete: they go first.
+    parent, name = os.path.split(dst)
+    for stale in os.listdir(parent):
+        if stale.startswith(name + ".partial-"):
+            stale = os.path.join(parent, stale)
+            _rmtree(stale) if os.path.isdir(stale) else os.remove(stale)
     partial = dst + ".partial-" + stamp()
     if os.path.isdir(src):
-        shutil.copytree(src, partial)
-        os.rename(partial, dst)
-        shutil.rmtree(src)
+        shutil.copytree(src, partial, symlinks=True)
     else:
         shutil.copy2(src, partial)
-        os.rename(partial, dst)
-        os.remove(src)
+    os.rename(partial, dst)
+    try:
+        _rmtree(src) if os.path.isdir(src) else os.remove(src)
+    except OSError as e:
+        # Everything is safe at dst. What is left of src must not keep
+        # looking like data still to move, or every later run would copy it
+        # again and the reinstall guards would refuse npm for good.
+        leftover = src + "-leftover-" + stamp()
+        try:
+            os.rename(src, leftover)
+            say("[i] 旧位置还剩一些删不掉的文件（%s），已改名为 %s，可以手动删掉。" % (e, leftover))
+        except OSError:
+            say("[!] 数据已经完整复制到 %s，但旧位置 %s 删不掉（%s），请手动删掉。" % (dst, src, e))
 
 
 def settle(db):
     """Let SQLite finish what a crash left half-done -- roll back a hot
     journal, fold a WAL back in -- so the database is one file before it
-    moves. True when no side file is left."""
+    moves. True when no side file is left and nothing holds a lock."""
     try:
         con = sqlite3.connect(db, timeout=2)
         try:
             con.execute("SELECT count(*) FROM sqlite_master").fetchone()
         finally:
             con.close()
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e) or "busy" in str(e):
+            return False
     except sqlite3.Error:
         pass  # a database SQLite cannot open moves as it is; the Web UI says what is wrong with it
     return not any(os.path.exists(db + s) for s in SIDE_FILES)
 
 
-def conversations(db):
-    """Rows in the sessions table; 0 when the database or the table is missing."""
+def count_rows(db, *tables):
+    """Rows in these tables together; a missing database or table counts 0."""
     if not os.path.isfile(db):
         return 0
+    total = 0
     try:
         con = sqlite3.connect(db, timeout=2)
         try:
-            return con.execute("SELECT count(*) FROM sessions").fetchone()[0]
+            for table in tables:
+                try:
+                    total += con.execute('SELECT count(*) FROM "%s"' % table).fetchone()[0]
+                except sqlite3.OperationalError:
+                    pass
         finally:
             con.close()
     except sqlite3.Error:
-        return 0
+        pass
+    return total
 
 
-def move_database(src, dst):
-    if not settle(src):
-        say("[!] 网页界面的聊天记录库（%s）旁边还有没收尾的临时文件，这次先不搬，下次启动再试。" % src)
-        return False
-    if not os.path.exists(dst):
-        move(src, dst)
-        say("[OK] 网页界面的账号和聊天列表已搬到 %s。" % os.path.dirname(dst))
+def chat_db_has_data(db):
+    return count_rows(db, "sessions") > 0
+
+
+def ekko_has_data(root):
+    """Does this .ekko hold anything of the user's? Its memory, a skill the
+    user added, a file Ekko wrote in its workspace. Bundled skills, logs and
+    the MCP servers the Web UI injects into config.json at every start do
+    not count; neither does ekko.db's sessions table, which nothing writes."""
+    if count_rows(os.path.join(root, "ekko.db"), "memory_nodes", "memory_messages") > 0:
         return True
-    if not settle(dst):
-        say("[!] %s 正被占用，网页界面的聊天记录库这次先不搬。" % dst)
-        return False
-    if conversations(dst) == 0 and conversations(src) > 0:
-        aside = dst + ".empty-" + stamp()
-        move(dst, aside)
+    for dirpath, _dirs, files in os.walk(os.path.join(root, "workspace")):
+        if files:
+            return True
+    skills = os.path.join(root, "skills")
+    for profile in (os.listdir(skills) if os.path.isdir(skills) else []):
+        folder = os.path.join(skills, profile)
+        if not os.path.isdir(folder):
+            continue
+        try:
+            with io.open(os.path.join(folder, BUILTIN_SKILLS), encoding="utf-8-sig") as f:
+                builtin = set(json.load(f))
+        except (OSError, ValueError, TypeError):
+            builtin = set()
+        if any(os.path.isdir(os.path.join(folder, n)) and n not in builtin and not n.startswith(".")
+               for n in os.listdir(folder)):
+            return True
+    return False
+
+
+class Journal(object):
+    """Every rename done in this run, so a failure part way can undo them."""
+
+    def __init__(self):
+        self.done = []
+
+    def move(self, src, dst):
         move(src, dst)
+        self.done.append((src, dst))
+
+    def undo(self):
+        failed = []
+        for src, dst in reversed(self.done):
+            try:
+                move(dst, src)
+            except OSError as e:
+                failed.append("%s -> %s（%s）" % (dst, src, e))
+        self.done = []
+        return failed
+
+
+def place_ekko(src, dst, journal):
+    """Move the old .ekko into place; return where it ended up."""
+    if not os.path.exists(dst):
+        journal.move(src, dst)
+        say("[OK] Ekko 智能体的记忆、技能和它写的文件已搬到 %s，" % dst)
+        say("     以后重装网页界面不会再清掉它们。")
+        return dst
+    if not ekko_has_data(dst) and ekko_has_data(src):
+        aside = dst + "-empty-" + stamp()
+        journal.move(dst, aside)
+        journal.move(src, dst)
+        say("[i] %s 里没有你的数据，已改名为 %s，换上原来的 Ekko 数据。" % (dst, os.path.basename(aside)))
+        return dst
+    aside = dst + "-legacy-" + stamp()
+    journal.move(src, aside)
+    say("[i] 网页界面安装目录里还有一份旧的 Ekko 数据，%s 里已经有在用的一份。" % dst)
+    say("    旧的那份没有合并，改名放在 %s。" % aside)
+    return aside
+
+
+def place_database(src, dst, journal):
+    if not os.path.exists(dst):
+        journal.move(src, dst)
+        say("[OK] 网页界面的账号和聊天列表已搬到 %s。" % os.path.dirname(dst))
+        return
+    if not settle(dst):
+        raise OSError(errno.EBUSY, "正被占用", dst)
+    if not chat_db_has_data(dst) and chat_db_has_data(src):
+        aside = dst + ".empty-" + stamp()
+        journal.move(dst, aside)
+        journal.move(src, dst)
         say("[i] %s 里那份聊天记录库是空的，已改名为 %s，换上原来那份。" % (os.path.dirname(dst), os.path.basename(aside)))
     else:
         aside = dst + ".legacy-" + stamp()
-        move(src, aside)
+        journal.move(src, aside)
         say("[i] 旧位置还有一份网页聊天记录库，%s 里已经有在用的一份。" % os.path.dirname(dst))
         say("    旧的那份没有合并，改名放在 %s。" % aside)
-    return True
-
-
-def move_ekko(src, dst):
-    if not os.path.exists(dst):
-        move(src, dst)
-        say("[OK] Ekko 智能体的记忆、技能和它写的文件已搬到 %s，" % dst)
-        say("     以后重装网页界面不会再清掉它们。")
-        return True
-    old_db, new_db = os.path.join(src, "ekko.db"), os.path.join(dst, "ekko.db")
-    if conversations(new_db) == 0 and conversations(old_db) > 0:
-        aside = dst + "-empty-" + stamp()
-        move(dst, aside)
-        move(src, dst)
-        say("[i] %s 是空的，已改名为 %s，换上原来的 Ekko 数据。" % (dst, os.path.basename(aside)))
-    else:
-        aside = dst + "-legacy-" + stamp()
-        move(src, aside)
-        say("[i] 网页界面安装目录里还有一份旧的 Ekko 数据，%s 里已经有在用的一份。" % dst)
-        say("    旧的那份没有合并，改名放在 %s。" % aside)
-    return True
 
 
 def remove_empty_dirs(path, stop):
@@ -236,12 +347,15 @@ def remove_empty_dirs(path, stop):
         path = os.path.dirname(path)
 
 
-def move_legacy_data(install, home, package):
-    """True when nothing is left where only the old layout looks."""
-    old_db = os.path.join(install, "packages", "server", "data", DB_NAME)
+def move_legacy_data(install, home, package, legacy_dbs=()):
+    """(ready, where the old .ekko went or None). Ready means nothing is
+    left where only the old layout looks."""
+    old_dbs = [os.path.join(install, "packages", "server", "data", DB_NAME)]
+    old_dbs += [os.path.abspath(p) for p in legacy_dbs]
+    old_dbs = [p for p in old_dbs if os.path.isfile(p)]
     old_ekko = os.path.join(package, EKKO)
-    if not (os.path.exists(old_db) or os.path.exists(old_ekko)):
-        return True
+    if not old_dbs and not os.path.exists(old_ekko):
+        return True, None
     try:
         port = int(os.environ.get("PORT") or 8648)
     except ValueError:
@@ -249,31 +363,42 @@ def move_legacy_data(install, home, package):
     if port_in_use(port):
         say("[!] 端口 %d 已经有程序在用，可能 U-Hermes 已经开着。" % port)
         say("    网页界面的数据这次先不搬，关掉它以后再启动就会自动搬。")
-        return False
-    os.makedirs(home, exist_ok=True)
-    ready = True
-    for what, src, dst, step in (
-            ("网页界面的聊天记录库", old_db, os.path.join(home, DB_NAME), move_database),
-            ("Ekko 智能体的数据", old_ekko, os.path.join(home, EKKO), move_ekko)):
-        if not os.path.exists(src):
-            continue
-        try:
-            ready = step(src, dst) and ready
-        except OSError as e:
-            say("[!] %s这次没搬成（%s）。数据还在原处，没有丢，下次启动再试。" % (what, e))
-            ready = False
-    remove_empty_dirs(os.path.dirname(old_db), install)
-    return ready
+        return False, None
+    for db in old_dbs:
+        if not settle(db):
+            say("[!] 网页界面的聊天记录库（%s）正被占用，或者旁边还有没收尾的临时文件，" % db)
+            say("    这次先不搬，什么都没动，下次启动再试。")
+            return False, None
+    journal = Journal()
+    ekko_went = None
+    try:
+        os.makedirs(home, exist_ok=True)
+        if os.path.exists(old_ekko):
+            ekko_went = place_ekko(old_ekko, os.path.join(home, EKKO), journal)
+        for db in old_dbs:
+            place_database(db, os.path.join(home, DB_NAME), journal)
+    except (OSError, KeyboardInterrupt) as e:
+        failed = journal.undo()
+        what = "被中断" if isinstance(e, KeyboardInterrupt) else str(e)
+        say("[!] 网页界面的数据这次没搬成（%s），已经放回原处，什么都没丢，下次启动再试。" % what)
+        say("    多半是有文件正被占用：关掉开着的文件夹窗口，或者重启电脑后再启动。")
+        for line in failed:
+            say("[!] 没能放回：%s，请手动改回去。" % line)
+        return False, None
+    for db in old_dbs:
+        remove_empty_dirs(os.path.dirname(db), install)
+    return True, ekko_went
 
 
-def repoint_workspaces(home):
+def repoint_workspaces(home, new_root=None):
     """Point Ekko conversations whose working folder is inside the npm
-    package at the same folder under the moved .ekko. Returns how many."""
-    new_root = os.path.join(home, EKKO)
+    package at the same folder under new_root (where the old .ekko went;
+    by default the .ekko in home). Returns how many."""
+    new_root = new_root or os.path.join(home, EKKO)
     if not os.path.isdir(new_root):
         return 0
     changed = 0
-    for db in (os.path.join(home, DB_NAME), os.path.join(new_root, "ekko.db")):
+    for db in (os.path.join(home, DB_NAME), os.path.join(home, EKKO, "ekko.db")):
         if not os.path.isfile(db):
             continue
         con = sqlite3.connect(db, timeout=2)
@@ -389,26 +514,44 @@ def seed_default_agent(package):
 
 # --- entry -------------------------------------------------------------------
 
-def main(argv):
-    args = [a for a in argv[1:] if a != "--move-only"]
-    move_only = len(args) != len(argv) - 1
-    if len(args) != 3:
-        print("usage: prepare-webui.py <install-dir> <webui-home> <package-dir> [--move-only]")
-        return 2
-    install, home, package = (os.path.abspath(a) for a in args)
+def parse(argv):
+    args, legacy, move_only = [], [], False
+    it = iter(argv[1:])
+    for a in it:
+        if a == "--move-only":
+            move_only = True
+        elif a == "--legacy-db":
+            legacy.append(next(it, ""))
+        else:
+            args.append(a)
+    if len(args) != 3 or "" in legacy:
+        return None
+    return args, legacy, move_only
 
-    ready = move_legacy_data(install, home, package)
+
+def main(argv):
+    parsed = parse(argv)
+    if parsed is None:
+        print("usage: prepare-webui.py <install-dir> <webui-home> <package-dir> [--move-only] [--legacy-db PATH]...")
+        return 2
+    (install, home, package), legacy, move_only = parsed
+    install, home, package = (os.path.abspath(a) for a in (install, home, package))
+
+    try:
+        ready, ekko_went = move_legacy_data(install, home, package, legacy)
+    except KeyboardInterrupt:
+        return DEFERRED
     if ready:
         try:
-            n = repoint_workspaces(home)
+            n = repoint_workspaces(home, ekko_went)
             if n:
                 say("[i] 已把 %d 处 Ekko 对话的工作文件夹指到新位置。" % n)
         except sqlite3.Error as e:
             say("[!] Ekko 对话的工作文件夹没能指到新位置（%s），下次启动再试。" % e)
     if not move_only:
-        for step, arg in ((seed_gateway_autostart, home), (seed_default_agent, package)):
+        for step, args in ((seed_gateway_autostart, (home,)), (seed_default_agent, (package,))):
             try:
-                step(arg)
+                step(*args)
             except Exception as e:  # never stop the launch over a preference
                 say("[!] %s 没做完（%s），不影响启动。" % (step.__name__, e))
     return READY if ready else DEFERRED

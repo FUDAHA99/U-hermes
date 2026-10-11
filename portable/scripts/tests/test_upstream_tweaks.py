@@ -114,6 +114,22 @@ CPRINT_DRIFTED = '''def _cprint(text: str):
     _pt_print_ansi(text)
 '''
 
+# The realistic next drift: paint_fallback kept, the raw paint reshaped.
+CPRINT_RESHAPED = CPRINT_PAINTS.replace(
+    "paint_pt = _painted(lambda: _pt_print(_PT_ANSI(text)))",
+    "rendered = _PT_ANSI(text)" + chr(10) + "    paint_pt = _painted(lambda: _pt_print(rendered))")
+
+# No helper anywhere and no shape we know: the injected helper would go unused.
+CPRINT_NO_HELPER = '''def _cprint(text: str):
+    from cli import _PT_ANSI, _pt_print
+    try:
+        from prompt_toolkit.application import get_app_or_none
+    except Exception:
+        emit = _pt_print
+        emit(_PT_ANSI(text))
+        return
+'''
+
 HELPER = '''def _pt_print_ansi(text: str) -> None:
     from cli import _PT_ANSI, _pt_print
     try:
@@ -154,8 +170,11 @@ def checkout(layout):
     write(root, "web/src/i18n/context.tsx", LOCALE)
     if layout == "v2026.9.14":
         write(root, "cli.py", "import os\n\n\n" + HELPER + CPRINT)
-    elif layout in ("v2026.9.24", "drifted", "guarded"):
-        body = {"v2026.9.24": CPRINT_PAINTS, "drifted": CPRINT_DRIFTED, "guarded": CPRINT + GUARDED}[layout]
+    elif layout == "no-helper":
+        write(root, "cli.py", "import os" + chr(10) * 3 + CPRINT_NO_HELPER)
+    elif layout in ("v2026.9.24", "drifted", "guarded", "reshaped"):
+        body = {"v2026.9.24": CPRINT_PAINTS, "drifted": CPRINT_DRIFTED, "guarded": CPRINT + GUARDED,
+                "reshaped": CPRINT_RESHAPED}[layout]
         write(root, "cli.py",
               "from hermes_cli.cli_render import (  # noqa: F401\n"
               "    _cprint,\n    _pt_print_ansi,\n)\n")
@@ -313,6 +332,22 @@ def test_a_raw_print_in_a_new_shape_stops_the_build():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_a_reshaped_raw_paint_stops_the_build():
+    print("v2026.9.24 with its raw paint reshaped: no anchor matches, the end state still fails")
+    for layout, label in (("reshaped", "_pt_print(rendered) next to an already safe paint_fallback"),
+                          ("no-helper", "no helper upstream and nothing to route: ours would go unused")):
+        root = checkout(layout)
+        try:
+            rel = "cli.py" if layout == "no-helper" else "hermes_cli/cli_render.py"
+            before = read(root, rel)
+            code, out = run_tweak(root)
+            check(code == 1, "%s: the tweak exits 1" % label)
+            check("already in place" not in out and read(root, rel) == before,
+                  "%s: claims nothing, changes nothing" % label)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 def test_the_guarded_run_in_terminal_print_is_not_a_bail_out():
     print("v2026.9.14-v2026.9.21 hand the raw print to run_in_terminal under suppress()")
     root = checkout("guarded")
@@ -343,6 +378,7 @@ if __name__ == "__main__":
     test_the_paint_layout_is_patched()
     test_a_raw_print_in_a_new_shape_stops_the_build()
     test_the_guarded_run_in_terminal_print_is_not_a_bail_out()
+    test_a_reshaped_raw_paint_stops_the_build()
     test_if_upstream_moves_it_again_the_build_still_stops()
     print("")
     if FAILURES:

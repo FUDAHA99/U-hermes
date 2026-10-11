@@ -537,11 +537,16 @@ jobs:
               Start-Sleep -Seconds 2
             }
             if (-not $gateway) { $webuiProblems += "the gateway never answered on 8642 (gatewayAutoStart not turned on?)" }
-            $page = (Invoke-WebRequest -Uri "http://127.0.0.1:8648/" -UseBasicParsing -TimeoutSec 5).Content
-            if ($page -notmatch 'data-u-hermes="default-agent"') { $webuiProblems += "the page has no new-chats-on-Hermes script" }
+            # Guarded like every other request here: an exception would end the
+            # step before the launcher's own output is printed below.
+            try { $page = (Invoke-WebRequest -Uri "http://127.0.0.1:8648/" -UseBasicParsing -TimeoutSec 5).Content }
+            catch { $page = $null; $webuiProblems += "the page stopped answering after startup: $($_.Exception.Message)" }
+            if ($null -ne $page -and $page -notmatch 'data-u-hermes="default-agent"') { $webuiProblems += "the page has no new-chats-on-Hermes script" }
             $client = Join-Path $work "runtime\node-win-x64\node_modules\hermes-web-ui\dist\client\assets\js"
-            if (-not (Select-String -Path (Join-Path $client "*.js") -SimpleMatch "hermes_new_chat_agent_v1" -List -Quiet)) {
-              $webuiProblems += "the Web UI client no longer reads hermes_new_chat_agent_v1; the script seeds nothing"
+            $reads = $false
+            try { $reads = [bool](Select-String -Path (Join-Path $client "*.js") -SimpleMatch "hermes_new_chat_agent_v1" -List -Quiet) } catch {}
+            if (-not $reads) {
+              $webuiProblems += "the Web UI client no longer reads hermes_new_chat_agent_v1 (or dist\client\assets\js moved); the script seeds nothing"
             }
             if (Get-NetUDPEndpoint -LocalPort 48640 -ErrorAction SilentlyContinue) { $webuiProblems += "something listens on UDP 48640 (LAN discovery)" }
           }
@@ -758,6 +763,7 @@ jobs:
           "$PY" scripts/tests/test_version_check.py
           "$PY" scripts/tests/test_upstream_tweaks.py
           "$PY" scripts/tests/test_launcher_env.py
+          "$PY" scripts/tests/test_prepare_webui.py
           "$PY" scripts/tests/test_prune_stale_files.py
           "$PY" scripts/tests/test_remove_old_host_copy.py
 

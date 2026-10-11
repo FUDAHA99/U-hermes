@@ -332,23 +332,43 @@ def test_production_mode_only_after_the_data_moved():
         loader, node, prepare = loader[0], node[0], prepare[0]
         check('"%HERMES_WEB_UI_HOME%"' in lines[prepare] and "node_modules\\hermes-web-ui" in lines[prepare],
               "prepare-webui.py gets the Web UI home and the package it moves out of")
+        # Exactly 0: "if not errorlevel 1" alone is also true for the negative
+        # code a Ctrl+C leaves, which would start production mid-move.
         check([lines[i].strip() for i in mentions] == [
                 'set "NODE_ENV="',
-                'if not errorlevel 1 set "NODE_ENV=production"',
+                'if errorlevel 0 if not errorlevel 1 set "NODE_ENV=production"',
                 'if exist "%HERMES_WEB_UI_HOME%\\hermes-web-ui.db" set "NODE_ENV=production"'],
               "NODE_ENV is cleared, then set only on prepare's exit 0 or when the moved database is there")
         check(loader < mentions[0] < prepare < mentions[1] < mentions[2] < node,
               "...in that order, after data\\.env and before node starts")
         check(_block_depth(lines, prepare) == 0 and all(_block_depth(lines, i) == 0 for i in mentions),
               "...outside any ( ) block, so errorlevel is read when the line runs")
-        home = [i for i, l in _code(lines) if assignment(l, "HERMES_WEB_UI_HOME") == "%DATA_DIR%\\webui"]
-        check(bool(home) and home[0] < loader, "HERMES_WEB_UI_HOME is data\\webui unless data\\.env says otherwise")
+        home = [i for i, l in _code(lines) if assignment(l, "HERMES_WEB_UI_HOME") is not None]
+        check(bool(home) and all(assignment(lines[i], "HERMES_WEB_UI_HOME") == "%DATA_DIR%\\webui" for i in home)
+              and loader < home[-1] < prepare and _block_depth(lines, home[-1]) == 0,
+              "HERMES_WEB_UI_HOME is set to data\\webui again after data\\.env: Menu [9] and setup.ps1 move data there")
+    check(prep_constants() == (0, 10), "prepare-webui.py's READY/DEFERRED are the 0/10 these lines test for")
     mac = read_lines("Mac-Start.command")
     source = _where(mac, 'source "$DATA_DIR/.env"')
-    order = [_where(mac, n) for n in ("unset NODE_ENV", "prepare-webui.py", "export NODE_ENV=production",
+    full = [i for i in _where(mac, "prepare-webui.py") if "--move-only" not in mac[i]]
+    order = [_where(mac, n) for n in ("unset NODE_ENV", "export NODE_ENV=production",
                                        'cd "$SCRIPT_DIR"', '"$NODE_EXE" "$WEBUI_SERVER"')]
-    check(source and all(order) and source[0] < order[0][0] < order[1][0] < order[2][0] < order[3][-1] < order[4][-1],
+    check(source and len(full) == 1 and all(order)
+          and source[0] < order[0][0] < full[0] < order[1][0] < order[2][-1] < order[3][-1],
           "Mac-Start.command: unset, prepare, export, cd, node -- after data/.env")
+    check(len(order[1]) == 1 and mac[order[1][0] - 1].strip()
+          == 'if [ "$UH_PREPARED" -eq 0 ] || [ -f "$HERMES_WEB_UI_HOME/hermes-web-ui.db" ]; then',
+          "...exported only on exit 0 or when the moved database is there")
+    home = _where(mac, 'export HERMES_WEB_UI_HOME="$DATA_DIR/webui"')
+    check(source and home and home[-1] > source[0] and home[-1] < full[0] if full else False,
+          "...and HERMES_WEB_UI_HOME is data/webui again after data/.env")
+
+
+def prep_constants():
+    with open(os.path.join(PORTABLE, "scripts", "prepare-webui.py"), encoding="utf-8") as f:
+        text = f.read()
+    got = [re.search(r"^%s = (\d+)" % n, text, re.M) for n in ("READY", "DEFERRED")]
+    return tuple(int(m.group(1)) if m else None for m in got)
 
 
 PRIVACY_DEFAULTS = [("BIND_HOST", "127.0.0.1"), ("STUDIO_PUSH_CONTENT_PREVIEW", "0"),
@@ -376,6 +396,9 @@ def test_every_reinstall_moves_ekko_out_first():
     guard = _where(lines, 'if exist "%NODE_DIR%\\node_modules\\hermes-web-ui\\.ekko\\" goto :ekko_stuck')
     check(bool(installs) and len(move) == 1 and len(guard) == 1 and move[0] < guard[0] < installs[0],
           "Windows-Start.bat: move, then stop if .ekko is still there, then npm")
+    check(len(move) == 1 and '"%HERMES_WEB_UI_HOME%"' in lines[move[0]]
+          and '"%NODE_DIR%\\node_modules\\hermes-web-ui"' in lines[move[0]],
+          "...moving to the Web UI home, out of the package npm replaces")
     stuck = _where(lines, ":ekko_stuck")
     check(len(stuck) == 2 and lines[stuck[1]].strip() == ":ekko_stuck"
           and "exit /b 1" in "".join(lines[stuck[1]:stuck[1] + 9]), "...where it explains and exits")
@@ -393,6 +416,9 @@ def test_every_reinstall_moves_ekko_out_first():
     check(update and len(move) == 1 and len(guard) == 1 and len(calls) == 1
           and update[0] < move[0] < guard[0] < calls[0] < label[0],
           "...called from [9] only after the move, in the else of the .ekko check")
+    check(len(move) == 1 and '"%SCRIPT_DIR%\\data\\webui"' in menu[move[0]]
+          and '"%NODE_DIR%\\node_modules\\hermes-web-ui"' in menu[move[0]],
+          "...moving to data\\webui (where the launcher keeps it), out of the package")
 
     with open(os.path.join(PORTABLE, "setup.ps1"), "rb") as f:
         setup = f.read().decode("utf-8-sig").splitlines()
@@ -402,11 +428,98 @@ def test_every_reinstall_moves_ekko_out_first():
     check(len(saves) == 2 and wipe and npm and saves[0] < wipe[0] and saves[0] < wipe[0] < saves[1] < npm[0],
           "setup.ps1: Save-WebUiData before Install-Node wipes the Node folder and before npm install")
 
+    for name, npm_needle, move_needle, guard_needle in (
+            ("Mac-Start.command", 'npm install -g "$WEBUI_SPEC"', "--move-only",
+             'if [ -d "$NODE_DIR/lib/node_modules/hermes-web-ui/.ekko" ]; then'),
+            ("setup.sh", 'install -g "$WEBUI_SPEC"', "--move-only",
+             'if [ -d "$NODE_DIR/lib/node_modules/hermes-web-ui/.ekko" ]; then')):
+        lines = read_lines(name)
+        installs, moves, guards = _where(lines, npm_needle), _where(lines, move_needle), _where(lines, guard_needle)
+        check(len(installs) == 1 and moves and guards and moves[0] < guards[0] < installs[0],
+              "%s: move, then refuse while .ekko is still there, then npm" % name)
+
+
+def _ps_function(text, name):
+    """The source of `function <name> { ... }` in a .ps1, by brace matching."""
+    start = text.index("function %s {" % name)
+    depth, i = 0, text.index("{", start)
+    while True:
+        depth += {"{": 1, "}": -1}.get(text[i], 0)
+        if depth == 0:
+            return text[start:i + 1]
+        i += 1
+
+
+def test_setup_ps1_save_webui_data_returns_nothing():
+    """Install-Node calls Save-WebUiData and returns the Node folder. Anything
+    Save-WebUiData lets through to the pipeline joins that return value: the
+    first version let prepare-webui.py's messages through, so on every stick
+    still holding .ekko, `setup.ps1 -Force` died at step 6 with "Cannot find
+    drive" -- after Node had been wiped. Run the function as setup.ps1 has it,
+    under Windows PowerShell, on a stick that has an .ekko to move."""
+    print("setup.ps1: Save-WebUiData moves .ekko and puts nothing into its caller's return value")
+    import shutil
+    import subprocess
+    ps = shutil.which("powershell.exe") or shutil.which("powershell")
+    py = os.path.join(PORTABLE, "runtime", "python-win-x64", "python.exe")
+    if not ps or not os.path.isfile(py):
+        print("  skip  needs Windows PowerShell and the bundled runtime\\python-win-x64")
+        return
+    with open(os.path.join(PORTABLE, "setup.ps1"), encoding="utf-8-sig") as f:
+        text = f.read()
+    stick = tempfile.mkdtemp(prefix="save-webui-")
+    try:
+        os.makedirs(os.path.join(stick, "scripts"))
+        shutil.copy2(os.path.join(PORTABLE, "scripts", "prepare-webui.py"), os.path.join(stick, "scripts"))
+        node = os.path.join(stick, "runtime", "node-win-x64")
+        ekko = os.path.join(node, "node_modules", "hermes-web-ui", ".ekko")
+        os.makedirs(os.path.join(ekko, "skills"))
+        with open(os.path.join(ekko, "skills", "mine.md"), "w") as f:
+            f.write("x")
+        os.makedirs(os.path.join(stick, "data"))
+        script = os.path.join(stick, "probe.ps1")
+        with open(script, "w", encoding="utf-8-sig") as f:
+            f.write('$ErrorActionPreference = "Stop"\r\n')
+            f.write("$scriptDir = '%s'\r\n$dataDir = '%s'\r\n$runtimeDir = '%s'\r\n"
+                    % (stick, os.path.join(stick, "data"), os.path.join(PORTABLE, "runtime")))
+            f.write(_ps_function(text, "Invoke-Native") + "\r\n")
+            f.write(_ps_function(text, "Save-WebUiData") + "\r\n")
+            f.write("function Probe { Save-WebUiData -NodeDir '%s'; return 'THE-NODE-DIR' }\r\n" % node)
+            f.write("try { $r = Probe } catch { Write-Host 'RESULT:THREW'; exit 0 }\r\n")
+            f.write("if ($r -is [string] -and $r -eq 'THE-NODE-DIR') { Write-Host 'RESULT:SINGLE' }"
+                    " else { Write-Host ('RESULT:LEAKED ' + @($r).Count) }\r\n")
+
+        def probe():
+            out = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+                                 capture_output=True, timeout=180)
+            return out.stdout.decode("utf-8", "replace") + out.stderr.decode("utf-8", "replace")
+        text_out = probe()
+        check("RESULT:SINGLE" in text_out, "the caller gets back only its own value (%s)"
+              % (text_out.strip().splitlines()[-1:] or ["no output"])[0])
+        check(not os.path.exists(ekko) and os.path.isfile(os.path.join(stick, "data", "webui", ".ekko", "skills", "mine.md")),
+              ".ekko was moved to data\\webui before anything could wipe it")
+        # Now one that cannot move: a file in it is open. Install-Node must
+        # not go on to Remove-Item the Node folder.
+        shutil.rmtree(os.path.join(stick, "data", "webui"))
+        os.makedirs(os.path.join(ekko, "skills"))
+        with open(os.path.join(ekko, "skills", "mine.md"), "w") as f:
+            f.write("x")
+        held = open(os.path.join(ekko, "skills", "mine.md"), "rb")
+        try:
+            text_out = probe()
+        finally:
+            held.close()
+        check("RESULT:THREW" in text_out, "with .ekko held open it throws, so nothing after it runs")
+        check(os.path.isfile(os.path.join(ekko, "skills", "mine.md")), "...and .ekko is still whole where it was")
+    finally:
+        shutil.rmtree(stick, ignore_errors=True)
+
 
 if __name__ == "__main__":
     test_production_mode_only_after_the_data_moved()
     test_web_ui_defaults_come_before_data_env()
     test_every_reinstall_moves_ekko_out_first()
+    test_setup_ps1_save_webui_data_returns_nothing()
     test_each_home_on_the_stick_keeps_its_locks_there_too()
     test_every_launcher_that_runs_the_engine_sets_a_home()
     test_every_way_into_the_engine_prunes_first()

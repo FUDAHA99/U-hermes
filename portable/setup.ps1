@@ -183,7 +183,7 @@ function Install-Python {
         $content = $content -replace "^#import site", "import site"
         # No BOM, whichever PowerShell runs this. Windows PowerShell 5.1's
         # -Encoding utf8 writes one; Python then reads the first entry as
-        # "﻿python313.zip", cannot find its standard library, and every
+        # "<BOM>python313.zip", cannot find its standard library, and every
         # start dies with "No module named 'encodings'" -- uv venv first.
         # CI runs pwsh 7, which writes none, so only a user's machine saw it.
         [System.IO.File]::WriteAllText($pthFile.FullName, (($content -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding $false))
@@ -258,7 +258,18 @@ function Save-WebUiData {
     $py = Join-Path $runtimeDir "python-win-x64\python.exe"
     if (Test-Path $py) {
         $prepare = Join-Path $scriptDir "scripts\prepare-webui.py"
-        Invoke-Native { & $py $prepare $scriptDir (Join-Path $dataDir "webui") $package --move-only }
+        # To the screen, not the pipeline: whatever a function lets through is
+        # part of what it returns, and Install-Node's caller would then get
+        # these lines along with the Node path ("Cannot find drive" at step
+        # 6, after Node had already been wiped). Read as UTF-8 meanwhile, or
+        # a default GBK console shows the Chinese lines as mojibake.
+        $prevOut = $null
+        try { $prevOut = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+        try {
+            Invoke-Native { & $py $prepare $scriptDir (Join-Path $dataDir "webui") $package --move-only } | Out-Host
+        } finally {
+            if ($prevOut) { try { [Console]::OutputEncoding = $prevOut } catch { } }
+        }
     }
     if (Test-Path $ekko) {
         throw "Ekko 智能体的数据还在 $ekko，没能先挪到 data\webui（原因见上面）。重装会删掉它们，所以停下了。关掉正在运行的 U-Hermes 再运行一次。"
