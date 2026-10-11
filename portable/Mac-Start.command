@@ -133,6 +133,12 @@ export HERMES_AGENT_ROOT="$HERMES_DIR/hermes-agent"
 export HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=1
 # Paired phone App: no reply text in push notifications (Windows-Start.bat).
 export STUDIO_PUSH_CONTENT_PREVIEW=0
+# No one-click "update" to an untested @latest, no LAN discovery on every
+# network, and npm keeps devDependencies under NODE_ENV=production; reasons
+# in Windows-Start.bat. data/.env loads after these and can change them.
+export HERMES_WEB_UI_DISABLE_UPDATE_CHECK=1
+export HERMES_LAN_DISCOVERY_ENABLED=0
+export npm_config_include=dev
 
 # Gateway API Server settings
 export API_SERVER_ENABLED=true
@@ -268,8 +274,23 @@ fi
 # --- Step 1: Kill leftover gateway processes ---
 lsof -ti:8642 2>/dev/null | xargs kill -9 2>/dev/null
 
-# Gateway is started automatically by the Web UI's GatewayManager.
-# Do NOT start it here — dual gateways cause port conflicts.
+# The Web UI starts the gateway itself, when data/webui/config.json allows it
+# (prepare-webui.py below turns that on unless the user switched it off).
+# Do NOT start it here -- dual gateways cause port conflicts.
+
+# Web UI data under data/webui (production mode), once whatever an older
+# version left elsewhere has moved there; new chats on Hermes. The reasons
+# are in scripts/prepare-webui.py and Windows-Start.bat. After data/.env, so
+# no line there can move where the data goes. The cd keeps a run that could
+# not move the data (NODE_ENV unset) writing its account database on the
+# stick: without it, a Finder double-click put it in ~/packages on the Mac.
+unset NODE_ENV
+"$VENV_PYTHON" "$SCRIPT_DIR/scripts/prepare-webui.py" "$SCRIPT_DIR" "$HERMES_WEB_UI_HOME" "$NODE_DIR/lib/node_modules/hermes-web-ui"
+UH_PREPARED=$?
+if [ "$UH_PREPARED" -eq 0 ] || [ -f "$HERMES_WEB_UI_HOME/hermes-web-ui.db" ]; then
+    export NODE_ENV=production
+fi
+cd "$SCRIPT_DIR" || exit 1
 
 echo "  [1/2] Starting Web UI (includes AI engine)..."
 

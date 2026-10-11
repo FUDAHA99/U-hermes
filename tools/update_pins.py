@@ -649,9 +649,8 @@ def render(results, repo="FUDAHA99/U-hermes"):
                 "  2. `powershell -NoProfile -ExecutionPolicy Bypass -File tools\\sync-to-instance.ps1 "
                 "-Target H:\\Hermes -Apply`",
                 "  3. `powershell -NoProfile -ExecutionPolicy Bypass -File H:\\Hermes\\setup.ps1 -Force`"
-                "（按新版本号重装运行环境和引擎，不碰 `data\\`。**注意**：网页界面自带的 Ekko "
-                "智能体把数据存在 `runtime\\` 里它自己的 `.ekko\\` 下，重装会清掉；"
-                "U 盘上如果有 Ekko 的会话，先备份）",
+                "（按新版本号重装运行环境和引擎，不碰 `data\\`。网页界面以前放在 `runtime\\` 里的 "
+                "Ekko 数据会先搬进 `data\\webui\\.ekko`，搬不了就停下，不会删）",
                 "  4. `H:\\Hermes\\hermes\\.venv\\Scripts\\python.exe H:\\Hermes\\scripts\\version_check.py`"
                 "：五项都是 OK，而且「钉住」那一列和上面「这次升级」表里的版本一致",
                 "  5. 双击 `Windows-Start.bat`，新建一个聊天：回复来自 Hermes（不是网页界面自带的 Ekko），"

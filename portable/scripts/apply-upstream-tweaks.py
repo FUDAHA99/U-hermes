@@ -47,6 +47,26 @@ CPRINT_HOMES = ("hermes_cli/cli_render.py", "cli.py")
 
 RAW_CALL = "        _pt_print(_PT_ANSI(text))\n        return\n"
 SAFE_CALL = "        _pt_print_ansi(text)\n        return\n"
+# v2026.9.24 builds the raw print once, as the paint the import-failure and
+# on-the-app's-loop branches call, next to a paint_fallback that is already
+# safe. Same fix, new shape.
+RAW_PAINT = "_painted(lambda: _pt_print(_PT_ANSI(text)))"
+SAFE_PAINT = "_painted(lambda: _pt_print_ansi(text))"
+RAW_PRINT = "_pt_print(_PT_ANSI(text))"
+# Not a bail-out: v2026.9.14-v2026.9.21 hand the raw print to run_in_terminal
+# inside `with suppress(Exception)`, deliberately without a fallback print
+# ("the sync path already printed").
+GUARDED_PRINTS = ("run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))",)
+
+
+def raw_prints_outside_helper(src):
+    """Raw prints left anywhere but inside _pt_print_ansi(), which calls it
+    under a try, and the guarded shapes above."""
+    start = src.find("def _pt_print_ansi")
+    if start >= 0:
+        end = src.find("\ndef ", start + 1)
+        src = src[:start] + (src[end:] if end >= 0 else "")
+    return src.count(RAW_PRINT) - sum(src.count(g) for g in GUARDED_PRINTS)
 
 HELPER_DEF = '''def _pt_print_ansi(text: str) -> None:
     """``_pt_print(ANSI(text))``, falling back to ``print`` when stdout is not a real console."""
@@ -82,18 +102,23 @@ def tweak_no_console(agent_dir):
         src = src.replace(anchor, HELPER_DEF + anchor, 1)
         print("  %s %s: injected _pt_print_ansi() helper" % (OK, name))
 
-    count = src.count(RAW_CALL)
+    count = src.count(RAW_CALL) + src.count(RAW_PAINT)
+    src = src.replace(RAW_CALL, SAFE_CALL).replace(RAW_PAINT, SAFE_PAINT)
+    # "Nothing to replace" used to count as "already done" whenever the
+    # helper's name appeared anywhere. Upstream calls the helper itself since
+    # v2026.9.24, so that let a release with a new raw print pass as patched
+    # and the build stayed green while patching nothing.
+    left = raw_prints_outside_helper(src)
+    if left:
+        raise TweakError(
+            "%s: %d raw '_pt_print(_PT_ANSI(text))' left outside _pt_print_ansi() -- "
+            "upstream changed the print path; review this tweak" % (name, left)
+        )
     if count:
-        src = src.replace(RAW_CALL, SAFE_CALL)
         write(path, src)
         print("  %s %s: routed %d bail-out print(s) through _pt_print_ansi()" % (OK, name, count))
-    elif "_pt_print_ansi(text)" in src:
-        print("  %s %s: no-console fallback already in place" % (SKIP, name))
     else:
-        raise TweakError(
-            "%s: found no '_pt_print(_PT_ANSI(text))' + return site and no "
-            "existing fallback -- upstream changed the print path; review this tweak" % name
-        )
+        print("  %s %s: no-console fallback already in place" % (SKIP, name))
 
 
 # --------------------------------------------------------------------------

@@ -157,6 +157,18 @@ def check_port(port):
         return False
 
 
+def gateway_autostart_off():
+    """True when the user switched off "start the gateway with the Web UI"
+    (data/webui/config.json, Web UI 0.7.26+). A missing or unreadable file is
+    not "off": the launcher turns it on unless the user chose."""
+    try:
+        with open(os.path.join(DATA_DIR, "webui", "config.json"), encoding="utf-8-sig") as f:
+            policy = json.load(f).get("gatewayAutoStart")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(policy, dict) and policy.get("enabled") is False
+
+
 def call_provider(base_url, api_key, model):
     """极简调用，返回 (ok, 中文消息)。
 
@@ -263,9 +275,19 @@ def main():
     webui_up = check_port(8648)
     gateway_up = check_port(8642)
     print("  %s Web 界面 (端口 8648): %s" % (OK if webui_up else WARN, "运行中" if webui_up else "未运行"))
-    print("  %s AI 引擎 (端口 8642): %s" % (OK if gateway_up else WARN, "运行中" if gateway_up else "未运行"))
-    if not (webui_up and gateway_up):
-        problems.append("服务未完全启动，请运行 Windows-Start.bat。")
+    # Web chat does not go through the gateway: it serves bots, Hermes cron
+    # jobs and the 8642 API. Since Web UI 0.7.26 it starts only when
+    # data/webui/config.json allows it, so a closed 8642 can be a choice.
+    if gateway_up:
+        print("  %s 消息网关 (端口 8642): 运行中" % OK)
+    elif gateway_autostart_off():
+        print("  [i]  消息网关 (端口 8642): 已在网页界面设置里关掉（网页聊天不需要它，机器人和定时任务需要）")
+    else:
+        print("  %s 消息网关 (端口 8642): 未运行（机器人和定时任务要用它，网页聊天不受影响）" % WARN)
+    if not webui_up:
+        problems.append("Web 界面没在运行，请双击 Windows-Start.bat。")
+    elif not gateway_up and not gateway_autostart_off():
+        problems.append("消息网关没有起来：机器人不回消息、定时任务不执行。关掉 U-Hermes 再双击 Windows-Start.bat 试一次。")
 
     # 4. API 连通性
     section("API 连通性")

@@ -166,6 +166,26 @@ set "HERMES_WEB_UI_STOP_GATEWAYS_ON_SHUTDOWN=1"
 :: this, so STUDIO_PUSH_CONTENT_PREVIEW=1 there turns it back on. Nothing is
 :: sent at all unless an App is paired. Live Activity titles are not covered.
 set "STUDIO_PUSH_CONTENT_PREVIEW=0"
+:: The Web UI asks npm for a newer version every 30 minutes and offers
+:: "update" in the account menu. One click installs hermes-web-ui@latest over
+:: the pinned one and restarts it as a hidden server this window no longer
+:: controls: the console says stopped while the stick stays busy, and every
+:: later start runs a version nobody tested here. Upstream's desktop app
+:: turns the check off for the same reason. HERMES_WEB_UI_DISABLE_UPDATE_CHECK=0
+:: in data\.env brings it back.
+set "HERMES_WEB_UI_DISABLE_UPDATE_CHECK=1"
+:: LAN discovery listens on UDP 48640 and 48648 on every network, whatever
+:: BIND_HOST says, and broadcasts on each start: anyone on a cafe or office
+:: network can learn this PC's name, OS and versions, and the first bind may
+:: raise a Windows Firewall prompt. It only finds other Studio servers, which
+:: could not reach this loopback-only one anyway. HERMES_LAN_DISCOVERY_ENABLED=1
+:: in data\.env brings it back.
+set "HERMES_LAN_DISCOVERY_ENABLED=0"
+:: The Web UI runs with NODE_ENV=production (set right before it starts),
+:: and every program the agent runs inherits it. npm then leaves out
+:: devDependencies, so "build me a web page" ends in "'vite' 不是内部或外部命令".
+:: This undoes that one effect. It also overrides an explicit --omit=dev.
+set "npm_config_include=dev"
 
 :: Gateway API Server settings
 set "API_SERVER_ENABLED=true"
@@ -299,8 +319,8 @@ goto :check_config
 :: ============================================================================
 
 :: --gateway is accepted for shortcuts that still pass it. The Web UI starts
-:: the gateway through GatewayManager, so it means the same thing as no
-:: argument at all; the menu passes `chat` when it wants the CLI.
+:: the gateway itself, so it means the same thing as no argument at all; the
+:: menu passes `chat` when it wants the CLI.
 if /I "%~1"=="--gateway" shift
 
 :: This has to come BEFORE the Web UI install below. The CLI needs nothing
@@ -335,6 +355,12 @@ if exist "%SCRIPT_DIR%\versions.env" (
     )
 )
 
+:: npm replaces the whole package folder, and a stick that has not yet started
+:: with this launcher still keeps the Ekko agent's data inside it. Move it out
+:: first; when that cannot happen now, stop rather than let npm delete it.
+"%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\prepare-webui.py" "%SCRIPT_DIR%\." "%HERMES_WEB_UI_HOME%" "%NODE_DIR%\node_modules\hermes-web-ui" --move-only
+if exist "%NODE_DIR%\node_modules\hermes-web-ui\.ekko\" goto :ekko_stuck
+
 echo.
 echo   [i] 正在安装 Web 界面 (!WEBUI_SPEC!)...
 echo.
@@ -357,6 +383,15 @@ echo   [X] Web 界面装不上，上面几行是 npm 的原始报错。
 echo       多数情况是网络问题：换个网络或挂上代理，再重新双击本文件。
 echo       还是不行的话，双击根目录的「出问题点我-诊断.bat」，
 echo       它会用中文说清卡在哪一层。
+echo.
+pause
+exit /b 1
+
+:ekko_stuck
+echo.
+echo   [X] Web 界面要重装，但它的安装目录里还有 Ekko 智能体的数据，没能先挪出来。
+echo       重装会把它们删掉，所以先停下了。原因见上面一行。
+echo       关掉其他正在运行的 U-Hermes 窗口，再重新双击本文件。
 echo.
 pause
 exit /b 1
@@ -387,8 +422,23 @@ for /f "tokens=5" %%P in ('netstat -aon 2^>nul ^| findstr ":8642.*LISTENING"') d
     taskkill /F /PID %%P >nul 2>&1
 )
 
-:: Gateway is started automatically by the Web UI's GatewayManager.
-:: Do NOT start it here — dual gateways cause port conflicts.
+:: The Web UI starts the gateway itself, when data\webui\config.json allows it
+:: (prepare-webui.py below turns that on unless the user switched it off).
+:: Do NOT start it here -- dual gateways cause port conflicts.
+
+:: The Web UI keeps its logins, its chat list and the Ekko agent's data under
+:: HERMES_WEB_UI_HOME only in production mode. Otherwise they go to
+:: packages\server\data under the current directory and into the npm package,
+:: where every reinstall deletes them. prepare-webui.py moves what an older
+:: version left there, turns the message gateway on (Web UI 0.7.26 made it
+:: opt-in) and makes new chats start on Hermes; the reasons are in the script.
+:: Production mode only once the data is in place: switching while it is
+:: still in the old place would show an empty chat list. Set after data\.env,
+:: and cleared first, so no line there can move where the data goes.
+set "NODE_ENV="
+"%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\prepare-webui.py" "%SCRIPT_DIR%\." "%HERMES_WEB_UI_HOME%" "%NODE_DIR%\node_modules\hermes-web-ui"
+if not errorlevel 1 set "NODE_ENV=production"
+if exist "%HERMES_WEB_UI_HOME%\hermes-web-ui.db" set "NODE_ENV=production"
 
 :: Where the agent will read and write files. It sits outside the install
 :: directory on purpose, so upgrading never touches it -- which also means
@@ -427,12 +477,13 @@ start /B "" "%VENV_PYTHON%" "%SCRIPT_DIR%\scripts\first-login.py" http://127.0.0
 
 :: Run Web UI server in foreground (blocks until Ctrl+C or close)
 ::
-:: From the install directory, deliberately. The Web UI resolves its account
-:: database as cwd + "packages/server/data" unless NODE_ENV=production, so
-:: without this the login store lands wherever the user happened to launch
-:: from -- a different database on every machine, and on C: rather than the
-:: stick when the shortcut starts elsewhere. setlocal at the top of this
-:: script restores the caller's directory, so Windows-Menu.bat is unaffected.
+:: From the install directory, deliberately. When prepare-webui.py could not
+:: move old data this time, NODE_ENV stays unset and the Web UI resolves its
+:: account database as cwd + "packages/server/data". Without this cd the
+:: login store would then land wherever the user happened to launch from --
+:: a different database on every machine, and on C: rather than the stick
+:: when the shortcut starts elsewhere. setlocal at the top of this script
+:: restores the caller's directory, so Windows-Menu.bat is unaffected.
 cd /d "%SCRIPT_DIR%"
 "%NODE_EXE%" "%WEBUI_SERVER%"
 

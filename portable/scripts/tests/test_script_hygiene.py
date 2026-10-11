@@ -361,6 +361,52 @@ def test_every_chinese_powershell_script_has_a_bom():
     check(checked > 0, "the walk found some Chinese PowerShell to check")
 
 
+def test_setup_writes_the_pth_without_a_bom():
+    """setup.ps1 un-comments `import site` in the embedded Python's ._pth.
+
+    It wrote the file back with Set-Content -Encoding utf8, which in Windows
+    PowerShell 5.1 -- the one Windows-Start.bat runs setup.ps1 with -- puts a
+    BOM first. Python then took the first entry for "\\ufeffpython313.zip",
+    found no standard library, and every start died with "No module named
+    'encodings'"; setup.ps1 itself failed at uv venv. CI never saw it: it runs
+    setup.ps1 under pwsh 7, whose utf8 has no BOM. So this runs the very line
+    setup.ps1 has under powershell.exe, on a copy of the file as shipped.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    ps = shutil.which("powershell.exe") or shutil.which("powershell")
+    with io.open(os.path.join(PORTABLE, "setup.ps1"), encoding="utf-8-sig") as f:
+        writes = [l.strip() for l in f if "$pthFile.FullName" in l
+                  and ("Set-Content" in l or "WriteAllText" in l or "Out-File" in l)]
+    check(len(writes) == 1, "setup.ps1 writes the ._pth in one place (found %d)" % len(writes))
+    if not writes:
+        return
+    if not ps:
+        print("  skip  no Windows PowerShell here to run it with")
+        return
+    tmp = tempfile.mkdtemp(prefix="pth-bom-")
+    try:
+        pth = os.path.join(tmp, "python313._pth")
+        with io.open(pth, "wb") as f:
+            f.write(b"python313.zip\r\n.\r\n\r\n# Uncomment to run site.main() automatically\r\n#import site\r\n")
+        script = os.path.join(tmp, "run.ps1")
+        with io.open(script, "w", encoding="utf-8-sig") as f:
+            f.write("$pthFile = Get-Item -LiteralPath '%s'\r\n" % pth.replace("'", "''"))
+            f.write("$content = Get-Content $pthFile.FullName\r\n")
+            f.write('$content = $content -replace "^#import site", "import site"\r\n')
+            f.write(writes[0] + "\r\n")
+        subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+                       capture_output=True, timeout=120)
+        with io.open(pth, "rb") as f:
+            data = f.read()
+        check(not data.startswith(BOM), "the ._pth setup.ps1 writes has no BOM under Windows PowerShell")
+        check(data.split(b"\r\n")[0] == b"python313.zip" and b"\r\nimport site\r\n" in data,
+              "...and still names the stdlib zip first and enables import site")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     if not in_a_repo_checkout():
         print("SKIP: 这是一个安装好的实例，不是源码仓库 —— "
@@ -372,7 +418,8 @@ if __name__ == "__main__":
                test_no_eaten_backslash_escapes_in_shell_scripts,
                test_the_escape_scanner_actually_works,
                test_byte_order_marks,
-               test_every_chinese_powershell_script_has_a_bom):
+               test_every_chinese_powershell_script_has_a_bom,
+               test_setup_writes_the_pth_without_a_bom):
         print(fn.__name__)
         fn()
     print()

@@ -303,7 +303,110 @@ def test_old_copies_are_taken_away_first():
 
 
 
+# --- the Web UI's data, and what it does on its own --------------------------
+# Web UI 0.7.x keeps its logins, chat list and the Ekko agent's data under
+# HERMES_WEB_UI_HOME only with NODE_ENV=production; otherwise in
+# packages\server\data and inside the npm package, which every reinstall
+# deletes. scripts/prepare-webui.py moves an older version's data first, and
+# the launcher switches only on its word (test_prepare_webui.py covers the
+# script). These pin where the launchers call it and set what around it.
+
+def _code(lines):
+    """(index, line) of every line that is not a comment."""
+    return [(i, l) for i, l in enumerate(lines) if l.strip() and not _is_comment(l)]
+
+
+def _where(lines, needle, start=0):
+    return [i for i, l in _code(lines) if needle in l and i >= start]
+
+
+def test_production_mode_only_after_the_data_moved():
+    print("NODE_ENV=production: after data\\.env, after prepare-webui.py, only on its word")
+    lines = read_lines("Windows-Start.bat")
+    loader = _where(lines, 'in ("%DATA_DIR%\\.env")')
+    node = _where(lines, '"%NODE_EXE%" "%WEBUI_SERVER%"')
+    prepare = [i for i in _where(lines, "prepare-webui.py") if "--move-only" not in lines[i]]
+    mentions = _where(lines, "NODE_ENV")
+    check(len(loader) == 1 and len(node) == 1 and len(prepare) == 1, "(found the .env loader, the node line and one full prepare call)")
+    if len(loader) == 1 and len(node) == 1 and len(prepare) == 1:
+        loader, node, prepare = loader[0], node[0], prepare[0]
+        check('"%HERMES_WEB_UI_HOME%"' in lines[prepare] and "node_modules\\hermes-web-ui" in lines[prepare],
+              "prepare-webui.py gets the Web UI home and the package it moves out of")
+        check([lines[i].strip() for i in mentions] == [
+                'set "NODE_ENV="',
+                'if not errorlevel 1 set "NODE_ENV=production"',
+                'if exist "%HERMES_WEB_UI_HOME%\\hermes-web-ui.db" set "NODE_ENV=production"'],
+              "NODE_ENV is cleared, then set only on prepare's exit 0 or when the moved database is there")
+        check(loader < mentions[0] < prepare < mentions[1] < mentions[2] < node,
+              "...in that order, after data\\.env and before node starts")
+        check(_block_depth(lines, prepare) == 0 and all(_block_depth(lines, i) == 0 for i in mentions),
+              "...outside any ( ) block, so errorlevel is read when the line runs")
+        home = [i for i, l in _code(lines) if assignment(l, "HERMES_WEB_UI_HOME") == "%DATA_DIR%\\webui"]
+        check(bool(home) and home[0] < loader, "HERMES_WEB_UI_HOME is data\\webui unless data\\.env says otherwise")
+    mac = read_lines("Mac-Start.command")
+    source = _where(mac, 'source "$DATA_DIR/.env"')
+    order = [_where(mac, n) for n in ("unset NODE_ENV", "prepare-webui.py", "export NODE_ENV=production",
+                                       'cd "$SCRIPT_DIR"', '"$NODE_EXE" "$WEBUI_SERVER"')]
+    check(source and all(order) and source[0] < order[0][0] < order[1][0] < order[2][0] < order[3][-1] < order[4][-1],
+          "Mac-Start.command: unset, prepare, export, cd, node -- after data/.env")
+
+
+PRIVACY_DEFAULTS = [("BIND_HOST", "127.0.0.1"), ("STUDIO_PUSH_CONTENT_PREVIEW", "0"),
+                    ("HERMES_WEB_UI_DISABLE_UPDATE_CHECK", "1"), ("HERMES_LAN_DISCOVERY_ENABLED", "0"),
+                    ("npm_config_include", "dev")]
+
+
+def test_web_ui_defaults_come_before_data_env():
+    print("loopback, no update button, no LAN discovery, devDependencies kept -- overridable in data\\.env")
+    for name, loader_needle in (("Windows-Start.bat", 'in ("%DATA_DIR%\\.env")'),
+                                ("Mac-Start.command", 'source "$DATA_DIR/.env"')):
+        lines = read_lines(name)
+        loader = _where(lines, loader_needle)
+        for var, value in PRIVACY_DEFAULTS:
+            at = [i for i, l in _code(lines) if assignment(l, var) is not None]
+            check(bool(at) and bool(loader) and all(assignment(lines[i], var) == value for i in at) and at[0] < loader[0],
+                  "%s sets %s=%s before loading data\\.env" % (name, var, value))
+
+
+def test_every_reinstall_moves_ekko_out_first():
+    print("npm replaces node_modules\\hermes-web-ui: every reinstall moves .ekko out before it")
+    lines = read_lines("Windows-Start.bat")
+    installs = _where(lines, 'npm.cmd" install -g')
+    move = [i for i in _where(lines, "prepare-webui.py") if "--move-only" in lines[i]]
+    guard = _where(lines, 'if exist "%NODE_DIR%\\node_modules\\hermes-web-ui\\.ekko\\" goto :ekko_stuck')
+    check(bool(installs) and len(move) == 1 and len(guard) == 1 and move[0] < guard[0] < installs[0],
+          "Windows-Start.bat: move, then stop if .ekko is still there, then npm")
+    stuck = _where(lines, ":ekko_stuck")
+    check(len(stuck) == 2 and lines[stuck[1]].strip() == ":ekko_stuck"
+          and "exit /b 1" in "".join(lines[stuck[1]:stuck[1] + 9]), "...where it explains and exits")
+
+    menu = read_lines("Windows-Menu.bat")
+    installs = _where(menu, 'npm.cmd" install -g')
+    sub = _where(menu, ":UPDATE_WEBUI")
+    label = [i for i in sub if menu[i].strip() == ":UPDATE_WEBUI"]
+    check(bool(installs) and label and all(i > label[0] for i in installs),
+          "Windows-Menu.bat: npm install only inside :UPDATE_WEBUI")
+    update = [i for i, l in enumerate(menu) if l.strip() == ":UPDATE"]
+    move = [i for i in _where(menu, "prepare-webui.py") if "--move-only" in menu[i]]
+    guard = _where(menu, 'if exist "%NODE_DIR%\\node_modules\\hermes-web-ui\\.ekko\\" (')
+    calls = [i for i in sub if "call :UPDATE_WEBUI" in menu[i]]
+    check(update and len(move) == 1 and len(guard) == 1 and len(calls) == 1
+          and update[0] < move[0] < guard[0] < calls[0] < label[0],
+          "...called from [9] only after the move, in the else of the .ekko check")
+
+    with open(os.path.join(PORTABLE, "setup.ps1"), "rb") as f:
+        setup = f.read().decode("utf-8-sig").splitlines()
+    saves = [i for i, l in enumerate(setup) if l.strip() == "Save-WebUiData -NodeDir $nodeDir"]
+    wipe = [i for i, l in enumerate(setup) if "Remove-Item $nodeDir -Recurse -Force" in l]
+    npm = [i for i, l in enumerate(setup) if l.strip().startswith("& $npmCmd install -g")]
+    check(len(saves) == 2 and wipe and npm and saves[0] < wipe[0] and saves[0] < wipe[0] < saves[1] < npm[0],
+          "setup.ps1: Save-WebUiData before Install-Node wipes the Node folder and before npm install")
+
+
 if __name__ == "__main__":
+    test_production_mode_only_after_the_data_moved()
+    test_web_ui_defaults_come_before_data_env()
+    test_every_reinstall_moves_ekko_out_first()
     test_each_home_on_the_stick_keeps_its_locks_there_too()
     test_every_launcher_that_runs_the_engine_sets_a_home()
     test_every_way_into_the_engine_prunes_first()

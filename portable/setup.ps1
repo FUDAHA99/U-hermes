@@ -181,7 +181,12 @@ function Install-Python {
     if ($pthFile) {
         $content = Get-Content $pthFile.FullName
         $content = $content -replace "^#import site", "import site"
-        Set-Content -Path $pthFile.FullName -Value $content -Encoding utf8
+        # No BOM, whichever PowerShell runs this. Windows PowerShell 5.1's
+        # -Encoding utf8 writes one; Python then reads the first entry as
+        # "﻿python313.zip", cannot find its standard library, and every
+        # start dies with "No module named 'encodings'" -- uv venv first.
+        # CI runs pwsh 7, which writes none, so only a user's machine saw it.
+        [System.IO.File]::WriteAllText($pthFile.FullName, (($content -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding $false))
     }
 
     # Install pip via get-pip.py
@@ -239,6 +244,27 @@ function Install-Uv {
 # Step 3: Node.js (for browser tools)
 # ============================================================================
 
+# Both a fresh Node and an npm install replace node_modules\hermes-web-ui as a
+# whole -- npm does it even for the same version. A stick that has not yet
+# started with this version's launcher still keeps the Ekko agent's memory,
+# skills and files in there (Web UI 0.7.x outside production mode). Move them
+# to data\webui first (prepare-webui.py), and stop rather than delete them
+# when that cannot happen now.
+function Save-WebUiData {
+    param([string]$NodeDir)
+    $package = Join-Path $NodeDir "node_modules\hermes-web-ui"
+    $ekko = Join-Path $package ".ekko"
+    if (-not (Test-Path $ekko)) { return }
+    $py = Join-Path $runtimeDir "python-win-x64\python.exe"
+    if (Test-Path $py) {
+        $prepare = Join-Path $scriptDir "scripts\prepare-webui.py"
+        Invoke-Native { & $py $prepare $scriptDir (Join-Path $dataDir "webui") $package --move-only }
+    }
+    if (Test-Path $ekko) {
+        throw "Ekko 智能体的数据还在 $ekko，没能先挪到 data\webui（原因见上面）。重装会删掉它们，所以停下了。关掉正在运行的 U-Hermes 再运行一次。"
+    }
+}
+
 function Install-Node {
     $nodeDir = Join-Path $runtimeDir "node-win-x64"
     $nodeExe = Join-Path $nodeDir "node.exe"
@@ -248,6 +274,7 @@ function Install-Node {
         return $nodeDir
     }
 
+    Save-WebUiData -NodeDir $nodeDir
     Write-Step "3/5" "Installing Node.js $nodeVersion..." "Yellow"
     # Replace, do not overlay. The extraction below is Copy-Item -Force onto
     # whatever is already there, so upgrading Node left npm 10's files mixed
@@ -474,6 +501,7 @@ $webuiServer = Join-Path $nodeDir "node_modules\hermes-web-ui\dist\server\index.
 # on one of them can be a no-op on the other, which is exactly what happened
 # to the account claim in first-login.py.
 if ($Force -or -not (Test-Path $webuiServer)) {
+    Save-WebUiData -NodeDir $nodeDir
     Write-Step "6/7" "Installing Hermes Web UI..." "Yellow"
     $npmCmd = Join-Path $nodeDir "npm.cmd"
     $prevEAP = $ErrorActionPreference

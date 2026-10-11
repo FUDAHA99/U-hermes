@@ -184,7 +184,8 @@ U-Hermes/                        ← Copy to USB drive
 │   ├── backups/                 Timestamped copies, written before every save
 │   ├── memory/                  AI memory
 │   ├── skills/                  User-created skills
-│   └── sessions/                Conversation history
+│   ├── sessions/                Conversation history
+│   └── webui/                   Web UI logins and chat list; .ekko/ holds its Ekko agent's data
 │
 └── lib/                         Helper modules
     ├── bootstrap.py             Path management
