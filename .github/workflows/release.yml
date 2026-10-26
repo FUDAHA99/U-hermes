@@ -266,6 +266,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "upstream tweaks test failed"; exit 1 }
           & $py scripts/tests/test_launcher_env.py
           if ($LASTEXITCODE -ne 0) { Write-Error "launcher env test failed"; exit 1 }
+          & $py scripts/tests/test_prepare_webui.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "prepare-webui test failed"; exit 1 }
           & $py scripts/tests/test_prune_stale_files.py
           if ($LASTEXITCODE -ne 0) { Write-Error "prune stale files test failed"; exit 1 }
           & $py scripts/tests/test_batch_parse.py
@@ -470,6 +472,31 @@ jobs:
           Set-Content (Join-Path $hostHermes "config.yaml") "model: old-copy  # ci-old-copy-not-a-key" -Encoding ascii
           Set-Content (Join-Path $hostHermes ".env") "OLD_COPY_API_KEY=ci-old-copy-not-a-key" -Encoding ascii
           Set-Content (Join-Path $hostHermes "config.yaml.before-u-hermes") "model: machine-own" -Encoding ascii
+          # A stick upgraded from a release whose Web UI ran outside production
+          # mode: the logins and chat list in packages\server\data, the Ekko
+          # agent's data inside the npm package, where the next reinstall
+          # deletes it. Windows-Start.bat has to move both under data\webui
+          # before the Web UI starts (scripts/prepare-webui.py).
+          $legacyDb = Join-Path $work "packages\server\data\hermes-web-ui.db"
+          $legacyEkko = Join-Path $work "runtime\node-win-x64\node_modules\hermes-web-ui\.ekko"
+          $newDb = Join-Path $work "data\webui\hermes-web-ui.db"
+          $newEkko = Join-Path $work "data\webui\.ekko"
+          New-Item -ItemType Directory -Force (Split-Path $legacyDb) | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $legacyEkko "skills\default\ci-skill") | Out-Null
+          Set-Content (Join-Path $legacyEkko "skills\default\ci-skill\SKILL.md") "# ci" -Encoding ascii
+          Set-Content (Join-Path $legacyEkko ".ekko-hermes-skill-cleanup-v2.json") "{}" -Encoding ascii
+          $dbTool = Join-Path $env:RUNNER_TEMP "ci-db.py"
+          @(
+            'import sqlite3, sys',
+            'con = sqlite3.connect(sys.argv[2])',
+            'if sys.argv[1] == "seed":',
+            '    con.execute("CREATE TABLE u_hermes_ci (marker TEXT)")',
+            '    con.execute("INSERT INTO u_hermes_ci VALUES (?)", ("moved",))',
+            '    con.commit()',
+            'else:',
+            '    print(con.execute("SELECT marker FROM u_hermes_ci").fetchone()[0])'
+          ) | Set-Content $dbTool -Encoding ascii
+          & $py $dbTool seed $legacyDb
           $startOut = Join-Path $env:RUNNER_TEMP "start.out"
           $startErr = Join-Path $env:RUNNER_TEMP "start.err"
           $noInput = Join-Path $env:RUNNER_TEMP "no-input.txt"
@@ -496,6 +523,33 @@ jobs:
             $cfg = "$(Get-Content (Join-Path $hostHermes 'config.yaml') -Raw -ErrorAction SilentlyContinue)".Trim()
             if ($cfg -ne "model: machine-own") { $hostProblems += "the machine's own config.yaml was not put back" }
           }
+          # What the Web UI does on its own since 0.7.26-0.7.33, checked while
+          # it runs. Web chat does not need the gateway, so nothing above
+          # would notice it missing: bots, Hermes cron and the 8642 API would.
+          $webuiProblems = @()
+          if ($up) {
+            $gateway = $false
+            foreach ($i in 1..30) {
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:8642/health" -UseBasicParsing -TimeoutSec 3
+                if ($r.StatusCode -eq 200) { $gateway = $true; break }
+              } catch {}
+              Start-Sleep -Seconds 2
+            }
+            if (-not $gateway) { $webuiProblems += "the gateway never answered on 8642 (gatewayAutoStart not turned on?)" }
+            # Guarded like every other request here: an exception would end the
+            # step before the launcher's own output is printed below.
+            try { $page = (Invoke-WebRequest -Uri "http://127.0.0.1:8648/" -UseBasicParsing -TimeoutSec 5).Content }
+            catch { $page = $null; $webuiProblems += "the page stopped answering after startup: $($_.Exception.Message)" }
+            if ($null -ne $page -and $page -notmatch 'data-u-hermes="default-agent"') { $webuiProblems += "the page has no new-chats-on-Hermes script" }
+            $client = Join-Path $work "runtime\node-win-x64\node_modules\hermes-web-ui\dist\client\assets\js"
+            $reads = $false
+            try { $reads = [bool](Select-String -Path (Join-Path $client "*.js") -SimpleMatch "hermes_new_chat_agent_v1" -List -Quiet) } catch {}
+            if (-not $reads) {
+              $webuiProblems += "the Web UI client no longer reads hermes_new_chat_agent_v1 (or dist\client\assets\js moved); the script seeds nothing"
+            }
+            if (Get-NetUDPEndpoint -LocalPort 48640 -ErrorAction SilentlyContinue) { $webuiProblems += "something listens on UDP 48640 (LAN discovery)" }
+          }
           # Stop the server the way a user's Ctrl+C does, so the launcher runs
           # its own shutdown path too; then sweep up whatever it started.
           # Matched by executable, not command line: a command line that
@@ -517,8 +571,19 @@ jobs:
           if (-not $up) { Write-Error "Windows-Start.bat did not bring the Web UI up on 8648 within 120s"; exit 1 }
           if ($hostProblems.Count) { Write-Error ("%USERPROFILE%\.hermes during the run: " + ($hostProblems -join "; ")); exit 1 }
           if ($log -notmatch [regex]::Escape("已删掉旧版本")) { Write-Error "Windows-Start.bat did not say it took the old copy away"; exit 1 }
+          # Where the Web UI's data ended up, now that it has stopped.
+          if (Test-Path $legacyEkko) { $webuiProblems += ".ekko is still inside the npm package" }
+          if (-not (Test-Path (Join-Path $newEkko "skills\default\ci-skill\SKILL.md"))) { $webuiProblems += "the Ekko skill did not arrive in data\webui\.ekko" }
+          if (Test-Path (Join-Path $work "packages")) { $webuiProblems += "packages\ is still there (data not moved, or the Web UI ran outside production mode)" }
+          $marker = if (Test-Path $newDb) { & $py $dbTool read $newDb } else { "" }
+          if ("$marker".Trim() -ne "moved") { $webuiProblems += "data\webui\hermes-web-ui.db is not the moved database" }
+          $webuiConfig = Join-Path $work "data\webui\config.json"
+          $autostart = if (Test-Path $webuiConfig) { (Get-Content $webuiConfig -Raw | ConvertFrom-Json).gatewayAutoStart.enabled } else { $null }
+          if ($autostart -ne $true) { $webuiProblems += "data\webui\config.json does not turn the gateway on" }
+          if ($webuiProblems.Count) { Write-Error ("the Web UI: " + ($webuiProblems -join "; ")); exit 1 }
           Write-Host "Windows-Start.bat, as shipped, started the Web UI and shut down cleanly."
           Write-Host "It put nothing of the user's into %USERPROFILE%\.hermes, and took an old version's copy away."
+          Write-Host "It moved an older version's Web UI data under data\webui, started the gateway, and seeded new chats on Hermes."
 
           Write-Host "Packaged artifact verified."
 
@@ -698,6 +763,7 @@ jobs:
           "$PY" scripts/tests/test_version_check.py
           "$PY" scripts/tests/test_upstream_tweaks.py
           "$PY" scripts/tests/test_launcher_env.py
+          "$PY" scripts/tests/test_prepare_webui.py
           "$PY" scripts/tests/test_prune_stale_files.py
           "$PY" scripts/tests/test_remove_old_host_copy.py
 

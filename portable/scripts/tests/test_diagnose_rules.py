@@ -314,12 +314,54 @@ def test_noise_stays_unclassified():
         check(not hit, "ordinary log chatter matches no rule: %s" % line[40:80])
 
 
+def test_a_gateway_the_user_switched_off_is_not_a_problem():
+    """Since Web UI 0.7.26 the Web UI starts the gateway only as its settings
+    say. A closed 8642 that the settings explain must not send the user back
+    to the launcher, which would change nothing; one they do not explain is
+    a real problem. Mirrors how the Web UI picks profiles to start."""
+    import json
+    import shutil
+    import tempfile
+    saved = dg.DATA_DIR
+    root = tempfile.mkdtemp(prefix="diag-gw-")
+    dg.DATA_DIR = root
+    try:
+        os.makedirs(os.path.join(root, "webui"))
+        path = os.path.join(root, "webui", "config.json")
+
+        def off(policy, env=None, cfg=None, raw=None):
+            if policy is None and raw is None:
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                with open(path, "wb") as f:
+                    f.write(raw if raw is not None else json.dumps({"gatewayAutoStart": policy}).encode("utf-8"))
+            return dg.gateway_autostart_off(env or {}, cfg or {})
+        check(off(None) is False, "no config.json: not off (the launcher turns it on)")
+        check(off({"enabled": True, "include": ["default"]}) is False, "the seeded policy: on")
+        check(off({"enabled": False}) is True, "switched off in settings: off")
+        check(off(None, raw=b"\xef\xbb\xbf" + json.dumps({"gatewayAutoStart": {"enabled": False}}).encode()) is True,
+              "switched off, file with a BOM: still read as off")
+        check(off({"enabled": True, "include": []}) is True, "an empty whitelist starts nothing: off")
+        check(off({"enabled": True, "exclude": ["default"]}) is True, "default excluded, no other profile: off")
+        check(off({"enabled": True, "include": ["work"]}) is True, "only another profile, per-profile mode: 8642 stays closed")
+        check(off({"enabled": True, "include": ["work"]}, cfg={"multiplex_profiles": True}) is False,
+              "...but with one unified gateway it is the default one on 8642: not off")
+        check(off({"enabled": True}, env={"HERMES_WEB_UI_DISABLE_GATEWAY_AUTOSTART": "1"}) is True,
+              "HERMES_WEB_UI_DISABLE_GATEWAY_AUTOSTART=1 in data\.env: off")
+        check(off(None, raw=b"[1, 2]") is False and off(None, raw=b"{bad") is False, "unreadable files: not off")
+    finally:
+        dg.DATA_DIR = saved
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     for fn in (test_every_pattern_compiles, test_wal_rule,
                test_api_server_key_rule, test_the_sqlite_warning_is_split_by_outcome,
                test_the_engine_s_own_no_provider_line_is_recognised,
                test_an_empty_key_variable_is_named_before_the_401,
-               test_no_rule_is_dead, test_noise_stays_unclassified):
+               test_no_rule_is_dead, test_noise_stays_unclassified,
+               test_a_gateway_the_user_switched_off_is_not_a_problem):
         print(fn.__name__)
         fn()
     print()

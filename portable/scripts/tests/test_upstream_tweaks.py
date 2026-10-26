@@ -63,6 +63,73 @@ CPRINT = '''def _cprint(text: str):
         return
 '''
 
+# v2026.9.24 builds the raw print once, as the paint two branches call, next
+# to an already safe paint_fallback -- so the helper's name is in _cprint now
+# whether or not anything was patched.
+CPRINT_PAINTS = '''def _cprint(text: str):
+    from cli import _PT_ANSI, _pt_print, _pt_print_ansi
+
+    def _painted(paint):
+        def _paint():
+            paint()
+        return _paint
+    paint_pt = _painted(lambda: _pt_print(_PT_ANSI(text)))
+    paint_fallback = _painted(lambda: _pt_print_ansi(text))
+
+    try:
+        from prompt_toolkit.application import get_app_or_none, run_in_terminal
+    except Exception:
+        paint_pt()
+        return
+
+    app = get_app_or_none()
+    if app is None:
+        paint_fallback()
+        return
+
+    loop = getattr(app, "loop", None)
+    if loop is None:
+        paint_pt()
+        return
+    with suppress(Exception):
+        run_in_terminal(paint_pt)
+'''
+
+# What v2026.9.14-v2026.9.21 also have: the raw print handed to
+# run_in_terminal under suppress(), on purpose. Not a bail-out.
+GUARDED = '''
+    with suppress(Exception):
+        coro = run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))
+'''
+
+# A shape no anchor knows, beside a call of the helper that makes it look done.
+CPRINT_DRIFTED = '''def _cprint(text: str):
+    from cli import _PT_ANSI, _pt_print, _pt_print_ansi
+    raw = (lambda: _pt_print(_PT_ANSI(text)))
+    try:
+        from prompt_toolkit.application import get_app_or_none
+    except Exception:
+        raw()
+        return
+    _pt_print_ansi(text)
+'''
+
+# The realistic next drift: paint_fallback kept, the raw paint reshaped.
+CPRINT_RESHAPED = CPRINT_PAINTS.replace(
+    "paint_pt = _painted(lambda: _pt_print(_PT_ANSI(text)))",
+    "rendered = _PT_ANSI(text)" + chr(10) + "    paint_pt = _painted(lambda: _pt_print(rendered))")
+
+# No helper anywhere and no shape we know: the injected helper would go unused.
+CPRINT_NO_HELPER = '''def _cprint(text: str):
+    from cli import _PT_ANSI, _pt_print
+    try:
+        from prompt_toolkit.application import get_app_or_none
+    except Exception:
+        emit = _pt_print
+        emit(_PT_ANSI(text))
+        return
+'''
+
 HELPER = '''def _pt_print_ansi(text: str) -> None:
     from cli import _PT_ANSI, _pt_print
     try:
@@ -103,6 +170,16 @@ def checkout(layout):
     write(root, "web/src/i18n/context.tsx", LOCALE)
     if layout == "v2026.9.14":
         write(root, "cli.py", "import os\n\n\n" + HELPER + CPRINT)
+    elif layout == "no-helper":
+        write(root, "cli.py", "import os" + chr(10) * 3 + CPRINT_NO_HELPER)
+    elif layout in ("v2026.9.24", "drifted", "guarded", "reshaped"):
+        body = {"v2026.9.24": CPRINT_PAINTS, "drifted": CPRINT_DRIFTED, "guarded": CPRINT + GUARDED,
+                "reshaped": CPRINT_RESHAPED}[layout]
+        write(root, "cli.py",
+              "from hermes_cli.cli_render import (  # noqa: F401\n"
+              "    _cprint,\n    _pt_print_ansi,\n)\n")
+        write(root, "hermes_cli/__init__.py", "")
+        write(root, "hermes_cli/cli_render.py", "from contextlib import suppress\n\n\n" + HELPER + body)
     elif layout == "v2026.9.21":
         # cli.py re-exports the helpers; worktree_ops has a delegating _cprint
         # of its own, which must not be mistaken for the real one.
@@ -174,10 +251,21 @@ def test_the_new_layout_is_followed():
 
 def test_without_a_console_the_patched_print_does_not_crash():
     print("the point of the tweak: no console must not mean no CLI")
-    root = checkout("v2026.9.21")
+    for layout in ("v2026.9.21", "v2026.9.24"):
+        crashed, printed = print_without_console(layout, patch=True)
+        check(crashed is None, "%s: no exception escapes _cprint (got %r)" % (layout, crashed))
+        check("你好" in printed, "%s: the text still reaches stdout as plain print" % layout)
+    # The fixture really takes the raw branch: unpatched, it crashes.
+    crashed, _ = print_without_console("v2026.9.24", patch=False)
+    check(crashed is not None, "(unpatched v2026.9.24 does crash there, so the check above means something)")
+
+
+def print_without_console(layout, patch):
+    root = checkout(layout)
     saved = {k: sys.modules.get(k) for k in ("cli", "prompt_toolkit.application", "cli_render_under_test")}
     try:
-        run_tweak(root)
+        if patch:
+            run_tweak(root)
         spec = importlib.util.spec_from_file_location(
             "cli_render_under_test", os.path.join(root, "hermes_cli", "cli_render.py"))
         render = importlib.util.module_from_spec(spec)
@@ -204,14 +292,71 @@ def test_without_a_console_the_patched_print_does_not_crash():
             crashed = None
         except Exception as e:  # what the unpatched code does
             crashed = e
-        check(crashed is None, "no exception escapes _cprint (got %r)" % (crashed,))
-        check("你好" in out.getvalue(), "the text still reaches stdout as plain print")
+        return crashed, out.getvalue()
     finally:
         for k, v in saved.items():
             if v is None:
                 sys.modules.pop(k, None)
             else:
                 sys.modules[k] = v
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_paint_layout_is_patched():
+    print("v2026.9.24: the raw print is a paint, built once")
+    root = checkout("v2026.9.24")
+    try:
+        code, out = run_tweak(root)
+        src = read(root, "hermes_cli/cli_render.py")
+        check(code == 0, "the tweak succeeds")
+        check(tweaks.SAFE_PAINT in src and tweaks.RAW_PAINT not in src,
+              "the paint both bail-outs call goes through the safe helper")
+        check(tweaks.raw_prints_outside_helper(src) == 0, "no raw print is left outside the helper")
+        check("routed 1" in out, "the log says it patched something (it said 'already in place' before)")
+        code, _ = run_tweak(root)
+        check(code == 0 and read(root, "hermes_cli/cli_render.py") == src, "running it twice changes nothing")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_raw_print_in_a_new_shape_stops_the_build():
+    print("a raw print no anchor knows: fail, even though the helper's name is there")
+    root = checkout("drifted")
+    try:
+        before = read(root, "hermes_cli/cli_render.py")
+        code, out = run_tweak(root)
+        check(code == 1, "the tweak exits 1 instead of claiming the fallback is in place")
+        check("already in place" not in out, "and does not say it is")
+        check(read(root, "hermes_cli/cli_render.py") == before, "the file is left as it was")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_reshaped_raw_paint_stops_the_build():
+    print("v2026.9.24 with its raw paint reshaped: no anchor matches, the end state still fails")
+    for layout, label in (("reshaped", "_pt_print(rendered) next to an already safe paint_fallback"),
+                          ("no-helper", "no helper upstream and nothing to route: ours would go unused")):
+        root = checkout(layout)
+        try:
+            rel = "cli.py" if layout == "no-helper" else "hermes_cli/cli_render.py"
+            before = read(root, rel)
+            code, out = run_tweak(root)
+            check(code == 1, "%s: the tweak exits 1" % label)
+            check("already in place" not in out and read(root, rel) == before,
+                  "%s: claims nothing, changes nothing" % label)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_guarded_run_in_terminal_print_is_not_a_bail_out():
+    print("v2026.9.14-v2026.9.21 hand the raw print to run_in_terminal under suppress()")
+    root = checkout("guarded")
+    try:
+        code, _ = run_tweak(root)
+        src = read(root, "hermes_cli/cli_render.py")
+        check(code == 0, "the tweak succeeds")
+        check("run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))" in src, "and leaves that call as it is")
+    finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -230,6 +375,10 @@ if __name__ == "__main__":
     test_the_old_layout_still_gets_patched()
     test_the_new_layout_is_followed()
     test_without_a_console_the_patched_print_does_not_crash()
+    test_the_paint_layout_is_patched()
+    test_a_raw_print_in_a_new_shape_stops_the_build()
+    test_the_guarded_run_in_terminal_print_is_not_a_bail_out()
+    test_a_reshaped_raw_paint_stops_the_build()
     test_if_upstream_moves_it_again_the_build_still_stops()
     print("")
     if FAILURES:

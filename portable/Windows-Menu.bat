@@ -182,12 +182,19 @@ if exist "%SCRIPT_DIR%\versions.env" (
     )
 )
 
-echo.
-echo   [1/2] 更新 Web 界面 (%WEBUI_SPEC%)...
-call "%NODE_DIR%\npm.cmd" install -g %WEBUI_SPEC% --prefix "%NODE_DIR%"
-if errorlevel 1 (
-    echo   [i] 直连 npm 没成功，改用国内镜像重试...
-    call "%NODE_DIR%\npm.cmd" install -g %WEBUI_SPEC% --prefix "%NODE_DIR%" --registry=https://registry.npmmirror.com
+:: npm replaces the whole package folder, even for the same version. A stick
+:: that has not yet started with this version's launcher still keeps the Ekko
+:: agent's data inside it: move it out first, and leave the Web UI alone when
+:: that cannot happen now (U-Hermes still running, a file in use).
+set "UH_PY=%SCRIPT_DIR%\runtime\python-win-x64\python.exe"
+if exist "%UH_PY%" "%UH_PY%" "%SCRIPT_DIR%\scripts\prepare-webui.py" "%SCRIPT_DIR%\." "%SCRIPT_DIR%\data\webui" "%NODE_DIR%\node_modules\hermes-web-ui" --move-only
+if exist "%NODE_DIR%\node_modules\hermes-web-ui\.ekko\" (
+    echo.
+    echo   [!] Ekko 智能体的数据还在 Web 界面的安装目录里，没能先挪出来，
+    echo       重装会把它们删掉，所以这次没有更新 Web 界面。
+    echo       关掉正在运行的 U-Hermes 窗口，再回到这里选 [9]。
+) else (
+    call :UPDATE_WEBUI
 )
 
 echo.
@@ -243,6 +250,16 @@ goto MENU
 :: modules still sitting there into the new install and its RECORD.
 if exist "%SCRIPT_DIR%\hermes\manifests" if exist "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" (
     "%SCRIPT_DIR%\runtime\python-win-x64\python.exe" "%SCRIPT_DIR%\scripts\prune-stale-files.py" "%SCRIPT_DIR%\."
+)
+exit /b 0
+
+:UPDATE_WEBUI
+echo.
+echo   [1/2] 更新 Web 界面 (%WEBUI_SPEC%)...
+call "%NODE_DIR%\npm.cmd" install -g %WEBUI_SPEC% --prefix "%NODE_DIR%"
+if errorlevel 1 (
+    echo   [i] 直连 npm 没成功，改用国内镜像重试...
+    call "%NODE_DIR%\npm.cmd" install -g %WEBUI_SPEC% --prefix "%NODE_DIR%" --registry=https://registry.npmmirror.com
 )
 exit /b 0
 
