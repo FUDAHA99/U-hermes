@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>U-Hermes · 招聘工作台</title>
+  <style>
+    :root { color-scheme: light; --ink:#18332e; --muted:#61736e; --line:#dce5e1; --accent:#176850; --soft:#eef5f1; --paper:#fff; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#f6f8f6; color:var(--ink); font:15px/1.65 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+    button,input,textarea { font:inherit; }
+    button { cursor:pointer; border:1px solid var(--line); border-radius:7px; padding:9px 16px; background:var(--paper); color:var(--ink); font-size:14px; font-weight:600; }
+    button:hover:not(:disabled) { border-color:var(--accent); background:var(--soft); }
+    button:disabled { cursor:wait; opacity:.55; }
+    button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible,a:focus-visible { outline:3px solid #7fc8ad; outline-offset:3px; }
+    .primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .primary:hover:not(:disabled) { background:#10543f; color:#fff; }
+    .shell { max-width:1260px; margin:auto; padding:0 32px; }
+    header { background:var(--paper); border-bottom:1px solid var(--line); }
+    .header { display:flex; align-items:center; justify-content:space-between; gap:18px; min-height:84px; }
+    .brand { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+    .brand strong { font-size:21px; letter-spacing:-.6px; }
+    .brand span { color:var(--muted); font-size:14px; }
+    main { padding-top:28px!important; padding-bottom:48px!important; }
+    h1 { margin:0; font-size:28px; line-height:1.4; letter-spacing:-.6px; }
+    h2 { font-size:18px; margin:0; }
+    p { margin:8px 0; }
+    .intro { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom:20px; }
+    .muted,.hint { color:var(--muted); }
+    .hint { font-size:12px; line-height:1.7; margin-top:6px; }
+    .model { font-size:13px; text-align:right; padding-top:5px; overflow-wrap:anywhere; }
+    .usage { display:grid; grid-template-columns:repeat(4,1fr); padding:14px 0 20px; margin-bottom:22px; border-bottom:1px solid var(--line); gap:22px; }
+    .usage-label { display:flex; justify-content:space-between; gap:6px; font-size:13px; }
+    .usage-value { font-variant-numeric:tabular-nums; font-weight:600; }
+    progress { display:block; width:100%; height:5px; margin-top:8px; border:0; border-radius:8px; overflow:hidden; background:#dfe9e3; accent-color:var(--accent); }
+    progress::-webkit-progress-bar { background:#dfe9e3; }
+    progress::-webkit-progress-value { background:var(--accent); }
+    .month { font-size:12px; color:var(--muted); margin-top:3px; }
+    .tasks { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:20px; }
+    .task { text-align:left; display:flex; align-items:center; gap:10px; padding:12px 14px; }
+    .task .number { font-size:12px; color:var(--muted); }
+    .task[aria-pressed="true"] { background:var(--accent); color:white; border-color:var(--accent); }
+    .task[aria-pressed="true"] .number { color:#c6e9dc; }
+    .workspace { display:grid; grid-template-columns:minmax(0,.94fr) minmax(0,1.06fr); gap:24px; align-items:start; }
+    .panel { background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:24px; min-width:0; }
+    .panel-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
+    label,.field-label { display:block; font-size:14px; font-weight:600; margin-bottom:7px; }
+    input:not([type="checkbox"]),textarea { width:100%; border:1px solid #cbd8d1; border-radius:6px; color:var(--ink); background:#fff; padding:10px 12px; }
+    input::placeholder,textarea::placeholder { color:#8a9992; }
+    input:disabled,textarea:disabled { background:#f4f6f4; }
+    textarea { resize:vertical; min-height:100px; line-height:1.65; }
+    .field { margin-bottom:18px; }
+    details { border-top:1px solid var(--line); padding-top:14px; margin-top:14px; }
+    summary { cursor:pointer; font-size:14px; font-weight:600; margin-bottom:12px; }
+    .upload { padding:16px; background:#f6f9f7; border:1px dashed #bdcec4; border-radius:6px; }
+    input[type="file"] { padding:0; border:0; font-size:12px; background:transparent; }
+    input[type="file"]::file-selector-button { font:inherit; padding:6px 10px; color:var(--accent); border:1px solid #b8cfc1; border-radius:4px; background:white; margin-right:8px; cursor:pointer; }
+    .resume-list { list-style:none; padding:0; margin:12px 0 0; }
+    .resume-item { padding:12px 0; border-bottom:1px solid var(--line); }
+    .resume-head { display:flex; align-items:center; gap:8px; }
+    .resume-head label { display:flex; align-items:center; gap:8px; margin:0; font-weight:400; flex:1; min-width:0; }
+    .resume-head input { width:17px; height:17px; flex:none; accent-color:var(--accent); }
+    .resume-item span { overflow-wrap:anywhere; font-size:13px; }
+    .resume-item button { padding:4px 7px; font-weight:400; font-size:12px; flex:none; }
+    .resume-preview { border:0; padding-top:6px; margin-top:0; }
+    .resume-preview summary { font-size:12px; margin-bottom:8px; color:var(--accent); }
+    .resume-preview textarea { font-size:13px; min-height:180px; }
+    .actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:20px; }
+    .submit { min-width:140px; }
+    #request-cost { font-size:12px; color:var(--muted); }
+    #output { white-space:pre-wrap; overflow-wrap:anywhere; font:14px/1.85 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; margin:0; min-height:320px; }
+    .empty-output { color:var(--muted); }
+    .result-tools { display:flex; flex-wrap:wrap; gap:8px; padding-top:18px; border-top:1px solid var(--line); margin-top:18px; }
+    .message { padding:12px 16px; border-radius:6px; margin:0 0 18px; font-size:14px; overflow-wrap:anywhere; }
+    .message.error { background:#fff0ec; border:1px solid #efc3b7; color:#943a24; }
+    .message.success { background:#eaf5ed; border:1px solid #b9d7c2; color:#235c3a; }
+    .notice { margin-top:20px; font-size:12px; line-height:1.8; color:var(--muted); }
+    .config { margin-bottom:24px; border:1px solid var(--line); background:#fff; border-radius:10px; padding:24px; }
+    .config summary { font-size:18px; margin:0; }
+    .config-body { padding-top:20px; }
+    .config-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+    .limits { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+    .limits label { font-size:12px; }
+    .security { font-size:12px; border-left:3px solid #82af99; padding-left:10px; color:var(--muted); }
+    [hidden] { display:none!important; }
+    @media(max-width:850px) { .workspace { grid-template-columns:1fr; } #output { min-height:220px; } .shell { padding:0 20px; } }
+    @media(max-width:560px) { .shell { padding:0 16px; } .header { min-height:74px; } .brand { gap:0; flex-direction:column; } .brand strong { font-size:19px; } .brand span { font-size:12px; } h1 { font-size:24px; } .intro { display:block; } .model { text-align:left; } .usage { grid-template-columns:1fr 1fr; gap:14px 22px; } .tasks { grid-template-columns:1fr 1fr; } .task { font-size:13px; padding:10px; } .panel,.config { padding:18px; } .config-grid { grid-template-columns:1fr; gap:0; } .limits { grid-template-columns:1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell header">
+      <div class="brand"><strong>U-Hermes</strong><span>招聘版 · Recruit Edition</span></div>
+      <button id="open-config" type="button">公司与用量设置</button>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="intro">
+      <div><h1>招聘工作台</h1><p class="muted">从一份 JD，开始今天的招聘。</p></div>
+      <div class="model"><span id="model-label">正在读取配置…</span><div class="month" id="month-label">本月用量</div></div>
+    </div>
+    <div id="usage" class="usage" aria-label="每月用量"></div>
+    <div id="message" class="message" role="status" aria-live="polite" hidden></div>
+    <details class="config" id="config-details">
+      <summary>公司与用量设置</summary>
+      <form id="config-form" class="config-body">
+        <div class="config-grid">
+          <div class="field"><label for="api-key">DeepSeek API Key</label><input id="api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="填写客户自己的 DeepSeek Key"><p class="hint" id="key-status">密钥仅保存在本机配置中，不会回显。</p></div>
+          <div class="field"><label for="model">模型</label><input id="model" type="text" value="deepseek-flash" required maxlength="100" spellcheck="false"><p class="hint">默认 deepseek-flash；修改前请确认账号可用模型及价格。</p></div>
+        </div>
+        <div class="field"><label for="company-info">公司资料</label><textarea id="company-info" rows="12" required placeholder="填写公司名称、介绍、岗位及薪资、工作时间、福利、地址、招聘流程…"></textarea><p class="hint">已预置虚构的「青禾智选」。交付客户前请替换；未填写的信息会提示向 HR 确认。</p></div>
+        <p class="field-label">每月用量上限</p>
+        <div class="limits">
+          <div class="field"><label for="limit-screen">简历打分 · 份</label><input id="limit-screen" type="number" min="0" max="100000" step="1" required value="300"></div>
+          <div class="field"><label for="limit-qa">候选人问答 · 次</label><input id="limit-qa" type="number" min="0" max="100000" step="1" required value="800"></div>
+          <div class="field"><label for="limit-jd">生成 JD · 次</label><input id="limit-jd" type="number" min="0" max="100000" step="1" required value="100"></div>
+          <div class="field"><label for="limit-interview">面试题 · 次</label><input id="limit-interview" type="number" min="0" max="100000" step="1" required value="100"></div>
+        </div>
+        <p class="hint">0 表示停用该任务。批量评分按简历份数计；提交后失败也可能消耗额度。次数上限不等于人民币预算。</p>
+        <p id="security-status" class="security"></p>
+        <div class="actions"><button class="primary" type="submit" id="save-config">保存设置</button><span class="hint">保存后立即生效。</span></div>
+      </form>
+    </details>
+    <nav class="tasks" aria-label="选择招聘任务">
+      <button class="task" type="button" data-task="jd" aria-pressed="true"><span class="number">01</span>生成 JD</button>
+      <button class="task" type="button" data-task="screen" aria-pressed="false"><span class="number">02</span>简历打分</button>
+      <button class="task" type="button" data-task="interview" aria-pressed="false"><span class="number">03</span>面试题</button>
+      <button class="task" type="button" data-task="qa" aria-pressed="false"><span class="number">04</span>候选人问答</button>
+    </nav>
+    <div class="workspace">
+      <section class="panel" aria-labelledby="task-title">
+        <div class="panel-head"><h2 id="task-title">写一份专业 JD</h2></div>
+        <form id="task-form">
+          <div class="field"><label for="prompt" id="prompt-label">岗位要求</label><textarea id="prompt" rows="5" maxlength="10000" placeholder="例如：新媒体运营，小红书 / 抖音方向，1 年以上经验，负责内容策划、账号运营和数据复盘。" required></textarea><p id="task-hint" class="hint">会结合已保存的公司资料。缺少的岗位条件会请您补充。</p></div>
+          <div id="resume-field" class="field" hidden>
+            <label for="files">候选人简历</label>
+            <div class="upload"><input id="files" type="file" accept=".pdf,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp" multiple><p class="hint">最多 5 份，每份不超过 5 MiB。支持文字 / 扫描 PDF、DOCX、TXT、MD 及 JPG、PNG、WEBP、BMP 图片。PDF 最多 20 页；旧版 DOC 请另存为 DOCX 或 PDF。</p><p class="hint" id="ocr-status">扫描件与照片由本机离线识别，不消耗模型额度。请在评分前核对识别文字。</p></div>
+            <ul id="resumes" class="resume-list" aria-label="已上传简历"></ul>
+            <p id="resume-hint" class="hint">勾选本次要处理的简历。</p>
+          </div>
+          <details id="jd-details"><summary>当前 JD <span class="hint">· 打分和面试题依据</span></summary><label for="current-jd" class="hint">可修改或粘贴正式 JD</label><textarea id="current-jd" rows="8" maxlength="16000"></textarea></details>
+          <div class="actions"><button type="submit" class="primary submit" id="run">生成 JD</button><span id="request-cost">本次计 1 次 JD</span></div>
+        </form>
+      </section>
+      <section class="panel" aria-labelledby="result-title" aria-busy="false" id="result-panel">
+        <div class="panel-head"><h2 id="result-title">工作结果</h2><span id="result-state" class="hint">等待开始</span></div>
+        <pre id="output" class="empty-output" tabindex="0">选择一个任务并提交，结果会显示在这里。
+
+建议流程：生成 JD → 用作当前 JD → 批量评分 → 为候选人出面试题。</pre>
+        <div class="result-tools" id="result-tools" hidden><button type="button" id="use-jd" hidden>用作当前 JD</button><button type="button" id="copy-result">复制结果</button></div>
+      </section>
+    </div>
+    <p class="notice">原始上传文件不落盘，图片识别在本机离线完成。提交招聘任务时，简历文字等处理数据发送至 DeepSeek。页面内容刷新后清空，异常退出可能留下临时处理文件，使用后请关闭启动窗口再拔盘。请及时复制需要的结果。AI 建议仅供参考，最终由 HR 决定。</p>
+  </main>
+  <script>
+    'use strict';
+    const token = '__RECRUIT_TOKEN__';
+    const $ = id => document.getElementById(id);
+    const tasks = {
+      jd: {title:'写一份专业 JD', label:'岗位要求', action:'生成 JD', unit:'次 JD', hint:'会结合已保存的公司资料。缺少的岗位条件会请您补充。', placeholder:'例如：新媒体运营，小红书 / 抖音方向，1 年以上经验，负责内容策划、账号运营和数据复盘。'},
+      screen: {title:'按 JD 筛选简历', label:'打分要求', action:'打分并排序', unit:'份简历', hint:'按当前 JD 给出 0–100 分、匹配点、不足与面试建议，多份简历统一排序。', placeholder:'例如：按当前 JD 给这些简历打分，列出证据、不足和是否建议面试的理由，最后排序。'},
+      interview: {title:'准备针对性的面试题', label:'面试重点', action:'生成面试题', unit:'次面试题', hint:'结合当前 JD 和选中的候选人简历，追问真实经验与待核实项。', placeholder:'例如：为这位候选人设计 30 分钟面试，重点验证内容策划、账号增长和数据复盘能力。'},
+      qa: {title:'回答候选人的问题', label:'候选人的问题', action:'回答问题', unit:'次问答', hint:'仅依据公司资料及当前 JD 回答。未说明的信息会提示转交 HR 确认，不会虚构承诺。', placeholder:'例如：新媒体运营的薪资是多少？几点上下班？双休吗？'}
+    };
+    const state = {task:'jd', config:null, busy:false, resumes:[], prompts:{}, answer:'', answerTask:''};
+
+    async function api(path, body) {
+      const options = {credentials:'same-origin', cache:'no-store', headers:{'X-Recruit-Token':token}};
+      if (body !== undefined) {
+        options.method = 'POST';
+        options.headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify(body);
+      }
+      const response = await fetch(path, options);
+      let data;
+      try { data = await response.json(); } catch { throw new Error('服务返回了无法读取的结果，请检查启动窗口后重试。'); }
+      if (!response.ok || data.error) throw new Error(data.error || '请求未完成，请检查启动窗口。');
+      return data;
+    }
+    function message(text, error=false) {
+      $('message').textContent = text;
+      $('message').className = 'message ' + (error ? 'error' : 'success');
+      $('message').hidden = !text;
+    }
+    function selectedResumes() { return state.resumes.filter(r => r.selected).map(r => ({name:r.name, text:r.text})); }
+    function updateControls() {
+      document.querySelectorAll('button,input,textarea').forEach(el => { el.disabled = state.busy || !state.config; });
+      const selected = selectedResumes().length;
+      $('request-cost').textContent = state.task === 'screen' ? '本次计 ' + selected + ' 份简历' : '本次计 1 ' + tasks[state.task].unit;
+      $('run').textContent = state.busy ? '正在处理，请稍候…' : tasks[state.task].action;
+      $('result-panel').setAttribute('aria-busy', String(state.busy));
+    }
+    function renderUsage(usage) {
+      if (!state.config) return;
+      if (usage) state.config.usage = usage;
+      const current = state.config.usage || {};
+      $('month-label').textContent = (current.month || '') + ' · 本月已用 / 上限';
+      $('usage').replaceChildren();
+      for (const [task, title] of [['screen','简历打分'],['qa','候选人问答'],['jd','生成 JD'],['interview','面试题']]) {
+        const used = Number(current[task] || 0);
+        const limit = Number(state.config.limits[task]);
+        const item = document.createElement('div');
+        const label = document.createElement('div'); label.className = 'usage-label';
+        const name = document.createElement('span'); name.textContent = title;
+        const count = document.createElement('span'); count.className = 'usage-value'; count.textContent = used + ' / ' + limit;
+        label.append(name, count);
+        const progress = document.createElement('progress'); progress.max = Math.max(1,limit); progress.value = Math.min(used,Math.max(1,limit)); progress.setAttribute('aria-label', title + '已用 ' + used + '，上限 ' + limit);
+        item.append(label,progress); $('usage').append(item);
+      }
+    }
+    function renderConfig(config, initial=false) {
+      state.config = config;
+      $('model').value = config.model;
+      $('model-label').textContent = config.model + ' · DeepSeek';
+      $('company-info').value = config.company_info;
+      for (const task of Object.keys(tasks)) $('limit-' + task).value = config.limits[task];
+      $('api-key').value = '';
+      $('api-key').placeholder = config.has_api_key ? '已保存；留空保留原密钥' : '填写客户自己的 DeepSeek Key';
+      $('key-status').textContent = config.has_api_key ? '密钥已保存，不回显。输入新密钥可替换，留空保留。' : '尚未设置密钥，请填写并保存后开始。';
+      $('security-status').textContent = config.allow_tools ? '当前已由管理员开启智能体工具权限；模型可以执行命令和读写文件。' : '安全模式已开启：智能体不能执行命令或任意读写文件；上传简历由受限解析器读取。';
+      $('ocr-status').textContent = config.ocr_enabled === false ? '本机已关闭扫描件识别。请上传文字版 PDF、DOCX、TXT 或 MD；需要识别图片时请联系管理员开启 OCR。' : '扫描件与照片由本机离线识别，不消耗模型额度。识别可能有错字，请在评分前核对姓名、数字和工作经历。';
+      if (initial) $('current-jd').value = config.default_jd || '';
+      if (!config.has_api_key) $('config-details').open = true;
+      renderUsage(config.usage);
+    }
+    function renderResumes() {
+      $('resumes').replaceChildren();
+      state.resumes.forEach((resume, index) => {
+        const item = document.createElement('li'); item.className = 'resume-item';
+        const head = document.createElement('div'); head.className = 'resume-head';
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = resume.selected;
+        checkbox.addEventListener('change', () => { resume.selected = checkbox.checked; updateControls(); });
+        const name = document.createElement('span'); name.textContent = resume.name;
+        label.append(checkbox,name);
+        const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '移除'; remove.setAttribute('aria-label', '移除 ' + resume.name);
+        remove.addEventListener('click', () => { state.resumes.splice(index,1); renderResumes(); });
+        head.append(label,remove);
+        const extraction = resume.extraction || {};
+        const pageCount = value => Array.isArray(value) ? value.length : Number(value || 0);
+        const ocrPages = pageCount(extraction.ocr_pages);
+        const textPages = pageCount(extraction.text_pages);
+        const source = document.createElement('p'); source.className = 'hint';
+        source.textContent = ocrPages ? '本地 OCR ' + ocrPages + ' 页' + (textPages ? ' · 文字层 ' + textPages + ' 页' : '') + ' · 请核对识别结果' : '正文已读取 · 可预览和校正';
+        const preview = document.createElement('details'); preview.className = 'resume-preview'; preview.open = ocrPages > 0;
+        const summary = document.createElement('summary'); summary.textContent = '预览 / 校正简历文字';
+        const editor = document.createElement('textarea'); editor.value = resume.text; editor.rows = 8; editor.maxLength = 20000; editor.spellcheck = false;
+        editor.setAttribute('aria-label', '校正 ' + resume.name + ' 的简历正文');
+        const count = document.createElement('p'); count.className = 'hint';
+        const updateCount = () => { count.textContent = editor.value.length + ' / 20000 字符 · 修改自动用于本次评分，原文件不变。'; };
+        editor.addEventListener('input', () => { resume.text = editor.value; updateCount(); });
+        updateCount(); preview.append(summary,editor,count);
+        item.append(head,source,preview); $('resumes').append(item);
+      });
+      updateControls();
+    }
+    function selectTask(task) {
+      if (state.busy) return;
+      state.prompts[state.task] = $('prompt').value;
+      state.task = task;
+      const spec = tasks[task];
+      document.querySelectorAll('[data-task]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.task === task)));
+      $('task-title').textContent = spec.title;
+      $('prompt-label').textContent = spec.label;
+      $('task-hint').textContent = spec.hint;
+      $('prompt').placeholder = spec.placeholder;
+      $('prompt').value = state.prompts[task] || '';
+      $('prompt').required = task === 'jd' || task === 'qa';
+      $('resume-field').hidden = task === 'jd' || task === 'qa';
+      $('resume-hint').textContent = task === 'interview' ? '请勾选本次要面试的候选人；建议一次只选一份。' : '勾选本次要打分的简历，最多 5 份。';
+      $('jd-details').open = task === 'screen' || task === 'interview';
+      updateControls();
+    }
+    function fileContent(file) {
+      return new Promise((resolve,reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1]);
+        reader.onerror = () => reject(new Error('无法读取文件：' + file.name));
+        reader.readAsDataURL(file);
+      });
+    }
+    $('files').addEventListener('change', async event => {
+      if (state.busy) return;
+      const files = Array.from(event.target.files || []);
+      event.target.value = '';
+      if (!files.length) return;
+      if (state.resumes.length + files.length > 5) { message('最多保留 5 份简历，请先移除不需要的文件。',true); return; }
+      if (files.some(file => file.size > 5 * 1024 * 1024)) { message('每份简历不能超过 5 MiB，请缩小文件或改用文本版。',true); return; }
+      if (files.some(file => /\.doc$/i.test(file.name))) { message('旧版 DOC 暂不支持，请用 Word 或 WPS 另存为 DOCX 或 PDF 后上传。',true); return; }
+      if (files.some(file => !/\.(pdf|docx|txt|md|jpg|jpeg|png|webp|bmp)$/i.test(file.name))) { message('请上传 PDF、DOCX、TXT、MD、JPG、PNG、WEBP 或 BMP 简历。',true); return; }
+      if (state.config.ocr_enabled === false && files.some(file => /\.(jpg|jpeg|png|webp|bmp)$/i.test(file.name))) { message('本机已关闭扫描件识别，请联系管理员开启 OCR，或上传文字版 PDF、DOCX、TXT。',true); return; }
+      state.busy = true; updateControls(); message('正在读取简历，请稍候…');
+      try {
+        for (const [index,file] of files.entries()) {
+          const image = /\.(jpg|jpeg|png|webp|bmp)$/i.test(file.name);
+          const pdfOcr = /\.pdf$/i.test(file.name) && state.config.ocr_enabled !== false;
+          const stage = image ? '正在识别图片 / 扫描件（本地 OCR）…' : pdfOcr ? '正在读取 PDF；文字不足时将识别扫描件（本地 OCR）…' : '正在读取简历文字…';
+          message('第 ' + (index + 1) + ' / ' + files.length + ' 份 · ' + file.name + '：' + stage + ' 请稍候，上传识别不计用量。');
+          const resume = await api('/api/extract',{name:file.name,content:await fileContent(file)});
+          state.resumes.push({name:resume.name,text:resume.text,extraction:resume.extraction,selected:true});
+          renderResumes();
+        }
+        message('简历已读取，上传识别不计用量。请预览并校正文字，再确认勾选的候选人与当前 JD 后评分。');
+      } catch (error) { message(error.message,true); }
+      finally { state.busy = false; renderResumes(); }
+    });
+    document.querySelectorAll('[data-task]').forEach(button => button.addEventListener('click', () => selectTask(button.dataset.task)));
+    $('open-config').addEventListener('click', () => { $('config-details').open = true; $('config-details').scrollIntoView({behavior:'smooth',block:'start'}); });
+    $('config-form').addEventListener('submit', async event => {
+      event.preventDefault(); if (state.busy) return;
+      const limits = {};
+      for (const task of Object.keys(tasks)) limits[task] = Number($('limit-' + task).value);
+      const payload = {api_key:$('api-key').value.trim(),model:$('model').value.trim(),company_info:$('company-info').value,limits};
+      state.busy = true; updateControls(); message('');
+      try {
+        await api('/api/config',payload);
+        $('api-key').value = '';
+        renderConfig(await api('/api/config'));
+        message('设置已保存，可以开始招聘任务。');
+      } catch (error) { message(error.message,true); }
+      finally { state.busy = false; updateControls(); }
+    });
+    $('task-form').addEventListener('submit', async event => {
+      event.preventDefault(); if (state.busy || !state.config) return;
+      if (!state.config.has_api_key) { $('config-details').open = true; message('请先在“公司与用量设置”填写 DeepSeek API Key 并保存。',true); return; }
+      const resumes = selectedResumes();
+      const task = state.task;
+      if ((task === 'screen' || task === 'interview') && (!$('current-jd').value.trim() || !resumes.length)) { message('请填写当前 JD，并上传、勾选至少一份简历。',true); return; }
+      if ((task === 'screen' || task === 'interview') && resumes.some(resume => !resume.text.trim() || resume.text.length > 20000)) { message('选中的简历正文不能为空且不能超过 20000 字符，请展开预览后校正。',true); return; }
+      const payload = {task,prompt:$('prompt').value.trim() || tasks[task].placeholder.replace('例如：',''),jd:$('current-jd').value,resumes:(task === 'screen' || task === 'interview') ? resumes : []};
+      state.busy = true; updateControls(); message(''); $('result-state').textContent = '正在生成…';
+      try {
+        const result = await api('/api/run',payload);
+        state.answer = result.answer; state.answerTask = task;
+        $('output').textContent = result.answer; $('output').classList.remove('empty-output');
+        $('result-tools').hidden = false; $('use-jd').hidden = task !== 'jd';
+        $('result-state').textContent = '已完成';
+        renderUsage(result.usage);
+      } catch (error) {
+        message(error.message,true); $('result-state').textContent = '本次未完成';
+        try { const latest = await api('/api/config'); renderUsage(latest.usage); } catch { /* Keep the original error. */ }
+      } finally { state.busy = false; updateControls(); }
+    });
+    $('use-jd').addEventListener('click', () => {
+      if (state.answerTask !== 'jd' || state.busy) return;
+      $('current-jd').value = state.answer;
+      selectTask('screen');
+      message('已设为当前 JD。请上传简历，再点击“打分并排序”。');
+    });
+    $('copy-result').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(state.answer); message('结果已复制。'); }
+      catch { message('浏览器未允许自动复制。请选中右侧结果，再按 Ctrl+C 复制。',true); }
+    });
+    updateControls();
+    api('/api/config').then(config => { renderConfig(config,true); updateControls(); }).catch(error => { message(error.message + ' 请确认招聘版启动窗口仍在运行，然后刷新本页。',true); });
+  </script>
+</body>
+</html>

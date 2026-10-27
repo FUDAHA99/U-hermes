@@ -19,6 +19,10 @@ on:
         description: 'Build against upstream latest instead of the pinned versions'
         type: boolean
         default: false
+      windows_only:
+        description: 'Build only the Windows test package'
+        type: boolean
+        default: false
 
 env:
   # Canary runs take upstream HEAD; releases take the pins in versions.env.
@@ -131,7 +135,7 @@ jobs:
           $env:HERMES_NIX_BUILD = "1"
           $pythonExe = "runtime/python-win-x64/python.exe"
           & "runtime/uv/uv.exe" venv "hermes/.venv" --python $pythonExe
-          & "runtime/uv/uv.exe" pip install "hermes/hermes-agent[pty,mcp,cron,messaging]" --python "hermes/.venv/Scripts/python.exe"
+          & "runtime/uv/uv.exe" pip install "hermes/hermes-agent[pty,mcp,cron,messaging]" -r recruit/requirements.txt --python "hermes/.venv/Scripts/python.exe"
           if ($LASTEXITCODE -ne 0) { Write-Error "hermes-agent install failed"; exit 1 }
 
           # Isolate the bundled interpreter from any Python on the user's machine.
@@ -148,6 +152,11 @@ jobs:
             (Join-Path $venv "Lib\site-packages"), (Join-Path $venv "Scripts"), $venv, "import site"
           ) -join "`r`n" | Set-Content "hermes/.venv/Scripts/$pyTag._pth" -Encoding ascii
           Write-Host "Wrote $pyTag._pth into the venv"
+
+          # The pinned RapidOCR wheel carries all models; fail the build if a
+          # model is missing/corrupt or its native CPU runtime cannot initialize.
+          & "hermes/.venv/Scripts/python.exe" scripts/check_recruit_ocr.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "Offline OCR verification failed"; exit 1 }
 
           # Create portable hermes.cmd wrapper (hermes.exe breaks when drive letter changes)
           '@echo off' + "`n" + '"%~dp0python.exe" -m hermes_cli.main %*' | Set-Content "hermes/.venv/Scripts/hermes.cmd" -Encoding ascii
@@ -270,6 +279,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "prepare-webui test failed"; exit 1 }
           & $py scripts/tests/test_prune_stale_files.py
           if ($LASTEXITCODE -ne 0) { Write-Error "prune stale files test failed"; exit 1 }
+          & $py scripts/tests/test_recruit_skills.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_recruit_skills failed"; exit 1 }
+          & $py scripts/tests/test_recruit_core.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_recruit_core failed"; exit 1 }
+          & $py scripts/tests/test_recruit_http.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_recruit_http failed"; exit 1 }
+          & $py scripts/tests/test_recruit_ocr.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_recruit_ocr failed"; exit 1 }
+          & $py scripts/tests/test_recruit_pdf_guard.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_recruit_pdf_guard failed"; exit 1 }
+          & $py scripts/tests/test_recruit_ui.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_recruit_ui failed"; exit 1 }
+          & $py scripts/tests/test_recruit_engine.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_recruit_engine failed"; exit 1 }
           & $py scripts/tests/test_batch_parse.py
           if ($LASTEXITCODE -ne 0) { Write-Error "batch parse test failed"; exit 1 }
           & $py scripts/tests/test_remove_old_host_copy.py
@@ -320,6 +343,11 @@ jobs:
           # v stripped because it goes inside the filename.
           $label = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "0.0.0-ci" }
           Set-Content -Path "portable/VERSION" -Value $label -Encoding ascii
+          @(
+            "Commit: $env:GITHUB_SHA",
+            "Build: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "Canary: $env:CANARY"
+          ) | Set-Content "portable/BUILD-INFO.txt" -Encoding ascii
           $zipName = "u-hermes-portable-windows-v${version}.zip"
           # Compress-Archive has no exclude list, so anything sitting in
           # portable/ ships. The launchers now keep their npm and uv download
@@ -348,6 +376,8 @@ jobs:
           # hidden. Plus the stored lists of releases that shipped without one.
           python portable/scripts/prune-stale-files.py --add-to-zip $zipName $label tools/release-manifests
           if ($LASTEXITCODE -ne 0) { Write-Error "could not add the release file list"; exit 1 }
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zipName" | Set-Content "$zipName.sha256" -Encoding ascii
           echo "ARTIFACT=$zipName" >> $env:GITHUB_ENV
 
       - name: Verify the packaged artifact
@@ -398,6 +428,12 @@ jobs:
           if (-not (Test-Path $py)) { Write-Error "the download has no Python at hermes/.venv/Scripts/python.exe"; exit 1 }
           & $py -c "import hermes_cli.main, agent, gateway; print('imports OK from the extracted download')"
           if ($LASTEXITCODE -ne 0) { Write-Error "the extracted package cannot import the engine"; exit 1 }
+
+          # Rebuild interpreter paths as the launcher does after moving drives,
+          # then verify the models and app-local VC DLLs from the extracted zip.
+          & (Join-Path $work "scripts\fix-portable-paths.ps1") -VenvDir (Join-Path $work "hermes\.venv") -RuntimeDir (Join-Path $work "runtime") -AgentDir (Join-Path $work "hermes\hermes-agent")
+          & $py (Join-Path $work "scripts\check_recruit_ocr.py")
+          if ($LASTEXITCODE -ne 0) { Write-Error "the extracted package has no working offline OCR"; exit 1 }
 
           # Somebody who never opens the repo has to find instructions inside
           # the zip: the repo README is not packaged and never has been.
@@ -587,6 +623,18 @@ jobs:
 
           Write-Host "Packaged artifact verified."
 
+      - name: Upload Windows test package
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: u-hermes-portable-windows-${{ github.run_id }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
       - name: Upload to Release
         # Never from a canary: one dispatched on a tag ref would otherwise put
         # an untested upstream-latest build into that tag's release.
@@ -633,6 +681,7 @@ jobs:
             查看 commit 记录了解详情。
 
   portable-mac:
+    if: github.event_name != 'workflow_dispatch' || inputs.windows_only != true
     # macOS fails on purpose at "Verify the packaged artifact" until it ships a
     # relocatable Python (see README). That made every run red, so the
     # 2026-09-21 canary -- which also failed on Windows, over real upstream
@@ -763,6 +812,14 @@ jobs:
           "$PY" scripts/tests/test_version_check.py
           "$PY" scripts/tests/test_upstream_tweaks.py
           "$PY" scripts/tests/test_launcher_env.py
+          "$PY" scripts/tests/test_recruit_skills.py
+          "$PY" scripts/tests/test_recruit_core.py
+          "$PY" scripts/tests/test_recruit_http.py
+          "$PY" scripts/check_recruit_ocr.py
+          "$PY" scripts/tests/test_recruit_ocr.py
+          "$PY" scripts/tests/test_recruit_pdf_guard.py
+          "$PY" scripts/tests/test_recruit_ui.py
+          "$PY" scripts/tests/test_recruit_engine.py
           "$PY" scripts/tests/test_prepare_webui.py
           "$PY" scripts/tests/test_prune_stale_files.py
           "$PY" scripts/tests/test_remove_old_host_copy.py

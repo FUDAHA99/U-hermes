@@ -1,0 +1,7 @@
+{
+  "model": "deepseek-flash",
+  "limits": {"screen": 300, "qa": 800, "jd": 100, "interview": 100},
+  "max_tokens": 4096,
+  "allow_tools": false,
+  "ocr_enabled": true
+}

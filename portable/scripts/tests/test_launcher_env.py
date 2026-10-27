@@ -61,7 +61,7 @@ def assignment(line, var):
 
 
 # What makes a launcher start the engine at all.
-RUNS_ENGINE = re.compile(r"hermes_cli|hermes\.cmd|hermes\.exe|HERMES_BIN|hermes-web-ui", re.I)
+RUNS_ENGINE = re.compile(r"hermes_cli|hermes\.cmd|hermes\.exe|HERMES_BIN|hermes-web-ui|recruit-server\.py", re.I)
 
 
 def test_each_home_on_the_stick_keeps_its_locks_there_too():
@@ -100,7 +100,7 @@ def test_every_launcher_that_runs_the_engine_sets_a_home():
 
 # Loads or reinstalls the engine: a stale module there is imported, or built
 # into the new install's RECORD, where prune-stale-files.py may not touch it.
-ENGINE_CALL = re.compile(r"hermes_cli|pip install .*hermes-agent|%HERMES_BIN%|hermes\.cmd", re.I)
+ENGINE_CALL = re.compile(r"hermes_cli|pip install .*hermes-agent|%HERMES_BIN%|hermes\.cmd|recruit-server\.py", re.I)
 PRUNE_CALL = re.compile(r"prune-stale-files\.py|call :PRUNE_STALE", re.I)
 
 

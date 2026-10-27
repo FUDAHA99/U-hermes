@@ -214,3 +214,87 @@ npm 版本检查（账户菜单里的「更新」会装 `@latest`，再以隐藏
 - npm 安装日志落到 `data\logs\npm-install.log`
 - 日志轮转上限（报告里记过一个 4.96 GB 的单行重复日志）
 - 版本检查在 release-zip 式安装上读不到引擎版本（没有 `.git`）。要补得让 CI 在构建时把实际装上的版本写进一个 lock 文件
+
+
+## 招聘版维护
+
+`Windows-Recruit.bat` / `Recruit-Start.sh` 启动独立工作台，入口为
+`scripts/recruit-server.py`。它调用同一锁定版 Hermes `AIAgent`，不修改上游源码，
+也不运行通用网页界面、Ekko 或网关。每个请求在 `data/recruit/runs/` 的临时
+`HERMES_HOME` 内运行；独立的配置、公司资料、Key 和月度 SQLite 用量留在
+`data/recruit/`，升级不要覆盖它。HR 指南见 [RECRUIT.md](RECRUIT.md)。
+
+技能源在 `portable/recruit/skills/`，启动时预装到招聘版技能目录；每次按所选任务
+直接注入完整技能与公司资料，无需给模型开文件工具。PDF / OCR 依赖固定在
+`portable/recruit/requirements.txt`，Windows CI 和两个 setup 入口都安装它。
+
+不要只验证 `enabled_toolsets=[]`：锁定版引擎仍有系统级配置覆盖、依赖懒安装、
+额外总结请求等路径。`worker_env` 和生成的运行配置隔离这些入口；
+`recruit_worker.install_call_budget` 对所有实际 completion 调用计数，
+包括重建客户端，默认最多一次且 SDK 重试为零。更换引擎时必须通过
+`test_recruit_engine.py` 的真实引擎/SDK contract 测试。该测试用 MockTransport，
+不访问网络、不使用真实 Key，但会验证无模型工具调用或依赖懒安装、401/429/500 不重试
+及恶意 terminal 调用被阻止。
+
+CI 的显式测试列表已加入 `test_recruit_skills.py`、`test_recruit_core.py`、
+`test_recruit_http.py`、`test_recruit_engine.py`、`test_recruit_ocr.py`、
+`test_recruit_pdf_guard.py`、`test_recruit_ui.py`。用打包解释器执行它们；HTTP
+测试需要能绑定回环地址。Linux 测试不能代替 Windows `cmd.exe`、PowerShell
+和移动盘符实测。`docs/RECRUIT*.md` 与 `portable/recruit/RECRUIT*.md` 保持一致，
+后者才会进入便携包。
+
+
+### 本地扫描件识别
+
+`recruit_core.extract_upload` 仍是受限上传入口。PDF 逐页先读取文字层，
+至少 80 个 `str.isalnum()` 字符（含汉字、其他字母和数字，不含空白、标点）
+时直接采用；不足才惰性导入 `scripts/recruit_ocr.py`，用 PDFium 渲染该页后识别。
+这是按页的启发式判断：文字已经足够的页不会额外识别页内图片区域，也不保证分栏
+顺序或文字完整。每个 OCR 页 / 图片至少需要 40 个上述字符，否则整份文件失败；
+不会忽略失败页并拿剩余文字评分。上传和 OCR 不经过额度预扣或模型调用。
+
+OCR 默认开启，`data/recruit/config.json` 中 `ocr_enabled: false` 可关闭；
+缺少这个字段的旧配置按开启读取，升级不覆盖客户配置。`recruit_ocr.py` 使用
+RapidOCR 的 ONNX Runtime CPU 后端，三份中文模型由固定版本 wheel 随包携带。
+`recruit/ocr-models.json` 记录 wheel 和模型 SHA-256；`scripts/check_recruit_ocr.py`
+在安装 / 构建时验证模型并实际初始化推理会话。模型路径由安装位置解析，上传不能
+指定路径；运行时缺模型或校验失败直接提示修复，不能联网补下载。所有处理均在本
+项目适配层完成，不修改 RapidOCR、PDFium 或 Hermes 上游源码。
+
+`recruit_ocr.py` 在像素解码前检查图片尺寸：每张最多 2000 万像素，单边最多
+20000 像素；扫描 PDF 还通过 `recruit_pdf_guard.py` 检查蒙版、Pattern、Type3
+字形、内联图片等渲染资源，限制总像素、对象数及嵌套深度。进入 OCR
+的图片最长边不超过 1600 像素，PDF 渲染不超过 150 DPI。OCR 每个文件只建立一次
+模型会话，逐页串行并释放位图，推理使用 CPU 单线程、行识别批量为 1。照片先应用
+EXIF 方向与阴影归一化；检测框矫正尽力处理轻微倾斜，严重侧拍和横置 90° 的照片
+仍需使用者摆正，不能把演示样例通过当作所有照片都能识别的保证。
+
+`scripts/recruit_limits.py` 在文档子进程解析前设置 1.5 GiB 资源上限：Unix
+使用 `RLIMIT_AS` / `RLIMIT_CPU`，Windows 使用进程 Job Object 内存和 CPU 限制，
+限制安装失败也不能继续解析。每份文件的父进程墙钟超时及子进程 CPU 上限均为
+180 秒。地址空间 / 进程内存上限不等于实测峰值 RSS。文档子进程还通过 Python
+审计钩子禁止网络和启动外部程序；这是资源约束及离线防护，不是完整的操作系统
+安全沙箱。原件、解码图和正文都只在内存中，正常结束或超时终止后清理请求临时目录。
+
+`test_recruit_ocr.py` 覆盖文字层优先、真实扫描 / 混合 PDF / 手机照片、格式与像素
+限制、离线模型校验、OCR 关闭和失败不计用量；`test_recruit_pdf_guard.py` 检查
+图片和蒙版在解码前被拒绝及合法资源图；`test_recruit_ui.py` 调用同目录
+`recruit_ui_contract.js` 检查上传状态、预览校正及评分请求；优先使用便携包内 Node，
+也支持 PATH 中的 Node，CI 缺少 Node 会失败。
+Windows 的资源约束、DLL 加载和移动盘符仍需在目标平台实测，Linux 成功不能替代。
+
+在仓库根目录用打包解释器测量（不需要 Key，不调用模型服务）：
+
+```bat
+portable\hermes\.venv\Scripts\python.exe tools\benchmark_recruit_ocr.py --repeats 3
+```
+
+Linux 使用兼容的隔离解释器运行 `python tools/benchmark_recruit_ocr.py --repeats 3`。
+每个样本都启动新受限进程，覆盖依赖导入、模型哈希校验、渲染和识别，输出各次
+耗时、墙钟耗时中位数和整进程峰值 RSS（Windows 为 PeakWorkingSetSize）。应同时
+记录 CPU、操作系统及 Python / 依赖版本；更换模型、分辨率或线程设置后重测，
+不可将资源上限当成性能数据。
+
+固定版本选型、Windows 本地 VC DLL、依赖体积、许可和本机性能数据见
+[`portable/recruit/OCR-NOTICES.md`](../portable/recruit/OCR-NOTICES.md)。完整便携包
+不需要在使用时下载模型；模型/运行库修复只能在管理员显式运行 setup 时进行。

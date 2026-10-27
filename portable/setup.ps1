@@ -371,7 +371,15 @@ function Install-Dependencies {
     $venvPython = Join-Path $venvDir "Scripts\python.exe"
 
     if ((Test-Path $venvPython) -and -not $Force) {
-        Write-Step "OK" "Virtual environment already exists." "Green"
+        # An older portable installation can have Python but no OCR models.
+        Invoke-Native { & $venvPython "$scriptDir\scripts\check_recruit_ocr.py" }
+        if ($LASTEXITCODE -ne 0) {
+            Invoke-Native { & $UvExe pip install --reinstall-package rapidocr --reinstall-package msvc-runtime -r "$scriptDir\recruit\requirements.txt" --python $venvPython } | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Recruit OCR dependency installation failed" }
+            Invoke-Native { & $venvPython "$scriptDir\scripts\check_recruit_ocr.py" }
+            if ($LASTEXITCODE -ne 0) { throw "Offline OCR model verification failed" }
+        }
+        Write-Step "OK" "Virtual environment and offline OCR already installed." "Green"
         return
     }
 
@@ -406,10 +414,14 @@ function Install-Dependencies {
     $env:HERMES_NIX_BUILD = "1"
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $UvExe pip install "$AgentDir[pty,mcp,cron,messaging]" --python $venvPython 2>&1 | ForEach-Object {
+    & $UvExe pip install "$AgentDir[pty,mcp,cron,messaging]" -r "$scriptDir\recruit\requirements.txt" --python $venvPython 2>&1 | ForEach-Object {
         if ($_ -match "error|Error|ERROR") { Write-Host "    $_" -ForegroundColor Red }
     }
+    $installExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
+    if ($installExit -ne 0) { throw "Hermes / Recruit dependency installation failed" }
+    Invoke-Native { & $venvPython "$scriptDir\scripts\check_recruit_ocr.py" }
+    if ($LASTEXITCODE -ne 0) { throw "Offline OCR model verification failed" }
 
     # Verify installation
     if (Test-Path $venvPython) {

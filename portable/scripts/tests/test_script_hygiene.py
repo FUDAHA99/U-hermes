@@ -61,7 +61,7 @@ SKIP_PATHS = {
 # ...except this one, which the release job asserts is inside the zip.
 SKIP_EXCEPTIONS = {"portable/data/config.yaml.default"}
 SKIP_NAMES = {"__pycache__", ".git", "node_modules"}
-SKIP_EXT = {".png", ".jpg", ".jpeg", ".ico", ".zip", ".db", ".pyc", ".exe", ".svg"}
+SKIP_EXT = {".png", ".jpg", ".jpeg", ".ico", ".zip", ".db", ".pyc", ".exe", ".svg", ".pdf", ".docx"}
 
 # What .gitattributes has to keep pinning, and to what.
 EOL_RULES = {

@@ -102,6 +102,14 @@ Working on the project itself — the sync-to-instance loop, what CI enforces
 and why, and the traps that have cost real time here — is in
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
+### 招聘版（Recruit Edition）
+
+双击便携包内的 `Windows-Recruit.bat`，进入独立的中文招聘工作台：生成 JD、批量简历打分排序、面试题和候选人问答。默认 `deepseek-flash`，填写客户自己的 DeepSeek Key；默认每月 300 份简历评分、800 次问答，智能体命令和文件工具关闭。原通用版入口不变。
+
+HR 操作步骤见 [招聘版使用说明](docs/RECRUIT.md)，现场演示见 [五分钟演示脚本](docs/RECRUIT-DEMO.md)。公司资料和演示简历全部虚构。
+
+支持扫描 / 混合 PDF 和 JPG、PNG、WEBP、BMP 图片简历，本地离线 OCR 默认开启，识别不消耗模型额度；HR 可在评分前预览并校正文字。完整便携包自带模型，旧 `.doc` 请另存为 DOCX 或 PDF。
+
 ---
 
 ## Features

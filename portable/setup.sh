@@ -259,7 +259,12 @@ install_dependencies() {
     # the same check again. Nothing in the tree ever sets FORCE, so that was
     # a permanent dead end.
     if [ -z "$FORCE" ] && [ -x "$venv_python" ]        && "$venv_python" -c "import sys" >/dev/null 2>&1; then
-        ok "Virtual environment already exists."
+        # Upgrade an existing working environment when OCR was not yet shipped.
+        if ! "$venv_python" "$SCRIPT_DIR/scripts/check_recruit_ocr.py"; then
+            "$uv_exe" pip install --reinstall-package rapidocr -r "$SCRIPT_DIR/recruit/requirements.txt" --python "$venv_python"
+            "$venv_python" "$SCRIPT_DIR/scripts/check_recruit_ocr.py"
+        fi
+        ok "Virtual environment and offline OCR already installed."
         return
     fi
     if [ -e "$venv_dir" ]; then
@@ -290,11 +295,13 @@ install_dependencies() {
     # No `| tail -5`: a pipeline reports the exit status of its LAST command,
     # so `set -e` could not see a failed install and setup.sh went on to
     # report success over a half-built venv.
-    if ! "$uv_exe" pip install "$agent_dir[pty,mcp,cron,messaging]" --python "$venv_python"; then
+    if ! "$uv_exe" pip install "$agent_dir[pty,mcp,cron,messaging]" -r "$SCRIPT_DIR/recruit/requirements.txt" --python "$venv_python"; then
         unset UV_INDEX_URL
         err "Installing the Hermes Agent packages failed (output above)."
         return 1
     fi
+
+    "$venv_python" "$SCRIPT_DIR/scripts/check_recruit_ocr.py"
 
     # Verify
     if "$venv_python" -c "import agent; print('ok')" 2>/dev/null | grep -q "ok"; then
