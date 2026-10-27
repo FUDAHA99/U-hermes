@@ -1,7 +1,7 @@
 # 本地 OCR 依赖、模型与许可
 
 招聘版使用 RapidOCR 3.4.2、ONNX Runtime 1.23.2（CPU）、PDFium / pypdfium2
-5.14.0、Pillow 12.0.0 和 OpenCV 4.12.0.88。所有推理和图片处理在本机进行，
+5.14.0、Pillow 12.3.0（与锁定版 Hermes 一致）和 OpenCV 4.12.0.88。所有推理和图片处理在本机进行，
 不使用云 OCR，也不需要另外安装 tesseract、Ghostscript 或 LibreOffice。
 
 ## 选型
@@ -56,7 +56,7 @@ ZIP deflate-6 约 **91.19 MiB**，含模型及 VC DLL。包含共享基础包的
 | PP-OCRv4 检测、识别模型与 v2 方向分类模型 | PaddleOCR / Baidu 模型，经 RapidOCR 转为 ONNX；Apache-2.0，模型版权属于上游权利人，U-Hermes 未改模型 |
 | ONNX Runtime 1.23.2 | MIT，Microsoft；保留 wheel 中的 LICENSE 与第三方通知 |
 | pypdfium2 5.14.0 | Apache-2.0 或 BSD-3-Clause；PDFium 为 BSD 风格许可，wheel 附带各原生依赖的 BUILD_LICENSES |
-| Pillow 12.0.0 | MIT-CMU；另有内含图片编解码库许可 |
+| Pillow 12.3.0 | MIT-CMU；另有内含图片编解码库许可 |
 | OpenCV 4.12.0.88 | Apache-2.0；保留 LICENSE-3RD-PARTY.txt，包含 FFmpeg 等分发组件条款 |
 | NumPy 2.2.6 | BSD-3-Clause；wheel 中 BLAS / 编译器运行库另有许可与运行库例外 |
 | Shapely / GEOS | Shapely BSD-3-Clause；所含 GEOS LGPL-2.1-or-later，以原 wheel 动态库形式保留 |
@@ -73,6 +73,9 @@ ZIP deflate-6 约 **91.19 MiB**，含模型及 VC DLL。包含共享基础包的
 此清单不改变上游许可证。未打包额外字体、真实简历、第三方样例或联网识别服务。
 
 ## 本机性能记录（2026-10-26）
+
+以下是 Pillow 12.0.0 环境的历史测量；Windows 完整构建将共享依赖对齐为
+Hermes 要求的 Pillow 12.3.0，实际性能以该构建在目标机器上的复测为准。
 
 Linux x86_64 / i5-10210U / Python 3.13.16；单线程 CPU，逐份新进程，
 包含导入、模型校验、渲染及识别。下表耗时为三次墙钟中位数；峰值为三次

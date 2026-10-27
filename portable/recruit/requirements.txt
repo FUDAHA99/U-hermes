@@ -5,7 +5,8 @@ pypdf==6.21.2
 rapidocr @ https://files.pythonhosted.org/packages/3c/83/5b8c8075954c5b61d938b8954710d986134c4ca7c32a841ad7d8c844cf6c/rapidocr-3.4.2-py3-none-any.whl#sha256=17845fa8cc9a20a935111e59482f2214598bba1547000cfd960d8924dd4522a5
 onnxruntime==1.23.2
 pypdfium2==5.14.0
-Pillow==12.0.0
+# Shared with the pinned Hermes engine; both must resolve in one environment.
+Pillow==12.3.0
 opencv-python==4.12.0.88
 numpy==2.2.6
 # App-local VC DLLs beside the venv interpreter; no administrator/system install.
