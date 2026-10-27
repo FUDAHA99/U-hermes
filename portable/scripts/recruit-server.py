@@ -58,7 +58,10 @@ def worker_env(home):
             "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
             "https_proxy", "http_proxy", "all_proxy", "no_proxy"}
     env = {k: v for k, v in os.environ.items() if k in keep}
-    env.update(HERMES_HOME=str(home), HERMES_GATEWAY_LOCK_DIR=str(home / "gateway-locks"),
+    # pathlib needs USERPROFILE on Windows and HOME on Unix, even with an
+    # explicit HERMES_HOME. Keep generic home lookups inside this request too.
+    env.update(HOME=str(home), USERPROFILE=str(home),
+               HERMES_HOME=str(home), HERMES_GATEWAY_LOCK_DIR=str(home / "gateway-locks"),
                HERMES_MANAGED_DIR=str(home / "managed-empty"),
                HERMES_SAFE_MODE="1", HERMES_ENABLE_PROJECT_PLUGINS="0", HERMES_DISABLE_LAZY_INSTALLS="1",
                HERMES_SINGLE_QUERY_SESSION="1", HERMES_API_TIMEOUT="90",

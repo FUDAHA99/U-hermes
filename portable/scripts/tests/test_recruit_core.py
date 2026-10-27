@@ -214,6 +214,21 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["text"], "虚构简历")
 
+    def test_worker_home_resolves_inside_request_on_both_platforms(self):
+        import ntpath
+        import posixpath
+        with patch.dict(os.environ, {"HOME": "/host-home", "USERPROFILE": "C:\\host-profile",
+                                     "HOMEDRIVE": "C:", "HOMEPATH": "\\host-profile"}):
+            env = server.worker_env(self.root)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(ntpath.expanduser("~"), str(self.root))
+            self.assertEqual(posixpath.expanduser("~"), str(self.root))
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", "from pathlib import Path; print(Path.home())"],
+            cwd=self.root, env=env, capture_output=True, text=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(result.stdout.strip()), self.root)
+
     def test_shutdown_terminates_worker_and_cleans_temporary_data(self):
         app = server.RecruitApp(self.root)
         launched = threading.Event()
